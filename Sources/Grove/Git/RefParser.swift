@@ -101,10 +101,11 @@ enum LogParser {
         "%an",  // 作者名
         "%ae",  // 作者邮箱
         "%aI",  // 作者日期，ISO 8601 严格格式
-        "%s"    // 标题（提交信息第一行）
+        "%s",   // 标题（提交信息第一行）
+        "%D"    // 指向这个提交的引用（分支、标签、HEAD）
     ].joined(separator: "\u{1F}") + "\u{1E}"
 
-    static func parse(_ output: String) -> [CommitSummary] {
+    static func parse(_ output: String, remotes: [String] = []) -> [CommitSummary] {
         output.components(separatedBy: "\u{1E}").compactMap { record in
             // git 会在每条记录后面额外加一个换行，去掉它才不会污染第一个字段。
             let cleaned = record.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -113,14 +114,18 @@ enum LogParser {
             let fields = cleaned.components(separatedBy: "\u{1F}")
             guard fields.count >= 6 else { return nil }
 
-            let parents = fields[1].split(separator: " ").filter { !$0.isEmpty }
+            let parents = fields[1].split(separator: " ")
+                .filter { !$0.isEmpty }
+                .map(String.init)
             return CommitSummary(
                 oid: fields[0],
                 subject: fields[5],
                 authorName: fields[2],
                 authorEmail: fields[3],
                 date: DateParsing.iso8601(fields[4]) ?? Date(timeIntervalSince1970: 0),
-                parentCount: parents.count
+                parents: parents,
+                // `%D` 是第 7 个字段。老的日志格式没有它，缺了就是没有引用。
+                refs: fields.count >= 7 ? CommitRef.parse(fields[6], remotes: remotes) : []
             )
         }
     }

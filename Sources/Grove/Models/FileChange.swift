@@ -117,6 +117,42 @@ enum RepositoryOperation: String, Sendable, Hashable {
     }
 }
 
+/// 指向某个提交的引用。
+struct CommitRef: Hashable, Sendable, Identifiable {
+    enum Kind: Sendable, Hashable { case head, localBranch, remoteBranch, tag }
+
+    var name: String
+    var kind: Kind
+    var id: String { "\(kind)-\(name)" }
+
+    /// `%D` 给的是逗号分隔的一串，形如
+    /// `HEAD -> main, origin/main, tag: v1.0`。
+    ///
+    /// `remotes` 是仓库里已配置的远端名。**必须拿它来判断，不能看有没有斜杠** ——
+    /// `feature/login` 是个再正常不过的本地分支名，按斜杠判会把它错标成远端分支。
+    /// 判断时要连斜杠一起比，否则远端 `orig` 会先命中 `origin/main`。
+    static func parse(_ raw: String, remotes: [String] = []) -> [CommitRef] {
+        raw.components(separatedBy: ",").compactMap { piece in
+            var token = piece.trimmingCharacters(in: .whitespaces)
+            guard !token.isEmpty else { return nil }
+
+            if token.hasPrefix("tag: ") {
+                return CommitRef(name: String(token.dropFirst(5)), kind: .tag)
+            }
+            // `HEAD -> main` 是一个条目，表示 HEAD 指向 main。
+            // 界面上要显示成分支 main 并标出 HEAD 在这儿。
+            if token.hasPrefix("HEAD -> ") {
+                return CommitRef(name: String(token.dropFirst(8)), kind: .head)
+            }
+            if token == "HEAD" {
+                return CommitRef(name: "HEAD", kind: .head)
+            }
+            let isRemote = remotes.contains { token.hasPrefix("\($0)/") }
+            return CommitRef(name: token, kind: isRemote ? .remoteBranch : .localBranch)
+        }
+    }
+}
+
 /// 历史筛选条件。对应 `git log` 的几个过滤参数。
 struct LogQuery: Sendable, Hashable {
     /// 在提交信息里搜。对应 `--grep`。
@@ -179,10 +215,15 @@ struct CommitSummary: Identifiable, Hashable, Sendable {
     var authorName: String
     var authorEmail: String
     var date: Date
-    /// 父提交个数 > 1 即合并提交。
-    var parentCount: Int
+    /// 父提交的 oid。画提交图要靠它连线，光有个数不够。
+    /// 第一个父提交是「主线」——合并时它代表被合入的那条分支的延续。
+    var parents: [String]
+    /// 指向这个提交的引用（分支、标签、HEAD）。来自 `%D`。
+    /// 没有它的话，图上分不出哪条道是 main。
+    var refs: [CommitRef]
 
     var id: String { oid }
     var shortOID: String { String(oid.prefix(7)) }
-    var isMerge: Bool { parentCount > 1 }
+    var parentCount: Int { parents.count }
+    var isMerge: Bool { parents.count > 1 }
 }

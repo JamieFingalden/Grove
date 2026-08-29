@@ -125,8 +125,13 @@ struct HistoryView: View {
                     get: { model.selectedCommit },
                     set: { model.selectedCommit = $0 }
                 )) {
-                    ForEach(model.commits) { commit in
-                        CommitRow(commit: commit)
+                    ForEach(Array(model.commits.enumerated()), id: \.element.oid) { index, commit in
+                        CommitRow(
+                            commit: commit,
+                            graphRow: model.showsGraph && index < model.graph.rows.count
+                                ? model.graph.rows[index] : nil,
+                            laneCount: model.graph.laneCount
+                        )
                             .tag(commit.oid)
                             .contextMenu {
                                 Button("复制完整 SHA") { SystemActions.copyToPasteboard(commit.oid) }
@@ -178,15 +183,25 @@ struct HistoryView: View {
 
 private struct CommitRow: View {
     let commit: CommitSummary
+    /// nil 表示这一行不画图（筛选激活时）。
+    var graphRow: CommitGraphLayout.Row?
+    var laneCount: Int
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: commit.isMerge ? "arrow.triangle.merge" : "circle.fill")
-                .font(.system(size: commit.isMerge ? 11 : 6))
-                .foregroundStyle(commit.isMerge ? Color.purple : Color.secondary)
-                .frame(width: 14, height: 14)
+            if let graphRow {
+                CommitGraphCell(row: graphRow, laneCount: laneCount)
+            } else {
+                // 不画图时仍然给个圆点，行的视觉结构保持一致。
+                Image(systemName: commit.isMerge ? "arrow.triangle.merge" : "circle.fill")
+                    .font(.system(size: commit.isMerge ? 11 : 6))
+                    .foregroundStyle(commit.isMerge ? Color.purple : Color.secondary)
+                    .frame(width: 14, height: 14)
+            }
 
             VStack(alignment: .leading, spacing: 2) {
+                if !commit.refs.isEmpty { RefBadges(refs: commit.refs) }
+
                 Text(commit.subject)
                     .font(.system(size: 12))
                     .lineLimit(2)
@@ -239,5 +254,148 @@ enum RelativeDate {
     /// 后者是引用类型、非 Sendable，共享静态实例在 Swift 6 下过不了编译。
     static func format(_ date: Date) -> String {
         date.formatted(.relative(presentation: .numeric, unitsStyle: .narrow))
+    }
+}
+
+// MARK: - 提交图
+
+/// 一行里的图形部分。
+///
+/// 每行自己画自己那一段，而不是在整个列表上盖一张大画布 ——
+/// List 是虚拟化的，只有可见行会被渲染，大画布拿不到全局坐标。
+private struct CommitGraphCell: View {
+    let row: CommitGraphLayout.Row
+    let laneCount: Int
+
+    /// 道间距和圆点半径。行高固定，圆点必须落在垂直正中，
+    /// 否则上下两半的线接不上。
+    private let laneWidth: CGFloat = 14
+    private let dotRadius: CGFloat = 3.5
+
+    private var width: CGFloat {
+        CGFloat(max(laneCount, 1)) * laneWidth
+    }
+
+    var body: some View {
+        Canvas { context, size in
+            let midY = size.height / 2
+
+            func x(_ lane: Int) -> CGFloat {
+                CGFloat(lane) * laneWidth + laneWidth / 2
+            }
+
+            // 上半行：从行顶连到中线。
+            for link in row.incoming {
+                var path = Path()
+                path.move(to: CGPoint(x: x(link.from), y: 0))
+                if link.from == link.to {
+                    path.addLine(to: CGPoint(x: x(link.to), y: midY))
+                } else {
+                    // 拐弯画成曲线。直角折线在密集的图上会糊成一片网格，
+                    // 曲线更容易一眼跟住某一条线。
+                    path.addCurve(
+                        to: CGPoint(x: x(link.to), y: midY),
+                        control1: CGPoint(x: x(link.from), y: midY * 0.6),
+                        control2: CGPoint(x: x(link.to), y: midY * 0.4)
+                    )
+                }
+                context.stroke(path, with: .color(Self.color(link.color)), lineWidth: 1.6)
+            }
+
+            // 下半行：从中线连到行底。
+            for link in row.outgoing {
+                var path = Path()
+                path.move(to: CGPoint(x: x(link.from), y: midY))
+                if link.from == link.to {
+                    path.addLine(to: CGPoint(x: x(link.to), y: size.height))
+                } else {
+                    path.addCurve(
+                        to: CGPoint(x: x(link.to), y: size.height),
+                        control1: CGPoint(x: x(link.from), y: midY + midY * 0.4),
+                        control2: CGPoint(x: x(link.to), y: midY + midY * 0.6)
+                    )
+                }
+                context.stroke(path, with: .color(Self.color(link.color)), lineWidth: 1.6)
+            }
+
+            // 提交圆点画在最后，盖住穿过它的线。
+            let center = CGPoint(x: x(row.commitLane), y: midY)
+            let radius = row.isMerge ? dotRadius + 1 : dotRadius
+            let dot = Path(ellipseIn: CGRect(
+                x: center.x - radius, y: center.y - radius,
+                width: radius * 2, height: radius * 2
+            ))
+            // 先用背景色描一圈，让圆点从线里「浮」出来。
+            context.stroke(dot, with: .color(Color(nsColor: .textBackgroundColor)), lineWidth: 3)
+            context.fill(dot, with: .color(Self.color(row.color)))
+            // 合并提交画成空心，一眼能跟普通提交区分开。
+            if row.isMerge {
+                let inner = radius - 1.6
+                context.fill(
+                    Path(ellipseIn: CGRect(x: center.x - inner, y: center.y - inner,
+                                           width: inner * 2, height: inner * 2)),
+                    with: .color(Color(nsColor: .textBackgroundColor))
+                )
+            }
+        }
+        .frame(width: width)
+        // 撑满行高，上下两半才接得上。
+        .frame(maxHeight: .infinity)
+    }
+
+    /// 道的配色。刻意避开纯红纯绿 —— 那两个颜色在 diff 里已经有固定含义
+    /// （新增/删除），在图上再用会造成误读。
+    private static let palette: [Color] = [
+        .blue, .purple, .orange, .teal, .pink, .indigo, .brown, .cyan
+    ]
+
+    static func color(_ index: Int) -> Color {
+        palette[abs(index) % palette.count]
+    }
+}
+
+/// 提交上挂着的分支 / 标签。
+private struct RefBadges: View {
+    let refs: [CommitRef]
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(refs.prefix(4)) { ref in
+                HStack(spacing: 2) {
+                    Image(systemName: icon(ref.kind))
+                        .font(.system(size: 7, weight: .bold))
+                    Text(ref.name)
+                        .font(.system(size: 9, weight: .medium))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(tint(ref.kind))
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(tint(ref.kind).opacity(0.14), in: RoundedRectangle(cornerRadius: 3.5))
+            }
+            if refs.count > 4 {
+                Text("+\(refs.count - 4)")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private func icon(_ kind: CommitRef.Kind) -> String {
+        switch kind {
+        case .head: "location.fill"
+        case .localBranch: "arrow.triangle.branch"
+        case .remoteBranch: "cloud"
+        case .tag: "tag.fill"
+        }
+    }
+
+    private func tint(_ kind: CommitRef.Kind) -> Color {
+        switch kind {
+        case .head: .green
+        case .localBranch: .blue
+        case .remoteBranch: .purple
+        case .tag: .orange
+        }
     }
 }

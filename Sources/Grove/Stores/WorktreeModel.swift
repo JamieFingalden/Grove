@@ -18,6 +18,15 @@ final class WorktreeModel: Identifiable {
     var commits: [CommitSummary] = []
     /// 历史筛选条件。改动后由视图调 `reloadHistory()`。
     var logQuery = LogQuery()
+    /// 提交图的布局。跟 `commits` 一起算好，视图直接取用。
+    private(set) var graph = CommitGraphLayout.Graph.empty
+
+    /// 现在能不能画提交图。
+    ///
+    /// 筛选一开就不画：筛过之后看到的是提交的**子集**，相邻两行之间往往
+    /// 没有父子关系，这时候画的连线全是假的 —— 比不画更糟。
+    var showsGraph: Bool { !logQuery.isActive && !graph.rows.isEmpty }
+
     /// 这个仓库出现过的提交身份，填筛选下拉框用。
     var knownAuthors: [CommitAuthor] = []
     var isLoadingHistory = false
@@ -147,8 +156,10 @@ final class WorktreeModel: Identifiable {
         isLoadingHistory = true
         defer { isLoadingHistory = false }
         do {
-            commits = try await git.log(in: path, query: logQuery)
+            commits = try await git.log(in: path, query: logQuery, remotes: repository?.remotes.map(\.name) ?? [])
+            graph = CommitGraphLayout.build(commits)
         } catch {
+            graph = .empty
             // 筛选条件本身不会让 git 报错（空结果就是空结果），
             // 走到这儿基本是仓库还没有任何提交。
             commits = []

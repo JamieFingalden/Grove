@@ -76,8 +76,11 @@ final class LayoutRenderHarness: XCTestCase {
                    size: CGSize(width: 1280, height: 860),
                    to: "/tmp/grove-render-changes.png")
 
+        // 渲染前重新取一次状态：上一次 render 里 RootView 的 .task 会并发地
+        // 再刷一遍，不等它落定就渲染，拿到的可能是刷新中途的空列表。
+        await model.refresh()
         model.selectedCommit = model.commits.first?.oid
-        try await Task.sleep(for: .milliseconds(400))
+        try await Task.sleep(for: .milliseconds(600))
 
         // 「历史」tab 的切换状态是 WorktreeDetailView 内部的 @State，外面设不了。
         // 直接把 HistoryView 放进 NavigationSplitView 的详情栏 —— 之前的 bug 正是
@@ -105,10 +108,20 @@ final class LayoutRenderHarness: XCTestCase {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
             process.arguments = arguments
             process.currentDirectoryURL = root
+            let errorPipe = Pipe()
             process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
+            process.standardError = errorPipe
             try process.run()
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
+            // 非零退出必须炸出来。之前 stderr 丢进 /dev/null 又不看退出码，
+            // seed 中间某步失败时毫无痕迹，最后只看到一个空列表，
+            // 还得去猜是渲染错了还是数据没出来。
+            guard process.terminationStatus == 0 else {
+                throw NSError(domain: "seed", code: Int(process.terminationStatus), userInfo: [
+                    NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) 失败：\(String(decoding: errorData, as: UTF8.self))"
+                ])
+            }
         }
 
         try git(["init", "-q", "-b", "main"])
@@ -126,12 +139,24 @@ final class LayoutRenderHarness: XCTestCase {
         try FileManager.default.createDirectory(at: root.appendingPathComponent("try"), withIntermediateDirectories: true)
         try "目录里的文件\n".write(to: root.appendingPathComponent("try/inner.txt"), atomically: true, encoding: .utf8)
 
+        // 造一段有分叉和合并的历史，提交图才有结构可看。
+        try git(["checkout", "-q", "-b", "feature/login"])
+        try "登录页\n".write(to: root.appendingPathComponent("login.txt"), atomically: true, encoding: .utf8)
+        try git(["add", "-A"]); try git(["commit", "-qm", "feat: 加上登录页"])
+        try "校验\n".write(to: root.appendingPathComponent("valid.txt"), atomically: true, encoding: .utf8)
+        try git(["add", "-A"]); try git(["commit", "-qm", "feat: 加上表单校验"])
+        try git(["checkout", "-q", "main"])
+        try "主干\n".write(to: root.appendingPathComponent("trunk.txt"), atomically: true, encoding: .utf8)
+        try git(["add", "-A"]); try git(["commit", "-qm", "chore: 主干推进"])
+        try git(["merge", "-q", "--no-ff", "feature/login", "-m", "Merge branch 'feature/login'"])
+        try "收尾\n".write(to: root.appendingPathComponent("after.txt"), atomically: true, encoding: .utf8)
+        try git(["add", "-A"]); try git(["commit", "-qm", "docs: 补充说明"])
+
         // 配两个远端，推送按钮才会变成分离式（多远端选择）。
         try git(["remote", "add", "origin", "http://10.0.0.1:8929/internal-group/demo.git"])
         try git(["remote", "add", "github", "https://github.com/example-owner/demo.git"])
 
         // 多建一个工作树，侧边栏才有内容可看。
-        try git(["branch", "feature/login"])
         try git(["worktree", "add", "-q",
                  root.deletingLastPathComponent().appendingPathComponent("\(root.lastPathComponent)-worktrees/feature-login").path,
                  "feature/login"])

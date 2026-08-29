@@ -153,10 +153,15 @@ struct GitClient: Sendable {
         in directory: URL,
         limit: Int = 100,
         revision: String? = nil,
-        query: LogQuery? = nil
+        query: LogQuery? = nil,
+        remotes: [String] = []
     ) async throws -> [CommitSummary] {
         var arguments = ["log", "--format=\(LogParser.format)"]
         arguments.append("--max-count=\(query?.limit ?? limit)")
+        // 拓扑序：把同一条分支的提交聚在一起。默认的时间序会把不同分支的
+        // 提交按时间穿插，画出来的道反复横跳，图根本读不懂。
+        // git 自己的 `--graph` 也是默认开启它的。
+        arguments.append("--topo-order")
 
         if let query {
             // `--grep` / `--author` 默认按正则解释。用户在搜索框里敲 `foo(bar)`
@@ -183,7 +188,7 @@ struct GitClient: Sendable {
         // 空仓库（还没有任何提交）跑 git log 会以非零状态退出。那不是错误，
         // 只是「还没有历史」，返回空数组比抛错更贴合用户预期。
         guard result.isSuccess else { return [] }
-        return LogParser.parse(result.stdout)
+        return LogParser.parse(result.stdout, remotes: remotes)
     }
 
     /// 仓库里出现过的提交人，按出现频次排序。用来填筛选下拉框。
