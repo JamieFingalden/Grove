@@ -1,0 +1,279 @@
+import SwiftUI
+
+struct RootView: View {
+    @Environment(AppModel.self) private var model
+    @State private var sheet: ActiveSheet?
+
+    /// 用一个枚举驱动所有弹窗，而不是给每个 sheet 一个 Bool ——
+    /// 多个 Bool 会出现「两个都为 true」的非法状态，SwiftUI 那时的表现是未定义的。
+    enum ActiveSheet: Identifiable {
+        case newWorktree(RepositoryModel)
+        case createPullRequest(WorktreeModel)
+        case removeWorktree(RepositoryModel, Worktree)
+        case cleanupBranches(RepositoryModel)
+        case rebase(WorktreeModel)
+
+        var id: String {
+            switch self {
+            case .newWorktree(let repository): "new-\(repository.root.path)"
+            case .createPullRequest(let worktree): "pr-\(worktree.identity.path)"
+            case .removeWorktree(_, let worktree): "remove-\(worktree.path.path)"
+            case .cleanupBranches(let repository): "cleanup-\(repository.root.path)"
+            case .rebase(let worktree): "rebase-\(worktree.identity.path)"
+            }
+        }
+    }
+
+    var body: some View {
+        NavigationSplitView {
+            SidebarView(sheet: $sheet)
+                .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 380)
+        } detail: {
+            detail
+        }
+        .toolbar { toolbarContent }
+        .overlay(alignment: .bottom) { failureBanner }
+        .sheet(item: $sheet)
+        .task(id: refreshTrigger) { await refreshSelection() }
+    }
+
+    // MARK: - 详情区
+
+    @ViewBuilder
+    private var detail: some View {
+        if !model.toolsReady {
+            ProgressView("正在准备…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if model.repositories.isEmpty {
+            EmptyRepositoryView()
+        } else {
+            switch model.selection {
+            case .worktree:
+                if let worktree = model.selectedWorktreeModel {
+                    WorktreeDetailView(model: worktree, sheet: $sheet)
+                        // path 变了就当成换了个页面，重建视图内部状态（比如滚动位置、
+                        // 展开的 hunk），否则会看到上一个工作树的残留。
+                        .id(worktree.path)
+                } else {
+                    placeholder
+                }
+            case .pullRequests:
+                if let repository = model.selectedRepository {
+                    PullRequestListView(repository: repository)
+                        .id(repository.root)
+                } else {
+                    placeholder
+                }
+            case nil:
+                placeholder
+            }
+        }
+    }
+
+    private var placeholder: some View {
+        ContentUnavailableView(
+            "选择一个工作树",
+            systemImage: "tree",
+            description: Text("从左侧挑一个工作树查看它的改动和 PR。")
+        )
+    }
+
+    // MARK: - 工具栏
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Button {
+                Task { await FolderPicker.openRepository(into: model) }
+            } label: {
+                Label("打开仓库", systemImage: "folder.badge.plus")
+            }
+            .help("打开一个 git 仓库（⌘O）")
+        }
+
+        ToolbarItemGroup {
+            if let repository = model.selectedRepository {
+                Button {
+                    sheet = .newWorktree(repository)
+                } label: {
+                    Label("新建工作树", systemImage: "plus.rectangle.on.rectangle")
+                }
+                .help("在这个仓库里新建一个工作树")
+
+                Button {
+                    Task { await repository.fetch() }
+                } label: {
+                    Label("抓取", systemImage: "arrow.down.circle")
+                }
+                .help("git fetch --all --prune（⇧⌘F）")
+                .disabled(!repository.hasRemote)
+
+                Button {
+                    Task {
+                        await repository.refresh()
+                        await model.selectedWorktreeModel?.refresh()
+                    }
+                } label: {
+                    Label("刷新", systemImage: "arrow.clockwise")
+                }
+                .help("重新读取仓库状态（⌘R）")
+
+                if repository.isRefreshing || repository.activity != nil {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+        }
+    }
+
+    // MARK: - 错误横幅
+
+    @ViewBuilder
+    private var failureBanner: some View {
+        if !model.failures.isEmpty {
+            VStack(spacing: 8) {
+                ForEach(model.failures) { failure in
+                    FailureBanner(failure: failure) { model.dismiss(failure) }
+                }
+            }
+            .padding(16)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .animation(.snappy, value: model.failures.count)
+        }
+    }
+
+    // MARK: - 选中项变化时刷新
+
+    /// 选中项的稳定标识。`.task(id:)` 靠它判断要不要重跑。
+    private var refreshTrigger: String {
+        switch model.selection {
+        case .worktree(_, let path): "wt:\(path.path)"
+        case .pullRequests(let root): "pr:\(root.path)"
+        case nil: "none"
+        }
+    }
+
+    private func refreshSelection() async {
+        switch model.selection {
+        case .worktree:
+            await model.selectedWorktreeModel?.refresh()
+        case .pullRequests:
+            await model.selectedRepository?.refreshPullRequests()
+        case nil:
+            break
+        }
+    }
+}
+
+// MARK: - Sheet 路由
+
+private extension View {
+    /// 把 `ActiveSheet` 映射到具体的 sheet 视图。集中在一处，
+    /// 避免在 RootView 主体里堆四个 `.sheet` 修饰器。
+    func sheet(item: Binding<RootView.ActiveSheet?>) -> some View {
+        sheet(item: item) { active in
+            switch active {
+            case .newWorktree(let repository):
+                NewWorktreeSheet(repository: repository)
+            case .createPullRequest(let worktree):
+                CreatePullRequestSheet(model: worktree)
+            case .removeWorktree(let repository, let worktree):
+                RemoveWorktreeSheet(repository: repository, worktree: worktree)
+            case .cleanupBranches(let repository):
+                CleanupBranchesSheet(repository: repository)
+            case .rebase(let worktree):
+                RebaseSheet(model: worktree)
+            }
+        }
+    }
+}
+
+// MARK: - 空状态
+
+struct EmptyRepositoryView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "tree")
+                .font(.system(size: 56, weight: .light))
+                .foregroundStyle(.tertiary)
+
+            VStack(spacing: 6) {
+                Text("Grove")
+                    .font(.system(size: 26, weight: .bold, design: .rounded))
+                Text("用工作树并行开发，顺手处理 PR")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Button {
+                Task { await FolderPicker.openRepository(into: model) }
+            } label: {
+                Label("打开仓库…", systemImage: "folder.badge.plus")
+                    .padding(.horizontal, 6)
+            }
+            .controlSize(.large)
+            .buttonStyle(.borderedProminent)
+
+            if let message = model.availability(of: .github).message {
+                Label(message, systemImage: "info.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 8)
+                    .frame(maxWidth: 380)
+                    .multilineTextAlignment(.leading)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(40)
+    }
+}
+
+struct FailureBanner: View {
+    let failure: GroveFailure
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(failure.title)
+                    .font(.callout.weight(.semibold))
+                Text(failure.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    // git 的报错常常有好几行，全展开会把界面顶掉；限高并允许选中复制。
+                    .lineLimit(6)
+                    .textSelection(.enabled)
+            }
+
+            Spacer(minLength: 8)
+
+            Button {
+                SystemActions.copyToPasteboard("\(failure.title)\n\(failure.detail)")
+            } label: {
+                Image(systemName: "doc.on.doc")
+            }
+            .buttonStyle(.borderless)
+            .help("复制错误信息")
+
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(12)
+        .frame(maxWidth: 560, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.separator, lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+    }
+}

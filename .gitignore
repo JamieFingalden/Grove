@@ -1,0 +1,7 @@
+/.build/
+/.swiftpm/
+/dist/*
+!/dist/.gitkeep
+.DS_Store
+.claude/
+.codegraph/

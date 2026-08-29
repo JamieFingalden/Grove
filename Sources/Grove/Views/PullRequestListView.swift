@@ -1,0 +1,851 @@
+import AppKit
+import SwiftUI
+
+struct PullRequestListView: View {
+    @Environment(AppModel.self) private var appModel
+    @Bindable var repository: RepositoryModel
+    /// 进入时默认选中的编号。深链接（从别处跳到某个具体请求）和离屏渲染都要用它 ——
+    /// 选中状态是视图内部的 @State，外面没有别的办法预置。
+    var initialSelection: Int?
+    @State private var selection: Int?
+    @State private var searchText = ""
+    @State private var mergeTarget: PullRequest?
+
+    var body: some View {
+        // 平台都认不出来时，整块换成「怎么接进来」的指引 ——
+        // 这时候列表和详情都没有内容可显示，留着两栏只是浪费地方。
+        if let setup = repository.forgeSetup {
+            ForgeSetupView(repository: repository, setup: setup)
+        } else {
+            splitBody
+        }
+    }
+
+    private var splitBody: some View {
+        HSplitView {
+            list
+                .frame(minWidth: 300, idealWidth: 380, maxWidth: 520, maxHeight: .infinity)
+
+            detail
+                .frame(minWidth: 380, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task {
+            selection = selection ?? initialSelection
+            await repository.refreshPullRequests()
+        }
+        .sheet(item: $mergeTarget) { pullRequest in
+            MergePullRequestSheet(repository: repository, pullRequest: pullRequest)
+        }
+    }
+
+    // MARK: - 列表
+
+    private var list: some View {
+        VStack(spacing: 0) {
+            header
+
+            if let message = repository.pullRequestUnavailableReason {
+                ContentUnavailableView {
+                    Label("\(repository.reviewTerm)不可用", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(message)
+                }
+            } else if repository.pullRequests.isEmpty {
+                ContentUnavailableView {
+                    Label(repository.isRefreshingPullRequests ? "正在加载…" : "没有开放的 PR",
+                          systemImage: "arrow.triangle.pull")
+                } description: {
+                    Text(repository.slug.map { "仓库：\($0)" } ?? "")
+                }
+            } else {
+                List(selection: $selection) {
+                    ForEach(filtered) { pullRequest in
+                        PullRequestRow(
+                            pullRequest: pullRequest,
+                            worktree: worktree(for: pullRequest)
+                        )
+                        .tag(pullRequest.number)
+                        .contextMenu { menu(for: pullRequest) }
+                    }
+                }
+                .listStyle(.inset)
+                .searchable(text: $searchText, placement: .sidebar, prompt: "搜索标题、分支、作者")
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Text(repository.slug ?? repository.name)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Spacer()
+
+            if repository.isRefreshingPullRequests {
+                ProgressView().controlSize(.mini)
+            } else {
+                Button {
+                    Task { await repository.refreshPullRequests() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.borderless)
+                .help("重新加载 PR 列表")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+    }
+
+    private var filtered: [PullRequest] {
+        let query = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !query.isEmpty else { return repository.pullRequests }
+        return repository.pullRequests.filter { pullRequest in
+            pullRequest.title.lowercased().contains(query)
+                || pullRequest.headRefName.lowercased().contains(query)
+                || (pullRequest.author?.login.lowercased().contains(query) ?? false)
+                || String(pullRequest.number).contains(query)
+        }
+    }
+
+    /// 这个 PR 的分支有没有已经检出成本地工作树。有的话就直接给「跳过去」的入口，
+    /// 而不是让用户再建一个（git 也不会允许）。
+    private func worktree(for pullRequest: PullRequest) -> Worktree? {
+        let candidates = [pullRequest.headRefName, "pr-\(pullRequest.number)"]
+        return repository.worktrees.first { worktree in
+            guard let branch = worktree.branch else { return false }
+            return candidates.contains(branch)
+        }
+    }
+
+    // MARK: - 详情
+
+    @ViewBuilder
+    private var detail: some View {
+        Group {
+            if let selection, let pullRequest = repository.pullRequests.first(where: { $0.number == selection }) {
+                PullRequestDetailView(
+                    repository: repository,
+                    pullRequest: pullRequest,
+                    existingWorktree: worktree(for: pullRequest),
+                    onMerge: { mergeTarget = pullRequest }
+                )
+                .id(pullRequest.number)
+            } else {
+                ContentUnavailableView {
+                    Label("选择一个 PR", systemImage: "arrow.triangle.pull")
+                } description: {
+                    Text("查看检查状态，或者把它检出成一个工作树。")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func menu(for pullRequest: PullRequest) -> some View {
+        if let worktree = worktree(for: pullRequest) {
+            Button("跳到工作树「\(worktree.name)」") {
+                appModel.selection = .worktree(repository: repository.root, worktree: worktree.path)
+            }
+        } else {
+            Button("检出为新工作树") {
+                Task { await checkout(pullRequest) }
+            }
+        }
+        Button("在浏览器打开") { SystemActions.openInBrowser(pullRequest.url) }
+        Divider()
+        Button("复制链接") { SystemActions.copyToPasteboard(pullRequest.url) }
+        Button("复制分支名") { SystemActions.copyToPasteboard(pullRequest.headRefName) }
+    }
+
+    private func checkout(_ pullRequest: PullRequest) async {
+        guard let worktree = await repository.createWorktree(forPullRequest: pullRequest) else { return }
+        appModel.selection = .worktree(repository: repository.root, worktree: worktree.path)
+    }
+}
+
+// MARK: - PR 行
+
+private struct PullRequestRow: View {
+    let pullRequest: PullRequest
+    let worktree: Worktree?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: pullRequest.status.systemImage)
+                .font(.system(size: 12))
+                .foregroundStyle(statusTint)
+                .frame(width: 15)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    Text(pullRequest.displayNumber)
+                        .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.tertiary)
+                    Text(pullRequest.title)
+                        .font(.system(size: 12))
+                        .lineLimit(2)
+                }
+
+                HStack(spacing: 6) {
+                    if let author = pullRequest.author {
+                        Text(author.displayName).lineLimit(1)
+                    }
+                    Text(pullRequest.headRefName)
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(RelativeDate.format(pullRequest.updatedAt))
+                }
+                .font(.system(size: 9.5))
+                .foregroundStyle(.tertiary)
+
+                HStack(spacing: 5) {
+                    if let checks = pullRequest.checks.label, let icon = pullRequest.checks.systemImage {
+                        MiniBadge(text: checks, systemImage: icon, tint: checksTint)
+                    }
+                    if let review = pullRequest.review.label, let icon = pullRequest.review.systemImage {
+                        MiniBadge(text: review, systemImage: icon, tint: reviewTint)
+                    }
+                    if worktree != nil {
+                        MiniBadge(text: "已检出", systemImage: "leaf.fill", tint: .teal)
+                    }
+                    if pullRequest.isCrossRepository {
+                        MiniBadge(text: "fork", systemImage: "tuningfork", tint: .indigo)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 3)
+    }
+
+    private var statusTint: Color {
+        switch pullRequest.status {
+        case .open: .green
+        case .draft: .gray
+        case .merged: .purple
+        case .closed: .red
+        }
+    }
+
+    private var checksTint: Color {
+        switch pullRequest.checks {
+        case .passing: .green
+        case .failing: .red
+        case .running: .orange
+        case .none: .secondary
+        }
+    }
+
+    private var reviewTint: Color {
+        switch pullRequest.review {
+        case .approved: .green
+        case .changesRequested: .orange
+        case .pending, .none: .secondary
+        }
+    }
+}
+
+struct MiniBadge: View {
+    let text: String
+    let systemImage: String
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Image(systemName: systemImage).font(.system(size: 7.5, weight: .bold))
+            Text(text).font(.system(size: 9, weight: .medium))
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 1)
+        .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 3.5))
+    }
+}
+
+// MARK: - PR 详情
+
+private struct PullRequestDetailView: View {
+    @Environment(AppModel.self) private var appModel
+    let repository: RepositoryModel
+    let pullRequest: PullRequest
+    let existingWorktree: Worktree?
+    let onMerge: () -> Void
+
+    @State private var detailed: PullRequest?
+    @State private var threads: [ReviewThread] = []
+    @State private var isLoadingThreads = false
+    @State private var commentText = ""
+    @State private var isWorking = false
+
+    /// 详情页要显示正文，而列表查询刻意没带 `body`（太大）。所以进来之后单独补一次。
+    private var current: PullRequest { detailed ?? pullRequest }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                titleBlock
+                actionBar
+                if !current.labels.isEmpty { labelRow }
+                statsRow
+                if let checks = current.statusCheckRollup, !checks.isEmpty {
+                    checksSection(checks)
+                }
+                bodySection
+                reviewSection
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .task { await loadDetail() }
+    }
+
+    /// 详情页要补两样列表视图里没有的东西：完整正文，以及评论线程。
+    /// 列表接口刻意不带它们 —— 一屏三十个请求，每个都带上正文和讨论会拖到几 MB。
+    private func loadDetail() async {
+        guard let forge = repository.forge else { return }
+        if pullRequest.body == nil {
+            detailed = try? await forge.pullRequest(number: pullRequest.number, in: repository.root)
+        }
+        isLoadingThreads = true
+        threads = (try? await forge.reviewThreads(number: pullRequest.number, in: repository.root)) ?? []
+        isLoadingThreads = false
+    }
+
+    // MARK: - 评审
+
+    @ViewBuilder
+    private var reviewSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("讨论")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                if isLoadingThreads { ProgressView().controlSize(.mini) }
+                Spacer()
+            }
+
+            // 系统自动生成的记录（"assigned to @x"、"changed title"）数量很大
+            // 且没有讨论价值，默认藏起来 —— 不然真正的评审意见会被淹掉。
+            let visible = threads.filter { !$0.isSystemOnly }
+            if visible.isEmpty && !isLoadingThreads {
+                Text("还没有讨论。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            } else {
+                ForEach(visible) { thread in
+                    ReviewThreadView(thread: thread)
+                }
+            }
+
+            commentComposer
+        }
+    }
+
+    private var commentComposer: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextEditor(text: $commentText)
+                .font(.system(size: 11.5))
+                .scrollContentBackground(.hidden)
+                .frame(height: 64)
+                .padding(6)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+                .overlay(alignment: .topLeading) {
+                    if commentText.isEmpty {
+                        Text("写点什么…")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 12)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .overlay { RoundedRectangle(cornerRadius: 7).stroke(.separator, lineWidth: 0.5) }
+
+            HStack(spacing: 8) {
+                Button("发表评论") { Task { await act(.comment) } }
+                    .disabled(commentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isWorking)
+
+                Button("要求修改") { Task { await act(.requestChanges) } }
+                    .disabled(commentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isWorking)
+                    .help(current.forge == .gitlab
+                          ? "GitLab 没有独立的「要求修改」动作，会发一条带标记的评论"
+                          : "提交一条 request changes 评审")
+
+                Spacer()
+
+                Button {
+                    Task { await act(.approve) }
+                } label: {
+                    Label("批准", systemImage: "checkmark.seal")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .disabled(isWorking)
+
+                if isWorking { ProgressView().controlSize(.small) }
+            }
+        }
+    }
+
+    private enum ReviewAction { case comment, requestChanges, approve }
+
+    private func act(_ action: ReviewAction) async {
+        guard let forge = repository.forge else { return }
+        isWorking = true
+        defer { isWorking = false }
+
+        let text = commentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            switch action {
+            case .comment:
+                try await forge.comment(number: current.number, body: text, in: repository.root)
+            case .requestChanges:
+                try await forge.requestChanges(number: current.number, body: text, in: repository.root)
+            case .approve:
+                try await forge.approve(number: current.number, in: repository.root)
+                // 批准时顺手把写了的评论也发出去，不然那段字会被静默丢掉。
+                if !text.isEmpty {
+                    try await forge.comment(number: current.number, body: text, in: repository.root)
+                }
+            }
+            commentText = ""
+        } catch {
+            appModel.report(title: "操作失败", error: error)
+            return
+        }
+        await loadDetail()
+        await repository.refreshPullRequests()
+    }
+
+    private var titleBlock: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Label(current.status.label, systemImage: current.status.systemImage)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(statusTint, in: Capsule())
+
+                Text(current.displayNumber)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+
+                if current.isCrossRepository, let owner = current.headRepositoryOwner {
+                    MiniBadge(text: "来自 \(owner.login) 的 fork", systemImage: "tuningfork", tint: .indigo)
+                }
+            }
+
+            Text(current.title)
+                .font(.system(size: 18, weight: .semibold))
+                .textSelection(.enabled)
+
+            HStack(spacing: 6) {
+                if let author = current.author {
+                    Text(author.displayName).fontWeight(.medium)
+                }
+                Text("想把")
+                Text(current.headRefName)
+                    .font(.system(size: 11, design: .monospaced))
+                Text("合并进")
+                Text(current.baseRefName)
+                    .font(.system(size: 11, design: .monospaced))
+            }
+            .font(.system(size: 11.5))
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 8) {
+            if let existingWorktree {
+                Button {
+                    appModel.selection = .worktree(repository: repository.root, worktree: existingWorktree.path)
+                } label: {
+                    Label("跳到工作树", systemImage: "leaf.fill")
+                }
+                .buttonStyle(.borderedProminent)
+            } else {
+                Button {
+                    Task {
+                        guard let worktree = await repository.createWorktree(forPullRequest: current) else { return }
+                        appModel.selection = .worktree(repository: repository.root, worktree: worktree.path)
+                    }
+                } label: {
+                    Label("检出为工作树", systemImage: "plus.rectangle.on.rectangle")
+                }
+                .buttonStyle(.borderedProminent)
+                .help("抓取这个 PR 的分支并创建一个新工作树，不影响你当前的工作")
+                .disabled(repository.activity != nil)
+            }
+
+            Button {
+                SystemActions.openInBrowser(current.url)
+            } label: {
+                Label("在浏览器打开", systemImage: "arrow.up.forward.square")
+            }
+
+            if current.status == .open || current.status == .draft {
+                Button {
+                    onMerge()
+                } label: {
+                    Label("合并…", systemImage: "arrow.triangle.merge")
+                }
+                .disabled(current.status == .draft)
+                .help(current.status == .draft ? "草稿状态的 PR 不能合并" : "gh pr merge")
+            }
+
+            Spacer()
+
+            if let activity = repository.activity {
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.mini)
+                    Text(activity).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var labelRow: some View {
+        HStack(spacing: 5) {
+            ForEach(current.labels) { label in
+                Text(label.name)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(Color(hex: label.color)?.contrastingText ?? .primary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color(hex: label.color) ?? .gray, in: Capsule())
+            }
+        }
+    }
+
+    private var statsRow: some View {
+        HStack(spacing: 14) {
+            statItem("文件", "\(current.changedFiles)", "doc.text")
+            // GitLab 的 MR 接口不返回增删行数。显示 "+0 −0" 会让人以为这个
+            // 请求什么都没改，不如干脆不显示。
+            if current.additions > 0 || current.deletions > 0 {
+                statItem("新增", "+\(current.additions)", "plus", tint: .green)
+                statItem("删除", "−\(current.deletions)", "minus", tint: .red)
+            }
+            if let mergeable = current.mergeable {
+                statItem("可合并性", mergeableLabel(mergeable), "arrow.triangle.merge",
+                         tint: mergeable == "CONFLICTING" ? .red : .secondary)
+            }
+        }
+    }
+
+    private func statItem(_ title: String, _ value: String, _ icon: String, tint: Color = .secondary) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title)
+                .font(.system(size: 9.5))
+                .foregroundStyle(.tertiary)
+            Label(value, systemImage: icon)
+                .font(.system(size: 11.5, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(tint)
+        }
+    }
+
+    private func mergeableLabel(_ value: String) -> String {
+        switch value.uppercased() {
+        case "MERGEABLE": "无冲突"
+        case "CONFLICTING": "有冲突"
+        // GitHub 是异步计算这个的，刚推完代码来看就是 UNKNOWN。
+        // 显示「计算中」而不是「未知」，免得用户以为出错了。
+        default: "计算中"
+        }
+    }
+
+    @ViewBuilder
+    private func checksSection(_ checks: [StatusCheck]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("检查")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            VStack(spacing: 0) {
+                ForEach(Array(checks.prefix(40))) { check in
+                    HStack(spacing: 8) {
+                        Image(systemName: icon(for: check.outcome))
+                            .font(.system(size: 11))
+                            .foregroundStyle(tint(for: check.outcome))
+                            .frame(width: 14)
+
+                        Text(check.displayName)
+                            .font(.system(size: 11.5))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        Spacer(minLength: 8)
+
+                        if let link = check.link {
+                            Button {
+                                SystemActions.openInBrowser(link.absoluteString)
+                            } label: {
+                                Image(systemName: "arrow.up.forward.square")
+                                    .font(.system(size: 9.5))
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+
+                    if check.id != checks.prefix(40).last?.id {
+                        Divider().padding(.leading, 32)
+                    }
+                }
+            }
+            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+
+            if checks.count > 40 {
+                Text("还有 \(checks.count - 40) 项未显示，在浏览器里查看完整列表。")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var bodySection: some View {
+        if let body = current.body, !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("描述")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                // PR 正文是 Markdown。这里不做完整渲染 —— SwiftUI 的 `Text(markdown:)`
+                // 不支持标题、列表、代码块，硬套只会渲染得更乱。原样等宽展示反而更可读，
+                // 需要好看的排版就点「在浏览器打开」。
+                Text(body)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    private func icon(for outcome: StatusCheck.Outcome) -> String {
+        switch outcome {
+        case .success: "checkmark.circle.fill"
+        case .failure: "xmark.circle.fill"
+        case .pending: "clock.fill"
+        case .skipped: "minus.circle"
+        }
+    }
+
+    private func tint(for outcome: StatusCheck.Outcome) -> Color {
+        switch outcome {
+        case .success: .green
+        case .failure: .red
+        case .pending: .orange
+        case .skipped: .secondary
+        }
+    }
+
+    private var statusTint: Color {
+        switch current.status {
+        case .open: .green
+        case .draft: .gray
+        case .merged: .purple
+        case .closed: .red
+        }
+    }
+}
+
+// MARK: - 颜色工具
+
+extension Color {
+    /// 从 GitHub 标签的六位十六进制色值构造颜色（不带 `#`）。
+    init?(hex: String) {
+        let cleaned = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        guard cleaned.count == 6, let value = UInt32(cleaned, radix: 16) else { return nil }
+        self.init(
+            .sRGB,
+            red: Double((value >> 16) & 0xFF) / 255,
+            green: Double((value >> 8) & 0xFF) / 255,
+            blue: Double(value & 0xFF) / 255
+        )
+    }
+
+    /// 在这个背景色上应该用黑字还是白字。
+    ///
+    /// GitHub 的标签颜色用户可以随便设，从 `f9d0c4` 到 `0e8a16` 都有。
+    /// 固定用白字的话浅色标签会完全看不见，所以按感知亮度选。
+    var contrastingText: Color {
+        guard let components = NSColor(self).usingColorSpace(.sRGB) else { return .black }
+        // ITU-R BT.601 的亮度权重：人眼对绿色最敏感，对蓝色最不敏感。
+        let luminance = 0.299 * components.redComponent
+            + 0.587 * components.greenComponent
+            + 0.114 * components.blueComponent
+        return luminance > 0.6 ? .black : .white
+    }
+}
+
+// MARK: - 评论线程
+
+struct ReviewThreadView: View {
+    let thread: ReviewThread
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if let filePath = thread.filePath {
+                HStack(spacing: 5) {
+                    Image(systemName: "text.alignleft").font(.system(size: 9))
+                    Text(filePath)
+                        .font(.system(size: 10, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                    if let line = thread.line {
+                        Text("第 \(line) 行").font(.system(size: 9.5))
+                    }
+                    if thread.isResolved {
+                        MiniBadge(text: "已解决", systemImage: "checkmark", tint: .green)
+                    }
+                }
+                .foregroundStyle(.secondary)
+            }
+
+            ForEach(thread.notes.filter { !$0.isSystem }) { note in
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(note.authorName)
+                            .font(.system(size: 11, weight: .semibold))
+                        if let date = note.createdAt {
+                            Text(RelativeDate.format(date))
+                                .font(.system(size: 9.5))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    Text(note.body)
+                        .font(.system(size: 11.5))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+        // 行内评论跟整体评论视觉上要能区分 —— review 时最要紧的就是那些指着
+        // 具体某一行说话的意见。
+        .overlay(alignment: .leading) {
+            if thread.isInline {
+                Rectangle().fill(Color.accentColor.opacity(0.5)).frame(width: 2)
+            }
+        }
+    }
+}
+
+// MARK: - 接入指引
+
+/// 认不出 origin 属于哪个平台时显示的指引。
+///
+/// 重点是**照着能做完**：命令拼好、可以一键复制、跑完点一下就重新检测。
+/// 只说一句「不支持这个远端」等于把用户扔进 glab 的文档里自己找路。
+struct ForgeSetupView: View {
+    @Environment(AppModel.self) private var appModel
+    let repository: RepositoryModel
+    let setup: AppModel.ForgeSetup
+
+    @State private var isDetecting = false
+    @State private var copiedCommand: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("还没接入这个平台", systemImage: "link.badge.plus")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text(setup.summary)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !setup.steps.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(setup.steps) { step in
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(step.text)
+                                    .font(.system(size: 11.5, weight: .medium))
+
+                                HStack(spacing: 8) {
+                                    Text(step.command)
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                                    Button {
+                                        SystemActions.copyToPasteboard(step.command)
+                                        copiedCommand = step.command
+                                    } label: {
+                                        Image(systemName: copiedCommand == step.command
+                                              ? "checkmark" : "doc.on.doc")
+                                            .font(.system(size: 10))
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .help("复制命令")
+                                }
+                                .padding(9)
+                                .background(Color(nsColor: .textBackgroundColor),
+                                            in: RoundedRectangle(cornerRadius: 7))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 7).stroke(.separator, lineWidth: 0.5)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    Button {
+                        Task {
+                            isDetecting = true
+                            await appModel.redetectForges()
+                            isDetecting = false
+                        }
+                    } label: {
+                        Label("重新检测", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isDetecting)
+
+                    if isDetecting { ProgressView().controlSize(.small) }
+
+                    Text("在终端里跑完上面任一条之后点它，不用重启 Grove。")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                }
+
+                Divider()
+
+                // 明确说清楚「不可用的只是评审那一块」，免得用户以为整个仓库废了。
+                Label("工作树、提交、diff、推送这些都不受影响 —— 它们只用 git，跟平台无关。",
+                      systemImage: "info.circle")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(22)
+            .frame(maxWidth: 620, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
