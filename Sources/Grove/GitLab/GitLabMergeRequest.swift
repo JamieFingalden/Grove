@@ -189,6 +189,7 @@ extension GitLabMergeRequest {
             statusCheckRollup: Self.checks(pipeline: headPipeline, jobs: jobs),
             body: description,
             headRepositoryOwner: nil,
+            viewerHasApproved: approvals?.userHasApproved ?? false,
             forge: .gitlab
         )
     }

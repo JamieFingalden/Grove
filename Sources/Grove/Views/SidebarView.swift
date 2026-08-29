@@ -109,6 +109,16 @@ private struct RepositoryHeader: View {
 
                 Divider()
 
+                Button(repository.aiCommitEnabled ? "关闭 AI 生成功能" : "开启 AI 生成功能…") {
+                    if repository.aiCommitEnabled {
+                        repository.setAICommitEnabled(false)
+                    } else {
+                        Task { await confirmAICommitEnable() }
+                    }
+                }
+
+                Divider()
+
                 Button("在 Finder 显示") { SystemActions.revealInFinder(repository.root) }
                 Button("复制路径") { SystemActions.copyToPasteboard(repository.root.path) }
 
@@ -124,6 +134,24 @@ private struct RepositoryHeader: View {
             .menuIndicator(.hidden)
             .fixedSize()
         }
+    }
+
+    @MainActor
+    private func confirmAICommitEnable() async {
+        let worktree = model.selectedRepository?.root == repository.root
+            ? model.selectedWorktreeModel
+            : repository.worktrees.first.flatMap { repository.worktreeModel(for: $0.path) }
+
+        let byteCount: Int
+        do {
+            byteCount = try await worktree?.estimatedAICommitByteCount() ?? 0
+        } catch {
+            model.report(title: "读取 AI 提交信息上下文失败", error: error)
+            return
+        }
+
+        guard AIEnableConfirmation.confirm(repository: repository, byteCount: byteCount) else { return }
+        repository.setAICommitEnabled(true)
     }
 }
 

@@ -71,6 +71,8 @@ final class PullRequestDecodingTests: XCTestCase {
         // 不区分的话草稿会显示成可合并，而 GitHub 会拒绝。
         XCTAssertEqual(pullRequests[0].status, .draft)
         XCTAssertEqual(pullRequests[1].status, .merged)
+        XCTAssertTrue(pullRequests[0].isActive)
+        XCTAssertFalse(pullRequests[1].isActive)
     }
 
     func testMissingOptionalFieldsDecodeCleanly() throws {

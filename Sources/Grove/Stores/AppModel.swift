@@ -121,10 +121,9 @@ final class AppModel {
         }
 
         // 自建实例最常见的情况：装了，但没给这台主机登录过。
-        var glabCommand = "glab auth login --hostname \(remote.host)"
-        if remote.port != nil {
-            glabCommand += " --api-host \(remote.hostWithPort)"
-        }
+        // 认证主机要跟 git remote 中的 host:port 完全一致，否则 glab
+        // 会把它们当成两台不同的主机，无法从当前仓库解析项目。
+        var glabCommand = "glab auth login --hostname \(remote.hostWithPort)"
         // 内网实例大量是明文 http。不带这个参数 glab 会默认 https，
         // 登录会以一个跟协议毫无关系的报错失败 —— 极难自己想到。
         if remote.isInsecureHTTP {

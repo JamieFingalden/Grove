@@ -179,12 +179,13 @@ final class GitLabMergeRequestTests: XCTestCase {
         XCTAssertFalse(pullRequest.checks.isFailing)
     }
 
-    func testApprovalsDriveReviewDecision() {
+    func testApprovalsDriveReviewDecision() throws {
         let approved = GitLabApprovals(
             approvalsRequired: 1, approvalsLeft: 0, approvedBy: nil,
             userHasApproved: true, userCanApprove: false
         )
         XCTAssertEqual(GitLabMergeRequest.reviewDecision(approvals: approved, detailedStatus: nil), "APPROVED")
+        XCTAssertTrue(try decodeList()[0].asPullRequest(approvals: approved).viewerHasApproved)
 
         let pending = GitLabApprovals(
             approvalsRequired: 2, approvalsLeft: 2, approvedBy: [],
@@ -206,6 +207,97 @@ final class GitLabMergeRequestTests: XCTestCase {
 
 /// 托管商相关的共用逻辑。
 final class ForgeTests: XCTestCase {
+    func testGitLabAuthenticationAcceptsOneWorkingHost() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let executable = directory.appendingPathComponent("glab")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "auth" ] && [ "$2" = "status" ] && [ "$3" = "--hostname" ]; then
+          [ "$4" = "192.168.251.253" ]
+          exit $?
+        fi
+        printf 'gitlab.com\n192.168.251.253\n' >&2
+        exit 1
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let client = GitLabClient(executable: executable, environment: ProcessInfo.processInfo.environment)
+
+        // 全局状态因 gitlab.com 未登录而失败，但内网主机可用时不应禁用全部 GitLab 功能。
+        let isAuthenticated = await client.isAuthenticated()
+        XCTAssertTrue(isAuthenticated)
+    }
+
+    func testGitLabResolvesRepositoryWhenRemotePortDiffersFromAuthHost() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let git = URL(fileURLWithPath: "/usr/bin/git")
+        try await ProcessRunner.runChecked(executable: git, arguments: ["init", "--quiet"], workingDirectory: directory)
+        try await ProcessRunner.runChecked(
+            executable: git,
+            arguments: [
+                "remote", "add", "origin",
+                "http://192.168.251.253:8929/cad_pic_llm/cad_llms_group.git"
+            ],
+            workingDirectory: directory
+        )
+
+        let executable = directory.appendingPathComponent("glab")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "config" ] && [ "$2" = "get" ]; then
+          if [ "$5" = "192.168.251.253" ]; then
+            printf '192.168.251.253:8929\n'
+          fi
+          exit 0
+        fi
+        if [ "$1" = "api" ] && [ "$2" = "projects/cad_pic_llm%2Fcad_llms_group" ] && [ "$GITLAB_HOST" = "192.168.251.253" ]; then
+          printf '{"path_with_namespace":"cad_pic_llm/cad_llms_group"}\n'
+          exit 0
+        fi
+        if [ "$1" = "api" ] && [ "$2" = "projects/cad_pic_llm%2Fcad_llms_group/merge_requests/589/approve" ] && [ "$3" = "--method" ] && [ "$4" = "POST" ] && [ "$GITLAB_HOST" = "192.168.251.253" ]; then
+          printf '{}\n'
+          exit 0
+        fi
+        if [ "$1" = "api" ] && [ "$2" = "projects/cad_pic_llm%2Fcad_llms_group/merge_requests" ] && [ "$3" = "--method" ] && [ "$4" = "POST" ] && [ "$5" = "--raw-field" ] && [ "$6" = "description=说明" ] && [ "$7" = "--raw-field" ] && [ "$8" = "source_branch=xf-dev" ] && [ "$9" = "--raw-field" ] && [ "${10}" = "target_branch=main" ] && [ "${11}" = "--raw-field" ] && [ "${12}" = "title=Draft: 新功能" ] && [ "$GITLAB_HOST" = "192.168.251.253" ]; then
+          printf '{"iid":590,"title":"Draft: 新功能","state":"opened","draft":true,"source_branch":"xf-dev","target_branch":"main","web_url":"http://192.168.251.253:8929/cad_pic_llm/cad_llms_group/-/merge_requests/590"}\n'
+          exit 0
+        fi
+        if [ "$1" = "mr" ] && [ "$2" = "merge" ] && [ "$3" = "587" ] && [ "$4" = "--yes" ] && [ "$5" = "--squash" ] && [ "$6" = "--remove-source-branch" ] && [ "$7" = "--auto-merge=false" ] && [ "$8" = "--repo" ] && [ "$9" = "cad_pic_llm/cad_llms_group" ] && [ "$GITLAB_HOST" = "192.168.251.253" ]; then
+          exit 0
+        fi
+        exit 2
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let client = GitLabClient(executable: executable, environment: ProcessInfo.processInfo.environment)
+
+        // 远程带 8929 端口、认证主机不带端口时，仍要能识别完整项目路径。
+        let slug = await client.repositorySlug(in: directory)
+        XCTAssertEqual(slug, "cad_pic_llm/cad_llms_group")
+        try await client.approve(number: 589, in: directory)
+        try await client.merge(number: 587, strategy: .squash, deleteBranch: true, in: directory)
+        let createdURL = try await client.createPullRequest(
+            NewPullRequest(
+                title: "新功能", body: "说明", base: "main", head: "xf-dev", isDraft: true
+            ),
+            in: directory
+        )
+        XCTAssertEqual(
+            createdURL,
+            "http://192.168.251.253:8929/cad_pic_llm/cad_llms_group/-/merge_requests/590"
+        )
+    }
+
     func testRefspecsMatchEachPlatform() {
         // 两个平台都提供一个只读的服务端 ref 指向请求的头提交，
         // 走它才能检出 fork / 跨仓库来的改动 —— 我们对对方仓库没有权限。

@@ -285,6 +285,7 @@ private struct PullRequestDetailView: View {
     @State private var isLoadingThreads = false
     @State private var commentText = ""
     @State private var isWorking = false
+    @State private var didApprove = false
 
     /// 详情页要显示正文，而列表查询刻意没带 `body`（太大）。所以进来之后单独补一次。
     private var current: PullRequest { detailed ?? pullRequest }
@@ -382,14 +383,19 @@ private struct PullRequestDetailView: View {
 
                 Spacer()
 
-                Button {
-                    Task { await act(.approve) }
-                } label: {
-                    Label("批准", systemImage: "checkmark.seal")
+                if current.viewerHasApproved || didApprove {
+                    Label("已批准", systemImage: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Button {
+                        Task { await act(.approve) }
+                    } label: {
+                        Label("批准", systemImage: "checkmark.seal")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+                    .disabled(isWorking)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                .disabled(isWorking)
 
                 if isWorking { ProgressView().controlSize(.small) }
             }
@@ -401,7 +407,6 @@ private struct PullRequestDetailView: View {
     private func act(_ action: ReviewAction) async {
         guard let forge = repository.forge else { return }
         isWorking = true
-        defer { isWorking = false }
 
         let text = commentText.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
@@ -412,6 +417,7 @@ private struct PullRequestDetailView: View {
                 try await forge.requestChanges(number: current.number, body: text, in: repository.root)
             case .approve:
                 try await forge.approve(number: current.number, in: repository.root)
+                didApprove = true
                 // 批准时顺手把写了的评论也发出去，不然那段字会被静默丢掉。
                 if !text.isEmpty {
                     try await forge.comment(number: current.number, body: text, in: repository.root)
@@ -419,11 +425,25 @@ private struct PullRequestDetailView: View {
             }
             commentText = ""
         } catch {
+            isWorking = false
             appModel.report(title: "操作失败", error: error)
             return
         }
-        await loadDetail()
-        await repository.refreshPullRequests()
+        // 批准不会改变正文或讨论，本地 `didApprove` 已经足够立即收起按钮。
+        // 只有真正新增了评论时才重载详情区。
+        switch action {
+        case .approve where !text.isEmpty:
+            await loadDetail()
+        case .approve:
+            break
+        case .comment, .requestChanges:
+            await loadDetail()
+        }
+        isWorking = false
+
+        // 列表刷新不该占着操作按钮的 loading。批准状态已经在本地立即更新，
+        // 评论区也已单独重载；列表里的汇总角标慢半拍在后台补齐即可。
+        Task { await repository.refreshPullRequests() }
     }
 
     private var titleBlock: some View {

@@ -33,6 +33,8 @@ struct PullRequest: Identifiable, Hashable, Sendable, Decodable {
     /// 来源仓库的 owner。跨仓库 PR（从 fork 提的）时跟当前仓库不同，
     /// 决定了检出这个 PR 要用哪种 refspec。
     var headRepositoryOwner: Owner?
+    /// 当前登录用户是否已批准。GitHub 列表接口不提供这个字段，默认为 false。
+    var viewerHasApproved = false
 
     /// 来源平台。GitHub 的 JSON 里没有这个字段，解码后由客户端补上。
     var forge: ForgeKind = .github
@@ -92,6 +94,12 @@ struct PullRequest: Identifiable, Hashable, Sendable, Decodable {
         case "CLOSED": .closed
         default: isDraft ? .draft : .open
         }
+    }
+
+    /// 只有开放和草稿请求仍然占用工作树的评审入口。
+    /// 已合并、已关闭的请求只是历史记录，不应阻止同一分支再次发起请求。
+    var isActive: Bool {
+        status == .open || status == .draft
     }
 
     enum Status: Sendable, Hashable {

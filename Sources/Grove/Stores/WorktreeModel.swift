@@ -70,6 +70,11 @@ final class WorktreeModel: Identifiable {
     /// 写了半屏的提交信息因为点了下别的工作树就没了，是最让人火大的那种 bug。
     var commitMessage = ""
     var amendLastCommit = false
+    private(set) var isGeneratingCommitMessage = false
+    private(set) var hasGeneratedCommitMessage = false
+    private(set) var generatedFromTruncatedDiff = false
+    private(set) var canRetryCommitMessageGeneration = false
+    @ObservationIgnored private var commitMessageTask: Task<Void, Never>?
 
     /// 选中的提交（历史 tab 里点开看 diff 用）。
     var selectedCommit: String? {
@@ -85,6 +90,7 @@ final class WorktreeModel: Identifiable {
     nonisolated var id: URL { identity }
     var path: URL { worktree.path }
     var repositoryRoot: URL { repository?.root ?? worktree.path }
+    var isAICommitEnabled: Bool { repository?.aiCommitEnabled == true }
 
     init(worktree: Worktree, repository: RepositoryModel?, git: GitClient, app: AppModel?) {
         self.identity = worktree.path
@@ -477,10 +483,56 @@ final class WorktreeModel: Identifiable {
             // 只有提交真的成功了才清空草稿。失败还清了，用户就得重写一遍。
             commitMessage = ""
             amendLastCommit = false
+            hasGeneratedCommitMessage = false
+            generatedFromTruncatedDiff = false
         } catch {
             app?.report(title: "提交失败", error: error)
         }
         await refresh()
+    }
+
+    // MARK: - AI 提交信息
+
+    func estimatedAICommitByteCount() async throws -> Int {
+        try await CodexCommitGenerator.prepare(in: path, git: git).byteCount
+    }
+
+    func startCommitMessageGeneration() {
+        guard isAICommitEnabled, status.stagedCount > 0, !isGeneratingCommitMessage else { return }
+        isGeneratingCommitMessage = true
+        canRetryCommitMessageGeneration = false
+        generatedFromTruncatedDiff = false
+
+        commitMessageTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let generated = try await CodexCommitGenerator.generate(in: self.path, git: self.git)
+                try Task.checkCancellation()
+                self.commitMessage = generated.text
+                self.generatedFromTruncatedDiff = generated.wasTruncated
+                self.hasGeneratedCommitMessage = true
+            } catch is CancellationError {
+                // 用户主动取消不属于失败，静默回到空闲状态。
+            } catch {
+                self.canRetryCommitMessageGeneration = (error as? CodexGenerationError) == .timeout
+                self.app?.report(title: "AI 提交信息生成失败", error: error)
+            }
+            self.isGeneratingCommitMessage = false
+            self.commitMessageTask = nil
+        }
+    }
+
+    func cancelCommitMessageGeneration() {
+        commitMessageTask?.cancel()
+    }
+
+    func estimatedAIPullRequestByteCount(base: String) async throws -> Int {
+        try await CodexPullRequestGenerator.prepare(in: path, base: base, git: git).byteCount
+    }
+
+    func generatePullRequestDescription(base: String) async throws
+        -> CodexPullRequestGenerator.GeneratedDescription {
+        try await CodexPullRequestGenerator.generate(in: path, base: base, git: git)
     }
 
     func pull() async {

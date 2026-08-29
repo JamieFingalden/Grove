@@ -282,6 +282,68 @@ struct GitClient: Sendable {
         return DiffParser.parse(output)
     }
 
+    // MARK: - AI 提交信息上下文
+
+    /// 这里只读取索引，不能退回普通 `git diff`：未暂存内容不在用户授权的发送边界内。
+    func stagedDiffText(in directory: URL) async throws -> String {
+        try await run(["diff", "--cached", "--no-color", "--no-ext-diff", "--find-renames"], in: directory)
+    }
+
+    func stagedDiffStat(in directory: URL) async throws -> String {
+        try await run(["diff", "--cached", "--stat", "--no-color", "--no-ext-diff", "--find-renames"], in: directory)
+    }
+
+    /// 只拿标题；合并提交由提示词构造器再统一过滤，避免其他调用点忘记这条风格规则。
+    func recentCommitSubjects(in directory: URL, limit: Int) async throws -> [String] {
+        let result = try await runRaw(
+            ["log", "--max-count=\(limit)", "--format=%s", "--no-merges"],
+            in: directory
+        )
+        guard result.isSuccess else { return [] }
+        return result.stdout
+            .components(separatedBy: "\n")
+            .filter { !$0.isEmpty }
+    }
+
+    /// PR 目标写的是短分支名。只在本地分支和 origin 跟踪分支里解析，避免把用户输入
+    /// 当成任意 revision 表达式，也不会因为工作区里还有改动就把它们带进 PR 上下文。
+    func resolveBaseCommit(_ branch: String, in directory: URL) async -> String? {
+        let name = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        let candidates = ["refs/heads/\(name)", "refs/remotes/origin/\(name)"]
+        for candidate in candidates {
+            guard let result = try? await runRaw(
+                ["rev-parse", "--verify", "--end-of-options", "\(candidate)^{commit}"],
+                in: directory
+            ), result.isSuccess else { continue }
+            let oid = result.trimmedStdout
+            if !oid.isEmpty { return oid }
+        }
+        return nil
+    }
+
+    func committedDiff(from baseOID: String, in directory: URL) async throws -> String {
+        try await run(
+            ["diff", "--no-color", "--no-ext-diff", "--find-renames", "\(baseOID)...HEAD"],
+            in: directory
+        )
+    }
+
+    func committedDiffStat(from baseOID: String, in directory: URL) async throws -> String {
+        try await run(
+            ["diff", "--stat", "--no-color", "--no-ext-diff", "--find-renames", "\(baseOID)...HEAD"],
+            in: directory
+        )
+    }
+
+    func commitSubjects(from baseOID: String, in directory: URL) async throws -> [String] {
+        let output = try await run(
+            ["log", "--max-count=50", "--format=%s", "--no-merges", "\(baseOID)..HEAD"],
+            in: directory
+        )
+        return output.components(separatedBy: "\n").filter { !$0.isEmpty }
+    }
+
     /// 检查工作树是不是正处在某个多步操作中间。
     ///
     /// 靠 git 目录里的哨兵文件判断 —— 这是 git 自己在 shell 提示符脚本里用的办法，

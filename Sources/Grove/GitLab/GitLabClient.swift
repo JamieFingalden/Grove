@@ -9,12 +9,18 @@ import Foundation
 /// 读操作一律走 `glab api` 直连 REST 接口，而不是 `glab mr list -F json`：
 /// 前者能自己控制查询参数（`with_labels_details`、分页、按分支过滤），
 /// 拿到的也是 GitLab 原始 JSON，字段含义有官方文档可查。
-/// 写操作走 `glab mr` 的子命令 —— 合并、批准这些动作有额外语义，让 CLI 处理更稳。
+/// 写操作优先走 REST API；只有合并需要复用 `glab mr` 对合并策略的处理。
 struct GitLabClient: ForgeClient {
     let executable: URL
     let environment: [String: String]
+    private let projectContextCache = ProjectContextCache()
 
     var kind: ForgeKind { .gitlab }
+
+    init(executable: URL, environment: [String: String]) {
+        self.executable = executable
+        self.environment = environment
+    }
 
     static func resolve() async -> GitLabClient? {
         guard let executable = await ToolLocator.shared.locate("glab") else { return nil }
@@ -27,36 +33,124 @@ struct GitLabClient: ForgeClient {
     // MARK: - 底层调用
 
     private func run(_ arguments: [String], in directory: URL?) async throws -> CommandResult {
-        try await ProcessRunner.run(
+        let command = await preparedCommand(arguments, in: directory)
+        return try await ProcessRunner.run(
             executable: executable,
-            arguments: arguments,
+            arguments: command.arguments,
             workingDirectory: directory,
-            environment: environment,
+            environment: command.environment,
             timeout: ProcessRunner.networkTimeout
         )
     }
 
     @discardableResult
     private func runChecked(_ arguments: [String], in directory: URL?) async throws -> CommandResult {
-        try await ProcessRunner.runChecked(
+        let command = await preparedCommand(arguments, in: directory)
+        return try await ProcessRunner.runChecked(
             executable: executable,
-            arguments: arguments,
+            arguments: command.arguments,
             workingDirectory: directory,
-            environment: environment,
+            environment: command.environment,
             timeout: ProcessRunner.networkTimeout
         )
     }
 
+    /// 给带非标准端口的自建 GitLab 补齐项目上下文。
+    ///
+    /// glab 把远程的 `host:port` 和认证配置的 `host` 当成两台主机，
+    /// 即使 `api_host` 明确指向该端口，它也不会展开 `:id`。这里改用明确的
+    /// 项目路径和认证主机，同时给 `glab mr` 指定仓库，读写操作都走同一套规则。
+    private func preparedCommand(
+        _ original: [String],
+        in directory: URL?
+    ) async -> (arguments: [String], environment: [String: String]) {
+        guard let directory,
+              let command = original.first,
+              command == "api" || command == "mr",
+              let context = await projectContext(in: directory) else {
+            return (original, environment)
+        }
+
+        var arguments = original
+        var commandEnvironment = environment
+        commandEnvironment["GITLAB_HOST"] = context.hostname
+
+        if command == "api", arguments.count > 1 {
+            arguments[1] = arguments[1].replacingOccurrences(of: ":id", with: context.encodedProjectID)
+        } else if !arguments.contains("--repo") && !arguments.contains("-R") {
+            arguments.append(contentsOf: ["--repo", context.projectPath])
+        }
+        return (arguments, commandEnvironment)
+    }
+
+    private func projectContext(in directory: URL) async -> ProjectContext? {
+        let cacheKey = directory.standardizedFileURL
+        if let cached = await projectContextCache.value(for: cacheKey) { return cached }
+
+        guard let git = await ToolLocator.shared.locate("git"),
+              let result = try? await ProcessRunner.run(
+                  executable: git,
+                  arguments: ["remote", "get-url", "origin"],
+                  workingDirectory: directory,
+                  environment: environment
+              ),
+              result.isSuccess,
+              let remote = GitRemote.parse(result.trimmedStdout) else { return nil }
+
+        let hostname = await configuredHostname(for: remote)
+        let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        guard let encodedProjectID = remote.path.addingPercentEncoding(withAllowedCharacters: unreserved) else {
+            return nil
+        }
+        let context = ProjectContext(
+            hostname: hostname,
+            projectPath: remote.path,
+            encodedProjectID: encodedProjectID
+        )
+        await projectContextCache.insert(context, for: cacheKey)
+        return context
+    }
+
+    /// 读本地 glab 配置来匹配认证主机，不为每次 API 调用额外发一次网络请求。
+    private func configuredHostname(for remote: GitRemote) async -> String {
+        for candidate in [remote.hostWithPort, remote.host] {
+            guard let result = try? await ProcessRunner.run(
+                executable: executable,
+                arguments: ["config", "get", "api_host", "--host", candidate],
+                environment: environment
+            ) else { continue }
+            if result.isSuccess, !result.trimmedStdout.isEmpty { return candidate }
+        }
+        return remote.hostWithPort
+    }
+
+    private struct ProjectContext {
+        var hostname: String
+        var projectPath: String
+        var encodedProjectID: String
+    }
+
+    /// 一个仓库的 origin 和 glab 主机配置在一次运行期里基本不会变。
+    /// 缓存后，连续拉详情、审批、流水线和讨论时不用每次再启动 git/glab 探测子进程。
+    private actor ProjectContextCache {
+        private var values: [URL: ProjectContext] = [:]
+
+        func value(for directory: URL) -> ProjectContext? { values[directory] }
+        func insert(_ context: ProjectContext, for directory: URL) { values[directory] = context }
+    }
+
     /// 调一个 REST 接口。
     ///
-    /// `:id` 占位符由 glab 用当前目录的 git remote 解析成项目 ID —— 这也顺带
-    /// 决定了用哪个 GitLab 主机，所以内网实例不需要额外传 `--hostname`。
+    /// `:id` 会在底层调用前替换成 URL 编码的项目路径，避免 glab
+    /// 在带非标准端口的自建实例上无法展开占位符。
     private func api(
         _ path: String,
         in directory: URL,
+        method: String? = nil,
         fields: [String: String] = [:]
     ) async throws -> Data {
         var arguments = ["api", path]
+        if let method { arguments.append(contentsOf: ["--method", method]) }
         for (key, value) in fields.sorted(by: { $0.key < $1.key }) {
             // `--raw-field` 不做类型推断，原样当字符串传。评论正文里出现
             // 数字、`true` 这种内容时不会被误转成 JSON 标量。
@@ -69,8 +163,15 @@ struct GitLabClient: ForgeClient {
     // MARK: - 可用性
 
     func isAuthenticated() async -> Bool {
-        let result = try? await run(["auth", "status"], in: nil)
-        return result?.isSuccess ?? false
+        // 裸 `glab auth status` 会检查所有配置过的主机：只要其中一台的
+        // 令牌过期，整条命令就返回失败，连已正常登录的内网 GitLab 也会被
+        // Grove 误判成不可用。逐台检查，任意一台可用就足以启用 GitLab 功能；
+        // 当前仓库若恰好指向未登录的另一台，后续 API 调用会给出该主机的原始错误。
+        for host in await configuredHosts() {
+            let result = try? await run(["auth", "status", "--hostname", host], in: nil)
+            if result?.isSuccess == true { return true }
+        }
+        return false
     }
 
     func configuredHosts() async -> Set<String> {
@@ -113,9 +214,10 @@ struct GitLabClient: ForgeClient {
 
         // 详情页才值得补齐这两样。任何一个失败都不该让整个详情页打不开 ——
         // 自建实例上审批是收费功能，社区版直接返回 404。
-        let approvals = try? await approvals(number: number, in: directory)
-        let jobs = await pipelineJobs(pipelineID: merge.headPipeline?.id, in: directory)
-        return merge.asPullRequest(approvals: approvals, jobs: jobs)
+        async let approvalRequest = try? approvals(number: number, in: directory)
+        async let jobRequest = pipelineJobs(pipelineID: merge.headPipeline?.id, in: directory)
+        let (loadedApprovals, loadedJobs) = await (approvalRequest, jobRequest)
+        return merge.asPullRequest(approvals: loadedApprovals, jobs: loadedJobs)
     }
 
     func pullRequest(forBranch branch: String, in directory: URL) async throws -> PullRequest? {
@@ -157,22 +259,22 @@ struct GitLabClient: ForgeClient {
     // MARK: - 操作
 
     func createPullRequest(_ request: NewPullRequest, in directory: URL) async throws -> String {
-        var arguments = [
-            "mr", "create",
-            "--title", request.title,
-            "--description", request.body.isEmpty ? " " : request.body,
-            "--source-branch", request.head,
-            "--target-branch", request.base,
-            // 不加 --yes 会停在交互确认上，GUI 里没人能回答。
-            "--yes"
-        ]
-        if request.isDraft { arguments.append("--draft") }
-
-        let result = try await runChecked(arguments, in: directory)
-        let output = result.trimmedStdout + "\n" + result.stderr
-        return output
-            .components(separatedBy: .whitespacesAndNewlines)
-            .last(where: { $0.contains("://") }) ?? output.trimmingCharacters(in: .whitespacesAndNewlines)
+        // `glab mr create` 会把 GITLAB_HOST 和 Git remote 的 host:port 严格比较。
+        // 自建实例的认证主机不带端口、远端带端口时，即使 API 配置完全正确也会拒绝创建。
+        // REST 接口直接使用已经解析好的项目路径，不需要再让 glab 猜仓库。
+        let title = request.isDraft ? "Draft: \(request.title)" : request.title
+        let data = try await api(
+            "projects/:id/merge_requests",
+            in: directory,
+            method: "POST",
+            fields: [
+                "description": request.body,
+                "source_branch": request.head,
+                "target_branch": request.base,
+                "title": title
+            ]
+        )
+        return try Self.decoder.decode(GitLabMergeRequest.self, from: data).webUrl
     }
 
     func merge(number: Int, strategy: MergeStrategy, deleteBranch: Bool, in directory: URL) async throws {
@@ -193,7 +295,14 @@ struct GitLabClient: ForgeClient {
     }
 
     func approve(number: Int, in directory: URL) async throws {
-        try await runChecked(["mr", "approve", String(number)], in: directory)
+        // `glab mr approve` 完成批准后还会再查一次请求详情；在同时存在
+        // GitHub 备份 remote 的仓库里，那次查询可能误走 GitHub GraphQL。
+        // 批准本身是一个稳定的 GitLab REST 接口，直接调它不做多余查询。
+        _ = try await api(
+            "projects/:id/merge_requests/\(number)/approve",
+            in: directory,
+            method: "POST"
+        )
     }
 
     func requestChanges(number: Int, body: String, in directory: URL) async throws {

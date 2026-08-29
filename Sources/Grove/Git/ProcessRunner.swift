@@ -167,56 +167,59 @@ enum ProcessRunner {
             }
         }
 
-        let timedOut = AtomicFlag()
-        // 进程已经退出、可以停止读管道了。见下面 `drain` 的注释。
-        let noMoreWriters = AtomicFlag()
+        return try await withTaskCancellationHandler {
+            let timedOut = AtomicFlag()
+            // 进程已经退出、可以停止读管道了。见下面 `drain` 的注释。
+            let noMoreWriters = AtomicFlag()
 
-        let watchdog = Task {
-            try? await Task.sleep(for: .seconds(timeout))
-            guard !Task.isCancelled, process.isRunning else { return }
-            timedOut.set()
-            process.terminate()
+            let watchdog = Task {
+                try? await Task.sleep(for: .seconds(timeout))
+                guard !Task.isCancelled, process.isRunning else { return }
+                timedOut.set()
+                process.terminate()
 
-            // SIGTERM 之后再给两秒体面退出的机会。还赖着不走就 SIGKILL ——
-            // 到这一步说明它连信号都不响应了，继续等下去毫无意义。
-            try? await Task.sleep(for: .seconds(2))
-            if process.isRunning {
-                kill(process.processIdentifier, SIGKILL)
+                // SIGTERM 之后再给两秒体面退出的机会。还赖着不走就 SIGKILL ——
+                // 到这一步说明它连信号都不响应了，继续等下去毫无意义。
+                try? await Task.sleep(for: .seconds(2))
+                if process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                }
             }
-        }
-        defer { watchdog.cancel() }
+            defer { watchdog.cancel() }
 
-        // 等进程退出，然后通知 drain「不会再有新数据了」。
-        // 这个任务必须跟 drain 并发跑：drain 要在进程存活期间就把管道抽干（见第 1 点），
-        // 而进程退出的时刻只有这里知道。
-        let exitWatcher = Task {
-            await waitForExit(process)
-            noMoreWriters.set()
-        }
+            // 等进程退出，然后通知 drain「不会再有新数据了」。
+            // 这个任务必须跟 drain 并发跑：drain 要在进程存活期间就把管道抽干（见第 1 点），
+            // 而进程退出的时刻只有这里知道。
+            let exitWatcher = Task {
+                await waitForExit(process)
+                noMoreWriters.set()
+            }
 
-        async let outputData = drain(outputPipe.fileHandleForReading, stopWhen: noMoreWriters)
-        async let errorData = drain(errorPipe.fileHandleForReading, stopWhen: noMoreWriters)
-        let (collectedOutput, collectedError) = await (outputData, errorData)
+            async let outputData = drain(outputPipe.fileHandleForReading, stopWhen: noMoreWriters)
+            async let errorData = drain(errorPipe.fileHandleForReading, stopWhen: noMoreWriters)
+            let (collectedOutput, collectedError) = await (outputData, errorData)
 
-        await withTaskCancellationHandler {
             _ = await exitWatcher.value
-        } onCancel: {
-            process.terminate()
-        }
 
-        if timedOut.isSet {
-            throw CommandTimeout(
-                executable: executable.path,
-                arguments: arguments,
-                seconds: timeout
+            if timedOut.isSet {
+                throw CommandTimeout(
+                    executable: executable.path,
+                    arguments: arguments,
+                    seconds: timeout
+                )
+            }
+
+            try Task.checkCancellation()
+
+            return CommandResult(
+                exitCode: process.terminationStatus,
+                standardOutput: collectedOutput,
+                standardError: collectedError
             )
+        } onCancel: {
+            // AI 生成等长任务的“取消”必须同时停掉真实子进程，不能只丢弃 Swift Task。
+            if process.isRunning { process.terminate() }
         }
-
-        return CommandResult(
-            exitCode: process.terminationStatus,
-            standardOutput: collectedOutput,
-            standardError: collectedError
-        )
     }
 
     /// 跑一个子进程，非零退出直接抛错。绝大多数调用点想要的就是这个语义。

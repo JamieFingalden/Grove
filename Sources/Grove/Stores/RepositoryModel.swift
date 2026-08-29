@@ -33,6 +33,7 @@ final class RepositoryModel: Identifiable {
     var isRefreshingPullRequests = false
     /// 正在进行的长操作描述（"正在拉取…"）。nil 表示空闲。
     var activity: String?
+    var aiCommitEnabled: Bool
 
     nonisolated var id: URL { root }
     nonisolated var name: String { root.lastPathComponent }
@@ -44,11 +45,24 @@ final class RepositoryModel: Identifiable {
     /// 视图在 body 里查一次就会触发一次「观察到的属性被修改」，
     /// SwiftUI 会认为需要重绘，然后再查一次 —— 死循环。
     @ObservationIgnored private var worktreeModels: [URL: WorktreeModel] = [:]
+    @ObservationIgnored private let aiCommitSettings: AICommitSettings
 
-    init(root: URL, git: GitClient, app: AppModel?) {
+    init(
+        root: URL,
+        git: GitClient,
+        app: AppModel?,
+        aiCommitSettings: AICommitSettings = AICommitSettings()
+    ) {
         self.root = root
         self.git = git
         self.app = app
+        self.aiCommitSettings = aiCommitSettings
+        self.aiCommitEnabled = aiCommitSettings.isEnabled(for: root)
+    }
+
+    func setAICommitEnabled(_ enabled: Bool) {
+        aiCommitSettings.setEnabled(enabled, for: root)
+        aiCommitEnabled = enabled
     }
 
     /// 只读查找，不会创建也不会修改任何东西。**视图里只能用这个** ——

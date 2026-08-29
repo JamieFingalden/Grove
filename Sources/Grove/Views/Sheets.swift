@@ -3,6 +3,7 @@ import SwiftUI
 /// 提 PR。会先把分支推上去，再调 `gh pr create`。
 struct CreatePullRequestSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppModel.self) private var app
     let model: WorktreeModel
 
     @State private var title = ""
@@ -11,6 +12,10 @@ struct CreatePullRequestSheet: View {
     @State private var isDraft = false
     @State private var isWorking = false
     @State private var createdURL: String?
+    @State private var isGeneratingDescription = false
+    @State private var generatedFromTruncatedDiff = false
+    @State private var canRetryDescriptionGeneration = false
+    @State private var descriptionTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -27,6 +32,7 @@ struct CreatePullRequestSheet: View {
         }
         .frame(width: 560, height: 520)
         .onAppear(perform: prefill)
+        .onDisappear { descriptionTask?.cancel() }
     }
 
     private var header: some View {
@@ -61,9 +67,13 @@ struct CreatePullRequestSheet: View {
                 }
 
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("描述")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text("描述")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        descriptionGenerationControl
+                    }
                     TextEditor(text: $body_)
                         .font(.system(size: 11.5, design: .monospaced))
                         .scrollContentBackground(.hidden)
@@ -73,6 +83,24 @@ struct CreatePullRequestSheet: View {
                         .overlay {
                             RoundedRectangle(cornerRadius: 7).stroke(.separator, lineWidth: 0.5)
                         }
+
+                    if !model.isAICommitEnabled {
+                        HStack(spacing: 5) {
+                            Text("这个仓库还没开启 AI 生成功能。")
+                                .foregroundStyle(.secondary)
+                            Button("开启…") { Task { await enableAI() } }
+                                .buttonStyle(.link)
+                        }
+                        .font(.system(size: 10.5))
+                    } else if generatedFromTruncatedDiff {
+                        Label("diff 较大，只分析了一部分", systemImage: "exclamationmark.triangle")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.orange)
+                    } else if canRetryDescriptionGeneration {
+                        Button("重试生成描述") { confirmAndGenerateDescription() }
+                            .buttonStyle(.link)
+                            .font(.system(size: 10.5))
+                    }
                 }
 
                 Toggle("创建为草稿", isOn: $isDraft)
@@ -128,6 +156,32 @@ struct CreatePullRequestSheet: View {
         .padding(14)
     }
 
+    @ViewBuilder
+    private var descriptionGenerationControl: some View {
+        if isGeneratingDescription {
+            HStack(spacing: 5) {
+                ProgressView().controlSize(.mini)
+                Button("取消") { descriptionTask?.cancel() }
+                    .buttonStyle(.borderless)
+            }
+            .font(.system(size: 10.5))
+        } else {
+            Button { confirmAndGenerateDescription() } label: {
+                Label("AI 生成", systemImage: "sparkles")
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 10.5))
+            .disabled(!model.isAICommitEnabled || base.trimmingCharacters(in: .whitespaces).isEmpty || isWorking)
+            .help(descriptionGenerationHelp)
+        }
+    }
+
+    private var descriptionGenerationHelp: String {
+        if !model.isAICommitEnabled { return "这个仓库还没开启 AI 生成功能，请使用下方的开启入口。" }
+        if base.trimmingCharacters(in: .whitespaces).isEmpty { return "先填写目标分支。" }
+        return "根据这个 PR 的已提交改动生成描述"
+    }
+
     private func successView(_ url: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "checkmark.circle.fill")
@@ -163,6 +217,54 @@ struct CreatePullRequestSheet: View {
         title = model.suggestedPullRequestTitle
         body_ = model.suggestedPullRequestBody
         base = model.repository?.defaultBranch ?? "main"
+    }
+
+    @MainActor
+    private func confirmAndGenerateDescription() {
+        guard !isGeneratingDescription else { return }
+        if !body_.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "替换已有的 PR 描述？"
+            alert.informativeText = "AI 生成的描述会替换输入框里的现有内容。"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "替换并生成")
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+
+        let target = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return }
+        isGeneratingDescription = true
+        generatedFromTruncatedDiff = false
+        canRetryDescriptionGeneration = false
+        descriptionTask = Task {
+            do {
+                let generated = try await model.generatePullRequestDescription(base: target)
+                try Task.checkCancellation()
+                body_ = generated.body
+                generatedFromTruncatedDiff = generated.wasTruncated
+            } catch is CancellationError {
+                // 用户取消时保留原有描述，不显示错误。
+            } catch {
+                canRetryDescriptionGeneration = (error as? CodexGenerationError) == .timeout
+                app.report(title: "AI PR 描述生成失败", error: error)
+            }
+            isGeneratingDescription = false
+            descriptionTask = nil
+        }
+    }
+
+    @MainActor
+    private func enableAI() async {
+        guard let repository = model.repository else { return }
+        let target = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let byteCount = try await model.estimatedAIPullRequestByteCount(base: target)
+            guard AIEnableConfirmation.confirm(repository: repository, byteCount: byteCount) else { return }
+            repository.setAICommitEnabled(true)
+        } catch {
+            app.report(title: "读取 AI 生成上下文失败", error: error)
+        }
     }
 
     private func create() async {
@@ -403,7 +505,7 @@ struct MergePullRequestSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("合并 PR #\(pullRequest.number)")
+                Text("合并 \(pullRequest.displayNumber)")
                     .font(.system(size: 15, weight: .semibold))
                 Text(pullRequest.title)
                     .font(.system(size: 11.5))
@@ -422,7 +524,7 @@ struct MergePullRequestSheet: View {
                     .foregroundStyle(.orange)
             }
             if pullRequest.mergeable?.uppercased() == "CONFLICTING" {
-                Label("跟目标分支有冲突，GitHub 无法自动合并。", systemImage: "exclamationmark.triangle.fill")
+                Label("跟目标分支有冲突，托管平台无法自动合并。", systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.red)
             }
@@ -486,25 +588,27 @@ struct MergePullRequestSheet: View {
         defer { isWorking = false }
         failure = nil
 
-        guard let github = await GitHubClient.resolve() else {
-            failure = GroveError.ghNotFound.localizedDescription
+        guard let forge = repository.forge else {
+            failure = "无法识别这个仓库的托管平台。"
             return
         }
         do {
-            try await github.merge(
+            try await forge.merge(
                 number: pullRequest.number,
                 strategy: strategy,
                 deleteBranch: deleteBranch,
                 in: repository.root
             )
         } catch {
-            // 合并失败的原因（缺权限、检查未过、分支保护规则）都在 gh 的报错里，
+            // 合并失败的原因（缺权限、检查未过、分支保护规则）都在托管平台 CLI 的报错里，
             // 直接显示在弹窗里而不是关掉窗口 —— 用户正要决定下一步怎么办。
             failure = error.localizedDescription
             return
         }
-        await repository.fetch()
         dismiss()
+        // 服务端已经合并成功就立刻关弹窗。后面的 fetch、分支和所有工作树
+        // 状态刷新可能需要几秒，它们是同步本地视图，不应让用户一直守着 loading。
+        await repository.fetch()
     }
 }
 

@@ -168,4 +168,27 @@ final class ProcessRunnerTests: XCTestCase {
         )
         XCTAssertEqual(result.standardOutput.count, 30_000 * 11)
     }
+
+    func testCancellationTerminatesChildProcess() async {
+        let started = Date()
+        let executable = shell
+        let task = Task {
+            try await ProcessRunner.run(
+                executable: executable,
+                arguments: ["-c", "sleep 60"],
+                timeout: 120
+            )
+        }
+        try? await Task.sleep(for: .milliseconds(100))
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("取消后不应该返回成功结果")
+        } catch is CancellationError {
+            XCTAssertLessThan(Date().timeIntervalSince(started), 10)
+        } catch {
+            XCTFail("抛出了意外的错误类型：\(error)")
+        }
+    }
 }

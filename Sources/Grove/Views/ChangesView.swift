@@ -240,6 +240,7 @@ private struct ChangeRow: View {
 // MARK: - 提交框
 
 private struct CommitBox: View {
+    @Environment(AppModel.self) private var app
     @Bindable var model: WorktreeModel
     @FocusState private var isFocused: Bool
 
@@ -261,10 +262,36 @@ private struct CommitBox: View {
                             .allowsHitTesting(false)
                     }
                 }
+                .overlay(alignment: .topTrailing) {
+                    aiCommitControl
+                        .padding(7)
+                }
                 .overlay {
                     RoundedRectangle(cornerRadius: 7).stroke(.separator, lineWidth: 0.5)
                 }
                 .focused($isFocused)
+
+            if !model.isAICommitEnabled {
+                HStack(spacing: 5) {
+                    Text("这个仓库还没开启 AI 提交信息。")
+                        .foregroundStyle(.secondary)
+                    Button("开启…") { Task { await enableAI() } }
+                        .buttonStyle(.link)
+                }
+                .font(.system(size: 10.5))
+            }
+
+            if model.generatedFromTruncatedDiff {
+                Label("diff 较大，只分析了一部分", systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.orange)
+            }
+
+            if model.canRetryCommitMessageGeneration {
+                Button("重试") { confirmAndGenerate() }
+                    .buttonStyle(.link)
+                    .font(.system(size: 10.5))
+            }
 
             HStack(spacing: 8) {
                 Toggle("修补上一个提交", isOn: $model.amendLastCommit)
@@ -301,5 +328,66 @@ private struct CommitBox: View {
             }
         }
         .padding(12)
+    }
+
+    @ViewBuilder
+    private var aiCommitControl: some View {
+        if model.isGeneratingCommitMessage {
+            HStack(spacing: 5) {
+                ProgressView().controlSize(.mini)
+                Button("取消") { model.cancelCommitMessageGeneration() }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 10.5))
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(.regularMaterial, in: Capsule())
+            .help("取消生成")
+        } else {
+            Button { confirmAndGenerate() } label: {
+                Image(systemName: model.hasGeneratedCommitMessage ? "arrow.clockwise" : "sparkles")
+                    .font(.system(size: 11))
+                    .padding(4)
+            }
+            .buttonStyle(.borderless)
+            .background(.regularMaterial, in: Circle())
+            .disabled(!model.isAICommitEnabled || model.status.stagedCount == 0)
+            .help(aiCommitHelp)
+        }
+    }
+
+    private var aiCommitHelp: String {
+        if !model.isAICommitEnabled {
+            return "这个仓库还没开启 AI 提交信息，请使用下方的开启入口。"
+        }
+        if model.status.stagedCount == 0 { return "先暂存一些改动。" }
+        return model.hasGeneratedCommitMessage ? "重新生成提交信息" : "用 AI 生成提交信息"
+    }
+
+    @MainActor
+    private func confirmAndGenerate() {
+        if !model.commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // 这里选择覆盖前确认：提交框表达的是一份最终草稿，追加多个候选会模糊提交边界。
+            let alert = NSAlert()
+            alert.messageText = "替换已有的提交信息？"
+            alert.informativeText = "AI 生成的草稿会替换输入框里的现有内容。"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "替换并生成")
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        model.startCommitMessageGeneration()
+    }
+
+    @MainActor
+    private func enableAI() async {
+        guard let repository = model.repository else { return }
+        do {
+            let byteCount = try await model.estimatedAICommitByteCount()
+            guard AIEnableConfirmation.confirm(repository: repository, byteCount: byteCount) else { return }
+            repository.setAICommitEnabled(true)
+        } catch {
+            app.report(title: "读取 AI 生成上下文失败", error: error)
+        }
     }
 }

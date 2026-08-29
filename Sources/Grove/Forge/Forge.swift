@@ -120,8 +120,8 @@ protocol ForgeClient: Sendable {
 }
 
 extension ForgeClient {
-    /// 某个工作树分支该关联哪个 PR/MR。这是「工作树 ↔ 评审」这条主线的唯一入口，
-    /// 界面和 `--doctor` 都走它，保证两边看到的是同一套规则。
+    /// 某个工作树分支当前关联的开放 PR/MR。这是「工作树 ↔ 评审」这条主线的唯一入口，
+    /// 界面和 `--doctor` 都走它，保证两边看到的是同一套规则。已结束的请求只算历史记录。
     func linkedPullRequest(branch: String, defaultBranch: String?, in directory: URL) async -> PullRequest? {
         // 默认分支不关联。它是所有请求的**目标**，不是任何请求的来源；
         // 按分支名去查会翻出历史上某个从 main 提出去的旧请求，纯属误导。
@@ -129,11 +129,14 @@ extension ForgeClient {
 
         // Grove 给 fork / 跨仓库请求建的工作树分支叫 `pr-<编号>`，跟对方仓库里的
         // 源分支名对不上，只能按编号查。
+        let linkedRequest: PullRequest?
         if let number = PullRequestNaming.number(fromBranch: branch) {
-            return try? await pullRequest(number: number, in: directory)
+            linkedRequest = try? await pullRequest(number: number, in: directory)
+        } else {
+            linkedRequest = try? await pullRequest(forBranch: branch, in: directory)
         }
 
-        return try? await pullRequest(forBranch: branch, in: directory)
+        return linkedRequest?.isActive == true ? linkedRequest : nil
     }
 }
 
