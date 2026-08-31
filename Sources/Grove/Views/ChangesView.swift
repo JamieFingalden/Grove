@@ -240,7 +240,6 @@ private struct ChangeRow: View {
 // MARK: - 提交框
 
 private struct CommitBox: View {
-    @Environment(AppModel.self) private var app
     @Bindable var model: WorktreeModel
     @FocusState private var isFocused: Bool
 
@@ -273,9 +272,9 @@ private struct CommitBox: View {
 
             if !model.isAICommitEnabled {
                 HStack(spacing: 5) {
-                    Text("这个仓库还没开启 AI 提交信息。")
+                    Text("AI 生成功能已关闭。")
                         .foregroundStyle(.secondary)
-                    Button("开启…") { Task { await enableAI() } }
+                    SettingsLink { Text("打开设置…") }
                         .buttonStyle(.link)
                 }
                 .font(.system(size: 10.5))
@@ -358,7 +357,7 @@ private struct CommitBox: View {
 
     private var aiCommitHelp: String {
         if !model.isAICommitEnabled {
-            return "这个仓库还没开启 AI 提交信息，请使用下方的开启入口。"
+            return "AI 生成功能已关闭，请在 Grove 设置中开启。"
         }
         if model.status.stagedCount == 0 { return "先暂存一些改动。" }
         return model.hasGeneratedCommitMessage ? "重新生成提交信息" : "用 AI 生成提交信息"
@@ -379,15 +378,4 @@ private struct CommitBox: View {
         model.startCommitMessageGeneration()
     }
 
-    @MainActor
-    private func enableAI() async {
-        guard let repository = model.repository else { return }
-        do {
-            let byteCount = try await model.estimatedAICommitByteCount()
-            guard AIEnableConfirmation.confirm(repository: repository, byteCount: byteCount) else { return }
-            repository.setAICommitEnabled(true)
-        } catch {
-            app.report(title: "读取 AI 生成上下文失败", error: error)
-        }
-    }
 }

@@ -18,6 +18,7 @@ struct GroveApp: App {
 
         Settings {
             PreferencesView()
+                .environment(model)
         }
     }
 }

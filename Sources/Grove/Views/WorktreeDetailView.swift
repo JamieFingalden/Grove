@@ -56,6 +56,25 @@ struct WorktreeDetailView: View {
         // 结果就是上下各留一大片空白。
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor).opacity(0.35))
+        .alert("需要安全强制推送", isPresented: showsSafeForcePushConfirmation) {
+            Button("取消", role: .cancel) {
+                model.dismissSafeForcePushProposal()
+            }
+            Button("安全强制推送", role: .destructive) {
+                Task { await model.confirmSafeForcePush() }
+            }
+        } message: {
+            Text("远端仍是修补前的提交，本地最后一次提交已经被改写。安全强制推送会用本地版本替换远端版本；如果远端后来又有新提交，Git 会自动拒绝，避免覆盖别人。仅在这个分支由你使用时继续。")
+        }
+    }
+
+    private var showsSafeForcePushConfirmation: Binding<Bool> {
+        Binding(
+            get: { model.safeForcePushProposal != nil },
+            set: { isPresented in
+                if !isPresented { model.dismissSafeForcePushProposal() }
+            }
+        )
     }
 }
 

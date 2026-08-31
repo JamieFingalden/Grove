@@ -35,9 +35,18 @@ struct CodexCommitGenerator {
         return PreparedInput(prompt: result.text, wasTruncated: result.wasTruncated)
     }
 
-    static func generate(in directory: URL, git: GitClient) async throws -> GeneratedMessage {
+    static func generate(
+        in directory: URL,
+        git: GitClient,
+        model: AIGenerationModel
+    ) async throws -> GeneratedMessage {
         let input = try await prepare(in: directory, git: git)
-        let data = try await CodexRunner.run(prompt: input.prompt, schema: outputSchema, in: directory)
+        let data = try await CodexRunner.run(
+            prompt: input.prompt,
+            schema: outputSchema,
+            model: model,
+            in: directory
+        )
         guard let output = try? JSONDecoder().decode(StructuredOutput.self, from: data) else {
             throw CodexGenerationError.invalidOutput
         }

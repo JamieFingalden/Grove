@@ -41,6 +41,9 @@ struct GroveFailure: Identifiable, Sendable {
         if message.contains("diverging branches") || message.contains("not possible to fast-forward") {
             return "本地和远端都有新的提交，无法直接拉取。请先点「变基」，把本地提交接到远端最新提交之后，再重新拉取。"
         }
+        if message.contains("stale info") || message.contains("force-with-lease") {
+            return "远端在你上次同步后又发生了变化，安全强制推送已阻止覆盖。请先抓取远端并检查新增提交，再决定如何处理。"
+        }
         if message.contains("non-fast-forward") || message.contains("fetch first") {
             return "远端有本地尚未包含的提交，因此拒绝了推送。请先拉取；如果提示分支已分叉，就先完成变基，再重新推送。"
         }
@@ -94,6 +97,8 @@ final class AppModel {
     var repositories: [RepositoryModel] = []
     var selection: Selection?
     var failures: [GroveFailure] = []
+    private(set) var isAIGenerationEnabled: Bool
+    private(set) var aiGenerationModel: AIGenerationModel
 
     /// 侧边栏选中项。仓库和工作树用同一个枚举，`NavigationSplitView` 的选择才好绑。
     enum Selection: Hashable, Sendable {
@@ -103,6 +108,23 @@ final class AppModel {
     }
 
     private let bookmarks = RepositoryBookmarks()
+    @ObservationIgnored private let aiGenerationSettings: AIGenerationSettings
+
+    init(aiGenerationSettings: AIGenerationSettings = AIGenerationSettings()) {
+        self.aiGenerationSettings = aiGenerationSettings
+        self.isAIGenerationEnabled = aiGenerationSettings.isEnabled
+        self.aiGenerationModel = aiGenerationSettings.model
+    }
+
+    func setAIGenerationEnabled(_ enabled: Bool) {
+        aiGenerationSettings.setEnabled(enabled)
+        isAIGenerationEnabled = enabled
+    }
+
+    func setAIGenerationModel(_ model: AIGenerationModel) {
+        aiGenerationSettings.setModel(model)
+        aiGenerationModel = model
+    }
 
     // MARK: - 启动
 

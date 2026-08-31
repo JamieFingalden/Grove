@@ -48,6 +48,13 @@ final class WorktreeModel: Identifiable {
     private(set) var syncFeedback: SyncFeedback?
     @ObservationIgnored private var syncFeedbackResetTask: Task<Void, Never>?
 
+    struct SafeForcePushProposal {
+        var remote: NamedRemote?
+        var branch: String?
+    }
+
+    private(set) var safeForcePushProposal: SafeForcePushProposal?
+
     /// 当前选中的文件。切换时会去取它的 diff。
     var selectedPath: String? {
         didSet {
@@ -112,7 +119,7 @@ final class WorktreeModel: Identifiable {
     nonisolated var id: URL { identity }
     var path: URL { worktree.path }
     var repositoryRoot: URL { repository?.root ?? worktree.path }
-    var isAICommitEnabled: Bool { repository?.aiCommitEnabled == true }
+    var isAICommitEnabled: Bool { app?.isAIGenerationEnabled == true }
 
     init(worktree: Worktree, repository: RepositoryModel?, git: GitClient, app: AppModel?) {
         self.identity = worktree.path
@@ -517,10 +524,6 @@ final class WorktreeModel: Identifiable {
 
     // MARK: - AI 提交信息
 
-    func estimatedAICommitByteCount() async throws -> Int {
-        try await CodexCommitGenerator.prepare(in: path, git: git).byteCount
-    }
-
     func startCommitMessageGeneration() {
         guard isAICommitEnabled, status.stagedCount > 0, !isGeneratingCommitMessage else { return }
         isGeneratingCommitMessage = true
@@ -530,7 +533,11 @@ final class WorktreeModel: Identifiable {
         commitMessageTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let generated = try await CodexCommitGenerator.generate(in: self.path, git: self.git)
+                let generated = try await CodexCommitGenerator.generate(
+                    in: self.path,
+                    git: self.git,
+                    model: self.app?.aiGenerationModel ?? .luna
+                )
                 try Task.checkCancellation()
                 self.commitMessage = generated.text
                 self.generatedFromTruncatedDiff = generated.wasTruncated
@@ -550,13 +557,14 @@ final class WorktreeModel: Identifiable {
         commitMessageTask?.cancel()
     }
 
-    func estimatedAIPullRequestByteCount(base: String) async throws -> Int {
-        try await CodexPullRequestGenerator.prepare(in: path, base: base, git: git).byteCount
-    }
-
     func generatePullRequestDescription(base: String) async throws
         -> CodexPullRequestGenerator.GeneratedDescription {
-        try await CodexPullRequestGenerator.generate(in: path, base: base, git: git)
+        try await CodexPullRequestGenerator.generate(
+            in: path,
+            base: base,
+            git: git,
+            model: app?.aiGenerationModel ?? .luna
+        )
     }
 
     func pull() async {
@@ -587,7 +595,21 @@ final class WorktreeModel: Identifiable {
     /// 也就是终端里裸 `git push` 的行为。
     func push(to remote: NamedRemote? = nil) async {
         let label = remote.map { "正在推送到 \($0.name)…" } ?? "正在推送…"
-        await performSync(.push, activity: label, refreshPullRequests: true) {
+        await performSync(
+            .push,
+            activity: label,
+            refreshPullRequests: true,
+            onFailure: { error in
+                if await self.canOfferSafeForcePush(after: error, to: remote) {
+                    self.safeForcePushProposal = .init(
+                        remote: remote,
+                        branch: self.worktree.branch
+                    )
+                } else {
+                    self.app?.report(title: "推送失败", error: error)
+                }
+            }
+        ) {
             // 没有上游就顺手建立跟踪关系。不然第一次 push 会被 git 拒掉，
             // 并要求用户去终端里敲 --set-upstream。
             //
@@ -603,10 +625,41 @@ final class WorktreeModel: Identifiable {
         }
     }
 
+    func dismissSafeForcePushProposal() {
+        safeForcePushProposal = nil
+    }
+
+    func confirmSafeForcePush() async {
+        guard let proposal = safeForcePushProposal else { return }
+        safeForcePushProposal = nil
+        let label = proposal.remote.map { "正在安全强制推送到 \($0.name)…" }
+            ?? "正在安全强制推送…"
+
+        await performSync(.push, activity: label, refreshPullRequests: true) {
+            try await self.git.push(
+                in: self.path,
+                remote: proposal.remote?.name,
+                branch: proposal.branch,
+                setUpstream: false,
+                forceWithLease: true
+            )
+        }
+    }
+
+    private func canOfferSafeForcePush(after error: Error, to remote: NamedRemote?) async -> Bool {
+        guard status.upstream != nil else { return false }
+        if let remote, remote.name != upstreamRemoteName { return false }
+        guard let failure = error as? CommandFailure else { return false }
+        let output = failure.output.lowercased()
+        guard output.contains("non-fast-forward") || output.contains("fetch first") else { return false }
+        return await git.upstreamMatchesPreviousHead(in: path)
+    }
+
     private func performSync(
         _ action: SyncFeedback.Action,
         activity label: String,
         refreshPullRequests: Bool = false,
+        onFailure: ((Error) async -> Void)? = nil,
         _ work: @escaping () async throws -> Void
     ) async {
         syncFeedbackResetTask?.cancel()
@@ -620,8 +673,12 @@ final class WorktreeModel: Identifiable {
         } catch {
             activity = nil
             showSyncResult(action, phase: .failed)
-            let title = action == .pull ? "拉取失败" : "推送失败"
-            app?.report(title: title, error: error)
+            if let onFailure {
+                await onFailure(error)
+            } else {
+                let title = action == .pull ? "拉取失败" : "推送失败"
+                app?.report(title: title, error: error)
+            }
         }
 
         await refresh()

@@ -4,6 +4,7 @@ enum CodexRunner {
     static func run(
         prompt: String,
         schema: String,
+        model: AIGenerationModel,
         in directory: URL
     ) async throws -> Data {
         guard let executable = await ToolLocator.shared.locate("codex") else {
@@ -22,14 +23,12 @@ enum CodexRunner {
         do {
             try await ProcessRunner.runChecked(
                 executable: executable,
-                arguments: [
-                    "exec", "--cd", directory.path,
-                    "--sandbox", "read-only",
-                    "--ephemeral",
-                    "--output-last-message", outputURL.path,
-                    "--output-schema", schemaURL.path,
-                    "-"
-                ],
+                arguments: arguments(
+                    model: model,
+                    directory: directory,
+                    outputURL: outputURL,
+                    schemaURL: schemaURL
+                ),
                 workingDirectory: directory,
                 environment: await ToolLocator.shared.childEnvironment(),
                 timeout: ProcessRunner.networkTimeout,
@@ -48,6 +47,23 @@ enum CodexRunner {
             throw CodexGenerationError.invalidOutput
         }
         return data
+    }
+
+    static func arguments(
+        model: AIGenerationModel,
+        directory: URL,
+        outputURL: URL,
+        schemaURL: URL
+    ) -> [String] {
+        [
+            "exec", "--cd", directory.path,
+            "--model", model.rawValue,
+            "--sandbox", "read-only",
+            "--ephemeral",
+            "--output-last-message", outputURL.path,
+            "--output-schema", schemaURL.path,
+            "-"
+        ]
     }
 }
 

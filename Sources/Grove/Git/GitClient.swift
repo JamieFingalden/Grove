@@ -498,9 +498,29 @@ struct GitClient: Sendable {
         in directory: URL,
         remote: String?,
         branch: String?,
-        setUpstream: Bool
+        setUpstream: Bool,
+        forceWithLease: Bool = false
     ) async throws {
+        try await run(
+            Self.pushArguments(
+                remote: remote,
+                branch: branch,
+                setUpstream: setUpstream,
+                forceWithLease: forceWithLease
+            ),
+            in: directory,
+            timeout: ProcessRunner.networkTimeout
+        )
+    }
+
+    static func pushArguments(
+        remote: String?,
+        branch: String?,
+        setUpstream: Bool,
+        forceWithLease: Bool
+    ) -> [String] {
         var arguments = ["push"]
+        if forceWithLease { arguments.append("--force-with-lease") }
         if setUpstream { arguments.append("--set-upstream") }
         if let remote {
             arguments.append(remote)
@@ -508,7 +528,21 @@ struct GitClient: Sendable {
             // `push.default` 配置决定推哪些分支，有些配置下会一次推一堆。
             if let branch { arguments.append(branch) }
         }
-        try await run(arguments, in: directory, timeout: ProcessRunner.networkTimeout)
+        return arguments
+    }
+
+    /// 上游是否正好指向本地 HEAD 改写前的位置。
+    ///
+    /// 普通 amend 后 `HEAD@{1}` 是远端已有的旧提交、`HEAD` 是新提交。
+    /// 这个判断不依赖 reflog 的英文动作文本，并且比看到 non-fast-forward
+    /// 就建议强推安全得多：远端单纯领先时不会命中。
+    func upstreamMatchesPreviousHead(in directory: URL) async -> Bool {
+        async let upstream = try? run(["rev-parse", "--verify", "@{upstream}"], in: directory)
+        async let previousHead = try? run(["rev-parse", "--verify", "HEAD@{1}"], in: directory)
+        let (upstreamOID, previousOID) = await (upstream, previousHead)
+        guard let upstreamOID, let previousOID else { return false }
+        return upstreamOID.trimmingCharacters(in: .whitespacesAndNewlines)
+            == previousOID.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - 变基

@@ -86,9 +86,9 @@ struct CreatePullRequestSheet: View {
 
                     if !model.isAICommitEnabled {
                         HStack(spacing: 5) {
-                            Text("这个仓库还没开启 AI 生成功能。")
+                            Text("AI 生成功能已关闭。")
                                 .foregroundStyle(.secondary)
-                            Button("开启…") { Task { await enableAI() } }
+                            SettingsLink { Text("打开设置…") }
                                 .buttonStyle(.link)
                         }
                         .font(.system(size: 10.5))
@@ -177,7 +177,7 @@ struct CreatePullRequestSheet: View {
     }
 
     private var descriptionGenerationHelp: String {
-        if !model.isAICommitEnabled { return "这个仓库还没开启 AI 生成功能，请使用下方的开启入口。" }
+        if !model.isAICommitEnabled { return "AI 生成功能已关闭，请在 Grove 设置中开启。" }
         if base.trimmingCharacters(in: .whitespaces).isEmpty { return "先填写目标分支。" }
         return "根据这个 PR 的已提交改动生成描述"
     }
@@ -251,19 +251,6 @@ struct CreatePullRequestSheet: View {
             }
             isGeneratingDescription = false
             descriptionTask = nil
-        }
-    }
-
-    @MainActor
-    private func enableAI() async {
-        guard let repository = model.repository else { return }
-        let target = base.trimmingCharacters(in: .whitespacesAndNewlines)
-        do {
-            let byteCount = try await model.estimatedAIPullRequestByteCount(base: target)
-            guard AIEnableConfirmation.confirm(repository: repository, byteCount: byteCount) else { return }
-            repository.setAICommitEnabled(true)
-        } catch {
-            app.report(title: "读取 AI 生成上下文失败", error: error)
         }
     }
 
@@ -615,8 +602,32 @@ struct MergePullRequestSheet: View {
 // MARK: - 偏好设置
 
 struct PreferencesView: View {
+    @Environment(AppModel.self) private var model
+
     var body: some View {
         Form {
+            Section("AI 生成") {
+                Toggle("启用提交信息和 PR 描述生成", isOn: aiEnabled)
+
+                Picker("模型", selection: selectedModel) {
+                    ForEach(AIGenerationModel.allCases) { model in
+                        Text(model.name).tag(model)
+                    }
+                }
+                .disabled(!model.isAIGenerationEnabled)
+
+                Text(model.aiGenerationModel.summary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                LabeledContent("Codex CLI") { ToolStatusLabel(tool: "codex") }
+
+                Text("生成时会把已暂存的 diff、相关提交标题，或 PR 的已提交 diff 发送给 Codex；不会发送未暂存改动、未跟踪文件、仓库地址或分支名。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Section("外部工具") {
                 Text("Grove 会自动找系统里已装的 git 和 GitHub CLI（gh）。")
                     .font(.system(size: 11))
@@ -632,7 +643,25 @@ struct PreferencesView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 460, height: 300)
+        .frame(width: 500, height: 470)
+    }
+
+    private var aiEnabled: Binding<Bool> {
+        Binding(
+            get: { model.isAIGenerationEnabled },
+            set: { enabled in
+                if !enabled || AIEnableConfirmation.confirm() {
+                    model.setAIGenerationEnabled(enabled)
+                }
+            }
+        )
+    }
+
+    private var selectedModel: Binding<AIGenerationModel> {
+        Binding(
+            get: { model.aiGenerationModel },
+            set: { model.setAIGenerationModel($0) }
+        )
     }
 }
 

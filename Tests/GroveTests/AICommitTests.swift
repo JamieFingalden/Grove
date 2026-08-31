@@ -152,13 +152,13 @@ final class PullRequestAIContextTests: XCTestCase {
     }
 }
 
-final class AICommitSettingsTests: XCTestCase {
+final class AIGenerationSettingsTests: XCTestCase {
     private var suiteName: String!
     private var defaults: UserDefaults!
 
     override func setUp() {
         super.setUp()
-        suiteName = "AICommitSettingsTests.\(UUID().uuidString)"
+        suiteName = "AIGenerationSettingsTests.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
     }
 
@@ -170,13 +170,35 @@ final class AICommitSettingsTests: XCTestCase {
     }
 
     func testDefaultsToDisabled() {
-        XCTAssertFalse(AICommitSettings(defaults: defaults).isEnabled(for: URL(fileURLWithPath: "/tmp/repo")))
+        XCTAssertFalse(AIGenerationSettings(defaults: defaults).isEnabled)
     }
 
-    func testUsesNormalizedRepositoryPath() {
-        let settings = AICommitSettings(defaults: defaults)
-        settings.setEnabled(true, for: URL(fileURLWithPath: "/tmp"))
-        XCTAssertTrue(settings.isEnabled(for: URL(fileURLWithPath: "/private/tmp")))
+    func testPersistsGlobalEnabledState() {
+        let settings = AIGenerationSettings(defaults: defaults)
+        settings.setEnabled(true)
+        XCTAssertTrue(AIGenerationSettings(defaults: defaults).isEnabled)
+    }
+
+    func testDefaultsToLunaAndPersistsSelectedModel() {
+        let settings = AIGenerationSettings(defaults: defaults)
+        XCTAssertEqual(settings.model, .luna)
+
+        settings.setModel(.terra)
+        XCTAssertEqual(AIGenerationSettings(defaults: defaults).model, .terra)
+    }
+}
+
+final class CodexRunnerArgumentsTests: XCTestCase {
+    func testPassesSelectedModelToCodexCLI() throws {
+        let arguments = CodexRunner.arguments(
+            model: .luna,
+            directory: URL(fileURLWithPath: "/repo"),
+            outputURL: URL(fileURLWithPath: "/tmp/output.json"),
+            schemaURL: URL(fileURLWithPath: "/tmp/schema.json")
+        )
+
+        let modelFlag = try XCTUnwrap(arguments.firstIndex(of: "--model"))
+        XCTAssertEqual(arguments[modelFlag + 1], "gpt-5.6-luna")
     }
 }
 
@@ -196,7 +218,7 @@ final class CodexCommitLiveTests: XCTestCase {
         try Data("hello\n".utf8).write(to: root.appendingPathComponent("hello.txt"))
         try await git.stageAll(in: root)
 
-        let result = try await CodexCommitGenerator.generate(in: root, git: git)
+        let result = try await CodexCommitGenerator.generate(in: root, git: git, model: .luna)
         XCTAssertFalse(result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 }
