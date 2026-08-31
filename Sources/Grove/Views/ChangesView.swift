@@ -268,18 +268,21 @@ private struct CommitBox: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             TextEditor(text: $model.commitMessage)
+                .disabled(model.isGeneratingCommitMessage)
                 .font(.system(size: 12, design: .default))
                 .scrollContentBackground(.hidden)
                 .frame(height: 74)
                 .padding(6)
                 .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
                 .overlay(alignment: .topLeading) {
-                    if model.commitMessage.isEmpty {
+                    if model.commitMessage.isEmpty,
+                       !isFocused,
+                       !model.isGeneratingCommitMessage {
                         Text("提交信息…")
                             .font(.system(size: 12))
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 11)
-                            .padding(.vertical, 12)
+                            .padding(.top, 4)
                             .allowsHitTesting(false)
                     }
                 }
@@ -397,6 +400,7 @@ private struct CommitBox: View {
             alert.addButton(withTitle: "取消")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
+        isFocused = false
         model.startCommitMessageGeneration()
     }
 
