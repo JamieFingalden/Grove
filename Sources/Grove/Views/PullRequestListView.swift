@@ -22,12 +22,26 @@ struct PullRequestListView: View {
     }
 
     private var splitBody: some View {
-        HSplitView {
-            list
-                .frame(minWidth: 300, idealWidth: 380, maxWidth: 520, maxHeight: .infinity)
+        GeometryReader { geometry in
+            // geometry 已经是扣掉左侧项目菜单后的内容区；列表默认 30%，详情默认 70%。
+            let defaultListWidth = max(260, geometry.size.width * 0.3)
+            HSplitView {
+                list
+                    .frame(
+                        minWidth: defaultListWidth,
+                        idealWidth: defaultListWidth,
+                        maxWidth: geometry.size.width * 0.45,
+                        maxHeight: .infinity
+                    )
 
-            detail
-                .frame(minWidth: 380, maxHeight: .infinity)
+                detail
+                    .frame(
+                        minWidth: 380,
+                        idealWidth: geometry.size.width * 0.7,
+                        maxHeight: .infinity
+                    )
+                    .layoutPriority(1)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
@@ -653,17 +667,31 @@ private struct PullRequestDetailView: View {
                         Text("这个请求可能只修改了提交记录，或者服务端没有返回 diff。")
                     }
                 } else {
-                    HSplitView {
-                        List(diffFiles, selection: $selectedDiffFileID) { file in
-                            DiffFileRow(file: file)
-                                .tag(file.id)
-                        }
-                        .listStyle(.inset)
-                        .frame(minWidth: 180, idealWidth: 260, maxWidth: 340, maxHeight: .infinity)
+                    GeometryReader { geometry in
+                        // 文件列表只占代码评审区域的 30%，把主要空间留给代码。
+                        let defaultFileListWidth = max(180, geometry.size.width * 0.3)
+                        HSplitView {
+                            List(diffFiles, selection: $selectedDiffFileID) { file in
+                                DiffFileRow(file: file)
+                                    .tag(file.id)
+                            }
+                            .listStyle(.inset)
+                            .frame(
+                                minWidth: defaultFileListWidth,
+                                idealWidth: defaultFileListWidth,
+                                maxWidth: max(defaultFileListWidth, geometry.size.width * 0.45),
+                                maxHeight: .infinity
+                            )
 
-                        if let file = selectedDiffFile {
-                            DiffContentView(files: [file], showsFileHeaders: true)
-                                .frame(minWidth: 320, maxHeight: .infinity)
+                            if let file = selectedDiffFile {
+                                DiffContentView(files: [file], showsFileHeaders: true)
+                                    .frame(
+                                        minWidth: 320,
+                                        idealWidth: geometry.size.width * 0.7,
+                                        maxHeight: .infinity
+                                    )
+                                    .layoutPriority(1)
+                            }
                         }
                     }
                 }

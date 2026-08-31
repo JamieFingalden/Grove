@@ -271,6 +271,14 @@ final class ForgeTests: XCTestCase {
           printf 'diff --git a/old.txt b/new.txt\nrename from old.txt\nrename to new.txt\n--- a/old.txt\n+++ b/new.txt\n@@ -1 +1 @@\n-old\n+new\n'
           exit 0
         fi
+        if [ "$1" = "api" ] && [ "$2" = "projects/cad_pic_llm%2Fcad_llms_group/merge_requests/588/raw_diffs" ]; then
+          printf 'glab: HTTP 404\n' >&2
+          exit 1
+        fi
+        if [ "$1" = "api" ] && [ "$2" = "projects/cad_pic_llm%2Fcad_llms_group/merge_requests/588/changes?access_raw_diffs=true" ]; then
+          printf '%s\n' '{"changes":[{"old_path":"Sources/旧 文件.swift","new_path":"Sources/新 文件.swift","diff":"@@ -1 +1 @@\\n-old\\n+new\\n","new_file":false,"deleted_file":false,"renamed_file":true,"a_mode":"100644","b_mode":"100755"}]}'
+          exit 0
+        fi
         if [ "$1" = "api" ] && [ "$2" = "projects/cad_pic_llm%2Fcad_llms_group/merge_requests" ] && [ "$3" = "--method" ] && [ "$4" = "POST" ] && [ "$5" = "--raw-field" ] && [ "$6" = "description=说明" ] && [ "$7" = "--raw-field" ] && [ "$8" = "source_branch=xf-dev" ] && [ "$9" = "--raw-field" ] && [ "${10}" = "target_branch=main" ] && [ "${11}" = "--raw-field" ] && [ "${12}" = "title=Draft: 新功能" ] && [ "$GITLAB_HOST" = "192.168.251.253" ]; then
           printf '{"iid":590,"title":"Draft: 新功能","state":"opened","draft":true,"source_branch":"xf-dev","target_branch":"main","web_url":"http://192.168.251.253:8929/cad_pic_llm/cad_llms_group/-/merge_requests/590"}\n'
           exit 0
@@ -296,6 +304,15 @@ final class ForgeTests: XCTestCase {
         XCTAssertTrue(diff[0].isRename)
         XCTAssertEqual(diff[0].additions, 1)
         XCTAssertEqual(diff[0].deletions, 1)
+        let legacyDiff = try await client.pullRequestDiff(number: 588, in: directory)
+        XCTAssertEqual(legacyDiff.count, 1)
+        XCTAssertEqual(legacyDiff[0].oldPath, "Sources/旧 文件.swift")
+        XCTAssertEqual(legacyDiff[0].newPath, "Sources/新 文件.swift")
+        XCTAssertTrue(legacyDiff[0].isRename)
+        XCTAssertEqual(legacyDiff[0].oldMode, "100644")
+        XCTAssertEqual(legacyDiff[0].newMode, "100755")
+        XCTAssertEqual(legacyDiff[0].additions, 1)
+        XCTAssertEqual(legacyDiff[0].deletions, 1)
         try await client.merge(number: 587, strategy: .squash, deleteBranch: true, in: directory)
         let createdURL = try await client.createPullRequest(
             NewPullRequest(

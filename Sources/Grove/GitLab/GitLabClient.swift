@@ -287,11 +287,23 @@ struct GitLabClient: ForgeClient {
 
     func pullRequestDiff(number: Int, in directory: URL) async throws -> [FileDiff] {
         // raw_diffs 返回完整 unified diff，既保留文件头，也不需要逐文件分页请求。
-        let data = try await api(
-            "projects/:id/merge_requests/\(number)/raw_diffs",
-            in: directory
-        )
-        return DiffParser.parse(CommandResult.decode(data))
+        do {
+            let data = try await api(
+                "projects/:id/merge_requests/\(number)/raw_diffs",
+                in: directory
+            )
+            return DiffParser.parse(CommandResult.decode(data))
+        } catch let error as CommandFailure where error.output.contains("HTTP 404") {
+            // 较老的自建 GitLab 没有 raw_diffs，只能走已废弃但仍可用的 changes 接口。
+            // access_raw_diffs 绕过数据库的单文件大小限制，否则较大的文件会返回空 diff。
+            // changes 里的 diff 从 @@ 开始，先补齐文件头再交给同一个解析器。
+            let data = try await api(
+                "projects/:id/merge_requests/\(number)/changes?access_raw_diffs=true",
+                in: directory
+            )
+            let response = try Self.decoder.decode(GitLabMergeRequestChanges.self, from: data)
+            return DiffParser.parse(response.unifiedDiff)
+        }
     }
 
     func pullRequest(forBranch branch: String, in directory: URL) async throws -> PullRequest? {
@@ -396,6 +408,47 @@ struct GitLabClient: ForgeClient {
     }
 
     // MARK: -
+
+    private struct GitLabMergeRequestChanges: Decodable {
+        var changes: [Change]
+
+        struct Change: Decodable {
+            var oldPath: String
+            var newPath: String
+            var diff: String
+            var newFile: Bool
+            var deletedFile: Bool
+            var renamedFile: Bool
+            var aMode: String?
+            var bMode: String?
+
+            var unifiedDiff: String {
+                var lines = ["diff --git a/\(oldPath) b/\(newPath)"]
+
+                if newFile {
+                    lines.append("new file mode \(bMode ?? "100644")")
+                } else if deletedFile {
+                    lines.append("deleted file mode \(aMode ?? "100644")")
+                } else if let aMode, let bMode, aMode != bMode {
+                    lines.append("old mode \(aMode)")
+                    lines.append("new mode \(bMode)")
+                }
+                if renamedFile {
+                    lines.append("rename from \(oldPath)")
+                    lines.append("rename to \(newPath)")
+                }
+
+                lines.append(newFile ? "--- /dev/null" : "--- a/\(oldPath)")
+                lines.append(deletedFile ? "+++ /dev/null" : "+++ b/\(newPath)")
+                if !diff.isEmpty { lines.append(diff) }
+                return lines.joined(separator: "\n")
+            }
+        }
+
+        var unifiedDiff: String {
+            changes.map(\.unifiedDiff).joined(separator: "\n")
+        }
+    }
 
     static let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
