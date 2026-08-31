@@ -220,11 +220,12 @@ private struct WorktreeHeader: View {
                     }
                 }
             } label: {
-                Label("推送", systemImage: "arrow.up")
+                syncLabel(for: .push, title: "推送", systemImage: "arrow.up")
             } primaryAction: {
                 Task { await model.push(to: model.defaultPushRemote) }
             }
             .menuStyle(.button)
+            .tint(syncTint(for: .push))
             .fixedSize()
             .disabled(isBusy)
             .help(pushHelp(remotes: remotes))
@@ -232,8 +233,9 @@ private struct WorktreeHeader: View {
             Button {
                 Task { await model.push() }
             } label: {
-                Label("推送", systemImage: "arrow.up")
+                syncLabel(for: .push, title: "推送", systemImage: "arrow.up")
             }
+            .tint(syncTint(for: .push))
             .disabled(isBusy)
             .help(model.status.upstream == nil ? "推送并建立上游跟踪" : "git push")
         }
@@ -306,8 +308,9 @@ private struct WorktreeHeader: View {
             Button {
                 Task { await model.pull() }
             } label: {
-                Label("拉取", systemImage: "arrow.down")
+                syncLabel(for: .pull, title: "拉取", systemImage: "arrow.down")
             }
+            .tint(syncTint(for: .pull))
             .help("git pull --ff-only")
             .disabled(model.status.upstream == nil || model.activity != nil)
 
@@ -329,6 +332,38 @@ private struct WorktreeHeader: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
+        }
+    }
+
+    @ViewBuilder
+    private func syncLabel(
+        for action: WorktreeModel.SyncFeedback.Action,
+        title: String,
+        systemImage: String
+    ) -> some View {
+        if let feedback = model.syncFeedback, feedback.action == action {
+            switch feedback.phase {
+            case .running:
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text("\(title)中")
+                }
+            case .succeeded:
+                Label("\(title)完成", systemImage: "checkmark")
+            case .failed:
+                Label("\(title)失败", systemImage: "exclamationmark.triangle.fill")
+            }
+        } else {
+            Label(title, systemImage: systemImage)
+        }
+    }
+
+    private func syncTint(for action: WorktreeModel.SyncFeedback.Action) -> Color? {
+        guard let feedback = model.syncFeedback, feedback.action == action else { return nil }
+        switch feedback.phase {
+        case .running: return nil
+        case .succeeded: return .green
+        case .failed: return .red
         }
     }
 }

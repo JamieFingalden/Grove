@@ -267,6 +267,10 @@ final class ForgeTests: XCTestCase {
           printf '{}\n'
           exit 0
         fi
+        if [ "$1" = "api" ] && [ "$2" = "projects/cad_pic_llm%2Fcad_llms_group/merge_requests/589/raw_diffs" ] && [ "$GITLAB_HOST" = "192.168.251.253" ]; then
+          printf 'diff --git a/old.txt b/new.txt\nrename from old.txt\nrename to new.txt\n--- a/old.txt\n+++ b/new.txt\n@@ -1 +1 @@\n-old\n+new\n'
+          exit 0
+        fi
         if [ "$1" = "api" ] && [ "$2" = "projects/cad_pic_llm%2Fcad_llms_group/merge_requests" ] && [ "$3" = "--method" ] && [ "$4" = "POST" ] && [ "$5" = "--raw-field" ] && [ "$6" = "description=说明" ] && [ "$7" = "--raw-field" ] && [ "$8" = "source_branch=xf-dev" ] && [ "$9" = "--raw-field" ] && [ "${10}" = "target_branch=main" ] && [ "${11}" = "--raw-field" ] && [ "${12}" = "title=Draft: 新功能" ] && [ "$GITLAB_HOST" = "192.168.251.253" ]; then
           printf '{"iid":590,"title":"Draft: 新功能","state":"opened","draft":true,"source_branch":"xf-dev","target_branch":"main","web_url":"http://192.168.251.253:8929/cad_pic_llm/cad_llms_group/-/merge_requests/590"}\n'
           exit 0
@@ -285,6 +289,13 @@ final class ForgeTests: XCTestCase {
         let slug = await client.repositorySlug(in: directory)
         XCTAssertEqual(slug, "cad_pic_llm/cad_llms_group")
         try await client.approve(number: 589, in: directory)
+        let diff = try await client.pullRequestDiff(number: 589, in: directory)
+        XCTAssertEqual(diff.count, 1)
+        XCTAssertEqual(diff[0].oldPath, "old.txt")
+        XCTAssertEqual(diff[0].newPath, "new.txt")
+        XCTAssertTrue(diff[0].isRename)
+        XCTAssertEqual(diff[0].additions, 1)
+        XCTAssertEqual(diff[0].deletions, 1)
         try await client.merge(number: 587, strategy: .squash, deleteBranch: true, in: directory)
         let createdURL = try await client.createPullRequest(
             NewPullRequest(
@@ -335,6 +346,22 @@ final class ForgeTests: XCTestCase {
         XCTAssertEqual(hosts, ["github.com", "10.0.0.1:8929"])
         // "ERROR" 和那句英文提示都不能被当成主机名。
         XCTAssertFalse(hosts.contains("error"))
+    }
+
+    func testGlabConfigHostParsingStaysLocalAndIgnoresTokens() {
+        let config = """
+        hosts:
+          gitlab.com:
+            token: glpat-secret
+          "192.168.251.253":
+            api_host: 192.168.251.253:8929
+            token: another-secret
+        check_update: false
+        """
+        XCTAssertEqual(
+            GitLabClient.configuredHosts(fromConfig: config),
+            ["gitlab.com", "192.168.251.253"]
+        )
     }
 
     func testHostMatchingHandlesPortedInstances() {

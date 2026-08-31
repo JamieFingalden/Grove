@@ -7,23 +7,46 @@ struct SidebarView: View {
     var body: some View {
         @Bindable var model = model
 
-        List(selection: $model.selection) {
+        List {
             ForEach(model.repositories) { repository in
                 Section {
                     ForEach(repository.worktrees) { worktree in
-                        WorktreeRow(repository: repository, worktree: worktree)
-                            .tag(AppModel.Selection.worktree(repository: repository.root, worktree: worktree.path))
-                            .contextMenu {
-                                worktreeMenu(repository: repository, worktree: worktree)
-                            }
+                        let selection = AppModel.Selection.worktree(
+                            repository: repository.root,
+                            worktree: worktree.path
+                        )
+                        let isSelected = model.selection == selection
+
+                        Button {
+                            model.selection = selection
+                        } label: {
+                            WorktreeRow(
+                                repository: repository,
+                                worktree: worktree,
+                                isSelected: isSelected
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(selectionBackground(isSelected))
+                        .contextMenu {
+                            worktreeMenu(repository: repository, worktree: worktree)
+                        }
                     }
 
                     // 只要有远端就把入口留着。以前是 slug 拿到了才显示 ——
                     // 于是 GitLab 没登录、或者 gh 还没认出仓库时，整行直接消失，
                     // 用户根本不知道有这个功能，更不知道差哪一步。
                     if repository.hasRemote {
-                        PullRequestsRow(repository: repository)
-                            .tag(AppModel.Selection.pullRequests(repository: repository.root))
+                        let selection = AppModel.Selection.pullRequests(repository: repository.root)
+                        let isSelected = model.selection == selection
+
+                        Button {
+                            model.selection = selection
+                        } label: {
+                            PullRequestsRow(repository: repository, isSelected: isSelected)
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(selectionBackground(isSelected))
                     }
                 } header: {
                     RepositoryHeader(repository: repository, sheet: $sheet)
@@ -40,6 +63,14 @@ struct SidebarView: View {
                 }
             }
         }
+    }
+
+    /// Finder 侧栏式选中态：系统自适应的浅灰底，不用大块强调色淹没文字和角标。
+    private func selectionBackground(_ isSelected: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 9, style: .continuous)
+            .fill(isSelected
+                  ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
+                  : .clear)
     }
 
     @ViewBuilder
@@ -160,6 +191,7 @@ private struct RepositoryHeader: View {
 private struct WorktreeRow: View {
     let repository: RepositoryModel
     let worktree: Worktree
+    let isSelected: Bool
 
     /// 这一行对应的详情模型。可能还没建（没被选中过），那就只显示静态信息。
     private var detail: WorktreeModel? {
@@ -174,7 +206,7 @@ private struct WorktreeRow: View {
         HStack(spacing: 8) {
             Image(systemName: icon)
                 .font(.system(size: 13))
-                .foregroundStyle(worktree.isPrimary ? Color.accentColor : .secondary)
+                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
                 .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 1) {
@@ -182,6 +214,7 @@ private struct WorktreeRow: View {
                     Text(worktree.name)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .foregroundStyle(isSelected ? Color.accentColor : .primary)
 
                     if worktree.isLocked {
                         Image(systemName: "lock.fill")
@@ -212,6 +245,10 @@ private struct WorktreeRow: View {
             trailingBadges
         }
         .padding(.vertical, 2)
+        // plain Button 默认只命中文字和图标；撑满并声明命中形状，
+        // 让整条侧栏行（包括中间空白）都能点击。
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     private var icon: String {
@@ -253,6 +290,7 @@ private struct WorktreeRow: View {
 
 private struct PullRequestsRow: View {
     let repository: RepositoryModel
+    let isSelected: Bool
 
     private var unavailableReason: String? { repository.pullRequestUnavailableReason }
 
@@ -260,11 +298,12 @@ private struct PullRequestsRow: View {
         HStack(spacing: 8) {
             Image(systemName: "arrow.triangle.pull")
                 .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
                 .frame(width: 16)
 
             // 平台不同叫法不同：GitHub 是 Pull Request，GitLab 是合并请求。
             Text(repository.reviewTerm)
+                .foregroundStyle(isSelected ? Color.accentColor : .primary)
 
             Spacer(minLength: 4)
 
@@ -283,6 +322,8 @@ private struct PullRequestsRow: View {
             }
         }
         .padding(.vertical, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
         .opacity(unavailableReason == nil ? 1 : 0.6)
         .help(unavailableReason ?? "查看这个仓库的\(repository.reviewTerm)")
     }

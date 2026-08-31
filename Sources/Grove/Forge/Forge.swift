@@ -106,6 +106,8 @@ protocol ForgeClient: Sendable {
     func pullRequest(number: Int, in directory: URL) async throws -> PullRequest
     /// 某个分支对应的 PR/MR。找不到返回 nil（不是错误）。
     func pullRequest(forBranch branch: String, in directory: URL) async throws -> PullRequest?
+    /// 请求相对目标分支的完整代码改动。不需要先把请求检出成本地工作树。
+    func pullRequestDiff(number: Int, in directory: URL) async throws -> [FileDiff]
 
     /// 评论线程。用于在 Grove 里读别人的评审意见。
     func reviewThreads(number: Int, in directory: URL) async throws -> [ReviewThread]

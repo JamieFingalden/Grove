@@ -116,6 +116,38 @@ final class GitHubReviewThreadTests: XCTestCase {
     }
 }
 
+final class GitHubPullRequestDiffTests: XCTestCase {
+    func testLoadsColorlessPullRequestDiff() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let executable = directory.appendingPathComponent("gh")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "pr" ] && [ "$2" = "diff" ] && [ "$3" = "42" ] && [ "$4" = "--color" ] && [ "$5" = "never" ]; then
+          printf 'diff --git a/app.swift b/app.swift\n--- a/app.swift\n+++ b/app.swift\n@@ -1 +1 @@\n-old\n+new\n'
+          exit 0
+        fi
+        exit 2
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let client = GitHubClient(
+            executable: executable,
+            environment: ProcessInfo.processInfo.environment
+        )
+        let diff = try await client.pullRequestDiff(number: 42, in: directory)
+
+        XCTAssertEqual(diff.count, 1)
+        XCTAssertEqual(diff[0].displayPath, "app.swift")
+        XCTAssertEqual(diff[0].additions, 1)
+        XCTAssertEqual(diff[0].deletions, 1)
+    }
+}
+
 /// 真的去打 GitHub 接口的实测。默认跳过 —— 要联网、要 `gh` 已登录。
 ///
 /// ```sh

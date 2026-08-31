@@ -14,6 +14,7 @@ struct GitLabClient: ForgeClient {
     let executable: URL
     let environment: [String: String]
     private let projectContextCache = ProjectContextCache()
+    private static let authProbeTimeout: Double = 8
 
     var kind: ForgeKind { .gitlab }
 
@@ -32,14 +33,18 @@ struct GitLabClient: ForgeClient {
 
     // MARK: - 底层调用
 
-    private func run(_ arguments: [String], in directory: URL?) async throws -> CommandResult {
+    private func run(
+        _ arguments: [String],
+        in directory: URL?,
+        timeout: Double = ProcessRunner.networkTimeout
+    ) async throws -> CommandResult {
         let command = await preparedCommand(arguments, in: directory)
         return try await ProcessRunner.run(
             executable: executable,
             arguments: command.arguments,
             workingDirectory: directory,
             environment: command.environment,
-            timeout: ProcessRunner.networkTimeout
+            timeout: timeout
         )
     }
 
@@ -139,6 +144,40 @@ struct GitLabClient: ForgeClient {
         func insert(_ context: ProjectContext, for directory: URL) { values[directory] = context }
     }
 
+    /// 从 glab 的 YAML 配置里只读主机名，不触发任何网络认证。
+    /// token 在更深一层，解析器既不读取也不返回它。
+    static func configuredHosts(fromConfig text: String) -> Set<String> {
+        var sectionIndent: Int?
+        var hostIndent: Int?
+        var hosts: Set<String> = []
+
+        for rawLine in text.components(separatedBy: .newlines) {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
+            let indent = rawLine.prefix { $0 == " " }.count
+
+            if sectionIndent == nil {
+                if trimmed == "hosts:" { sectionIndent = indent }
+                continue
+            }
+            guard let sectionIndent else { continue }
+            if indent <= sectionIndent { break }
+            if hostIndent == nil { hostIndent = indent }
+            guard indent == hostIndent, trimmed.hasSuffix(":") else { continue }
+
+            var host = String(trimmed.dropLast())
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if host.count >= 2,
+               (host.first == "\"" && host.last == "\""
+                || host.first == "'" && host.last == "'") {
+                host.removeFirst()
+                host.removeLast()
+            }
+            if !host.isEmpty { hosts.insert(host) }
+        }
+        return hosts
+    }
+
     /// 调一个 REST 接口。
     ///
     /// `:id` 会在底层调用前替换成 URL 编码的项目路径，避免 glab
@@ -167,19 +206,45 @@ struct GitLabClient: ForgeClient {
         // 令牌过期，整条命令就返回失败，连已正常登录的内网 GitLab 也会被
         // Grove 误判成不可用。逐台检查，任意一台可用就足以启用 GitLab 功能；
         // 当前仓库若恰好指向未登录的另一台，后续 API 调用会给出该主机的原始错误。
-        for host in await configuredHosts() {
-            let result = try? await run(["auth", "status", "--hostname", host], in: nil)
-            if result?.isSuccess == true { return true }
+        let hosts = await configuredHosts()
+        return await withTaskGroup(of: Bool.self) { group in
+            for host in hosts {
+                group.addTask {
+                    let result = try? await run(
+                        ["auth", "status", "--hostname", host],
+                        in: nil,
+                        timeout: Self.authProbeTimeout
+                    )
+                    return result?.isSuccess == true
+                }
+            }
+            for await authenticated in group where authenticated {
+                group.cancelAll()
+                return true
+            }
+            return false
         }
-        return false
     }
 
     func configuredHosts() async -> Set<String> {
-        // 注意：这里返回的是「配置过的」主机，不保证每个都登录成功。
-        // 用途只是判断某个远端归不归 GitLab 管，够用了；真正的认证失败
-        // 会在后续 API 调用时带着 glab 的原始错误信息浮出来。
-        guard let result = try? await run(["auth", "status"], in: nil) else { return [] }
-        // glab 把 auth status 写在 stderr 上，stdout 是空的。
+        // `glab auth status --all` 会联网验证每台主机；启动时用它列主机，
+        // 一台离线实例就能拖住整个应用。配置文件路径和内容都是本地读取。
+        if let pathResult = try? await run(
+            ["config", "path"],
+            in: nil,
+            timeout: ProcessRunner.localTimeout
+        ), pathResult.isSuccess,
+           let text = try? String(contentsOfFile: pathResult.trimmedStdout, encoding: .utf8) {
+            let hosts = Self.configuredHosts(fromConfig: text)
+            if !hosts.isEmpty { return hosts }
+        }
+
+        // 极老版本 glab 没有标准配置路径时才退回 CLI，并给探测设置短超时。
+        guard let result = try? await run(
+            ["auth", "status", "--all"],
+            in: nil,
+            timeout: Self.authProbeTimeout
+        ) else { return [] }
         return AuthStatusParser.hosts(in: result.stdout + "\n" + result.stderr)
     }
 
@@ -218,6 +283,15 @@ struct GitLabClient: ForgeClient {
         async let jobRequest = pipelineJobs(pipelineID: merge.headPipeline?.id, in: directory)
         let (loadedApprovals, loadedJobs) = await (approvalRequest, jobRequest)
         return merge.asPullRequest(approvals: loadedApprovals, jobs: loadedJobs)
+    }
+
+    func pullRequestDiff(number: Int, in directory: URL) async throws -> [FileDiff] {
+        // raw_diffs 返回完整 unified diff，既保留文件头，也不需要逐文件分页请求。
+        let data = try await api(
+            "projects/:id/merge_requests/\(number)/raw_diffs",
+            in: directory
+        )
+        return DiffParser.parse(CommandResult.decode(data))
     }
 
     func pullRequest(forBranch branch: String, in directory: URL) async throws -> PullRequest? {

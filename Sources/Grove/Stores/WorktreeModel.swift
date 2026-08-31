@@ -35,6 +35,19 @@ final class WorktreeModel: Identifiable {
     var isLoading = false
     var activity: String?
 
+    /// 拉取 / 推送按钮自己的短暂反馈。`activity` 只表示「还在执行」，操作结束后
+    /// 立刻消失，用户无法区分成功和卡住；这里把结果再保留一小会儿给按钮展示。
+    struct SyncFeedback: Equatable {
+        enum Action: Equatable { case pull, push }
+        enum Phase: Equatable { case running, succeeded, failed }
+
+        var action: Action
+        var phase: Phase
+    }
+
+    private(set) var syncFeedback: SyncFeedback?
+    @ObservationIgnored private var syncFeedbackResetTask: Task<Void, Never>?
+
     /// 当前选中的文件。切换时会去取它的 diff。
     var selectedPath: String? {
         didSet {
@@ -547,7 +560,7 @@ final class WorktreeModel: Identifiable {
     }
 
     func pull() async {
-        await mutate("拉取") {
+        await performSync(.pull, activity: "正在拉取…") {
             try await self.git.pull(in: self.path)
         }
     }
@@ -574,26 +587,57 @@ final class WorktreeModel: Identifiable {
     /// 也就是终端里裸 `git push` 的行为。
     func push(to remote: NamedRemote? = nil) async {
         let label = remote.map { "正在推送到 \($0.name)…" } ?? "正在推送…"
-        activity = label
-        defer { activity = nil }
-        do {
+        await performSync(.push, activity: label, refreshPullRequests: true) {
             // 没有上游就顺手建立跟踪关系。不然第一次 push 会被 git 拒掉，
             // 并要求用户去终端里敲 --set-upstream。
             //
             // 但**已经有上游**时不动它：用户显式推到另一个远端（比如备份仓库）
             // 不代表他想把分支改跟踪到那边去，悄悄改掉会让之后的 pull 拉错地方。
-            let needsUpstream = status.upstream == nil
-            try await git.push(
-                in: path,
+            let needsUpstream = self.status.upstream == nil
+            try await self.git.push(
+                in: self.path,
                 remote: remote?.name,
-                branch: worktree.branch,
+                branch: self.worktree.branch,
                 setUpstream: needsUpstream
             )
-        } catch {
-            app?.report(title: "推送失败", error: error)
         }
+    }
+
+    private func performSync(
+        _ action: SyncFeedback.Action,
+        activity label: String,
+        refreshPullRequests: Bool = false,
+        _ work: @escaping () async throws -> Void
+    ) async {
+        syncFeedbackResetTask?.cancel()
+        syncFeedback = .init(action: action, phase: .running)
+        activity = label
+
+        do {
+            try await work()
+            activity = nil
+            showSyncResult(action, phase: .succeeded)
+        } catch {
+            activity = nil
+            showSyncResult(action, phase: .failed)
+            let title = action == .pull ? "拉取失败" : "推送失败"
+            app?.report(title: title, error: error)
+        }
+
         await refresh()
-        await repository?.refreshPullRequests()
+        if refreshPullRequests {
+            await repository?.refreshPullRequests()
+        }
+    }
+
+    private func showSyncResult(_ action: SyncFeedback.Action, phase: SyncFeedback.Phase) {
+        let result = SyncFeedback(action: action, phase: phase)
+        syncFeedback = result
+        syncFeedbackResetTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, self?.syncFeedback == result else { return }
+            self?.syncFeedback = nil
+        }
     }
 
     private func mutate(_ label: String, _ work: @escaping () async throws -> Void) async {

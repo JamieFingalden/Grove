@@ -12,6 +12,7 @@ import Foundation
 struct GitHubClient: ForgeClient {
     let executable: URL
     let environment: [String: String]
+    private static let authProbeTimeout: Double = 8
 
     var kind: ForgeKind { .github }
 
@@ -39,13 +40,17 @@ struct GitHubClient: ForgeClient {
     // `gh` 的每条子命令都要打 GitHub 的接口，所以统一用网络级超时 ——
     // 按本地查询的 30 秒来卡，网络一慢就会误伤。
 
-    private func gh(_ arguments: [String], in directory: URL? = nil) async throws -> CommandResult {
+    private func gh(
+        _ arguments: [String],
+        in directory: URL? = nil,
+        timeout: Double = ProcessRunner.networkTimeout
+    ) async throws -> CommandResult {
         try await ProcessRunner.run(
             executable: executable,
             arguments: arguments,
             workingDirectory: directory,
             environment: environment,
-            timeout: ProcessRunner.networkTimeout
+            timeout: timeout
         )
     }
 
@@ -65,7 +70,7 @@ struct GitHubClient: ForgeClient {
     /// `gh` 是否已登录。未登录时所有 PR 命令都会失败，提前问一次能给出准确的提示，
     /// 而不是让用户看到一句莫名其妙的 API 错误。
     func isAuthenticated() async -> Bool {
-        let result = try? await gh(["auth", "status"])
+        let result = try? await gh(["auth", "status", "--active"], timeout: Self.authProbeTimeout)
         return result?.isSuccess ?? false
     }
 
@@ -75,9 +80,11 @@ struct GitHubClient: ForgeClient {
     /// 这样 GitHub Enterprise（公司自建的 GitHub）也能自动支持：
     /// 用户 `gh auth login --hostname ghe.corp.example` 之后它就出现在这个列表里。
     func configuredHosts() async -> Set<String> {
-        guard let result = try? await gh(["auth", "status"]) else { return [] }
-        // gh 把 auth status 写在 stderr 上。
-        return AuthStatusParser.hosts(in: result.stdout + "\n" + result.stderr)
+        guard let result = try? await gh(
+            ["auth", "status", "--json", "hosts", "--jq", ".hosts | keys[]"],
+            timeout: Self.authProbeTimeout
+        ) else { return [] }
+        return Set(result.stdout.split(whereSeparator: \.isNewline).map(String.init))
     }
 
     /// 当前目录对应的 GitHub 仓库全名（`owner/repo`）。不是 GitHub 仓库时返回 nil。
@@ -113,6 +120,15 @@ struct GitHubClient: ForgeClient {
             in: directory
         )
         return try Self.decoder.decode(PullRequest.self, from: result.standardOutput)
+    }
+
+    func pullRequestDiff(number: Int, in directory: URL) async throws -> [FileDiff] {
+        // 显式禁用颜色，否则用户全局配置了强制彩色时，ANSI 控制符会混进代码和路径。
+        let result = try await ghChecked(
+            ["pr", "diff", String(number), "--color", "never"],
+            in: directory
+        )
+        return DiffParser.parse(result.stdout)
     }
 
     /// 某个分支对应的 PR。用来把工作树和 PR 关联起来 —— Grove 的核心视图。

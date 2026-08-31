@@ -76,27 +76,36 @@ final class RepositoryModel: Identifiable {
 
     // MARK: - 刷新
 
-    func refresh() async {
+    func refresh(loadForgeMetadata: Bool = true) async {
         isRefreshing = true
         defer { isRefreshing = false }
 
         do {
-            worktrees = try await git.worktrees(in: root)
-            branches = try await git.branches(in: root)
-            remoteBranches = try await git.remoteBranches(in: root)
+            async let loadedWorktrees = git.worktrees(in: root)
+            async let loadedBranches = git.branches(in: root)
+            async let loadedRemoteBranches = git.remoteBranches(in: root)
+            let loaded = try await (loadedWorktrees, loadedBranches, loadedRemoteBranches)
+            worktrees = loaded.0
+            branches = loaded.1
+            remoteBranches = loaded.2
         } catch {
             app?.report(title: "读取 \(name) 失败", error: error)
             return
         }
 
-        remotes = (try? await git.remotes(in: root)) ?? []
-        let originURL = await git.remoteURL(in: root)
+        async let loadedRemotes = try? git.remotes(in: root)
+        async let loadedOriginURL = git.remoteURL(in: root)
+        async let loadedDefaultBranch = git.defaultBranch(in: root)
+        let (resolvedRemotes, originURL, resolvedDefaultBranch) = await (
+            loadedRemotes, loadedOriginURL, loadedDefaultBranch
+        )
+        remotes = resolvedRemotes ?? []
         hasRemote = originURL != nil
         origin = originURL.flatMap(GitRemote.parse)
         // 托管商只按 origin 认。一个仓库可能同时挂着内网 GitLab 的 origin 和
         // GitHub 备份 remote，让 CLI 自己去猜会认错到另一个仓库上。
         forge = app?.forge(for: origin)
-        defaultBranch = await git.defaultBranch(in: root)
+        defaultBranch = resolvedDefaultBranch
 
         // 已经不存在的工作树，把缓存的详情模型也清掉，免得内存里挂着一堆死对象。
         let livePaths = Set(worktrees.map(\.path))
@@ -120,9 +129,7 @@ final class RepositoryModel: Identifiable {
         // 一个 origin 在内网 GitLab、另外挂了个 GitHub remote 做备份的仓库，
         // 会被它认成那个备份仓库，于是界面上显示的是**另一个仓库**的 PR ——
         // 而且「检出 PR」会拿着 GitHub 的分支名去 GitLab 上 fetch。
-        if slug == nil, let forge {
-            slug = await forge.repositorySlug(in: root)
-        }
+        if loadForgeMetadata { await refreshForgeMetadata() }
 
         // 并发刷新所有工作树的状态。侧边栏上「哪个工作树有未提交的改动、
         // 领先/落后远端多少」是挑工作树时最主要的依据，不能等点进去才显示。
@@ -137,6 +144,19 @@ final class RepositoryModel: Identifiable {
         if let selected = app?.selectedWorktreeModel, selected.repositoryRoot == root {
             await selected.refresh()
         }
+    }
+
+    /// 只补托管商归属和仓库标识，不重复扫描工作树、分支和未提交文件。
+    /// 启动和「重新检测」都走这里，网络慢时不会连本地 Git 一起重跑。
+    func refreshForgeMetadata() async {
+        let previousKind = forge?.kind
+        forge = app?.forge(for: origin)
+        if previousKind != forge?.kind {
+            slug = nil
+            pullRequests = []
+        }
+        guard slug == nil, let forge else { return }
+        slug = await forge.repositorySlug(in: root)
     }
 
     func refreshPullRequests() async {

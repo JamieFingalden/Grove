@@ -233,6 +233,7 @@ struct EmptyRepositoryView: View {
 struct FailureBanner: View {
     let failure: GroveFailure
     let dismiss: () -> Void
+    @State private var showsTechnicalDetails = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -245,15 +246,28 @@ struct FailureBanner: View {
                 Text(failure.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    // git 的报错常常有好几行，全展开会把界面顶掉；限高并允许选中复制。
-                    .lineLimit(6)
                     .textSelection(.enabled)
+
+                if let technicalDetail = failure.technicalDetail, !technicalDetail.isEmpty {
+                    DisclosureGroup("技术详情", isExpanded: $showsTechnicalDetails) {
+                        Text(technicalDetail)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            // 原始 stderr 只在用户主动展开时出现，并限制高度避免挤掉界面。
+                            .lineLimit(8)
+                            .textSelection(.enabled)
+                            .padding(.top, 3)
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
             }
 
             Spacer(minLength: 8)
 
             Button {
-                SystemActions.copyToPasteboard("\(failure.title)\n\(failure.detail)")
+                let technical = failure.technicalDetail.map { "\n\n技术详情：\n\($0)" } ?? ""
+                SystemActions.copyToPasteboard("\(failure.title)\n\(failure.detail)\(technical)")
             } label: {
                 Image(systemName: "doc.on.doc")
             }

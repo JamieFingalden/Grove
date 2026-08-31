@@ -282,7 +282,11 @@ private struct PullRequestDetailView: View {
 
     @State private var detailed: PullRequest?
     @State private var threads: [ReviewThread] = []
+    @State private var diffFiles: [FileDiff] = []
+    @State private var selectedDiffFileID: String?
     @State private var isLoadingThreads = false
+    @State private var isLoadingDiff = false
+    @State private var didFailDiff = false
     @State private var commentText = ""
     @State private var isWorking = false
     @State private var didApprove = false
@@ -301,6 +305,7 @@ private struct PullRequestDetailView: View {
                     checksSection(checks)
                 }
                 bodySection
+                codeSection
                 reviewSection
             }
             .padding(18)
@@ -309,16 +314,59 @@ private struct PullRequestDetailView: View {
         .task { await loadDetail() }
     }
 
-    /// 详情页要补两样列表视图里没有的东西：完整正文，以及评论线程。
-    /// 列表接口刻意不带它们 —— 一屏三十个请求，每个都带上正文和讨论会拖到几 MB。
+    /// 详情页补齐列表没有的正文、代码 diff 和评论线程。三项并发加载，
+    /// 不让体积最大的 diff 把标题和讨论也一起卡住。
     private func loadDetail() async {
         guard let forge = repository.forge else { return }
+        isLoadingThreads = true
+        isLoadingDiff = true
+
+        async let loadedThreads = try? await forge.reviewThreads(
+            number: pullRequest.number,
+            in: repository.root
+        )
+        async let loadedDiff = try? await forge.pullRequestDiff(
+            number: pullRequest.number,
+            in: repository.root
+        )
+
         if pullRequest.body == nil {
             detailed = try? await forge.pullRequest(number: pullRequest.number, in: repository.root)
         }
+
+        threads = await loadedThreads ?? []
+        isLoadingThreads = false
+
+        if let files = await loadedDiff {
+            diffFiles = files
+            didFailDiff = false
+            selectFirstDiffFileIfNeeded()
+        } else {
+            diffFiles = []
+            didFailDiff = true
+        }
+        isLoadingDiff = false
+    }
+
+    private func reloadThreads() async {
+        guard let forge = repository.forge else { return }
         isLoadingThreads = true
         threads = (try? await forge.reviewThreads(number: pullRequest.number, in: repository.root)) ?? []
         isLoadingThreads = false
+    }
+
+    private func reloadDiff() async {
+        guard let forge = repository.forge else { return }
+        isLoadingDiff = true
+        do {
+            diffFiles = try await forge.pullRequestDiff(number: pullRequest.number, in: repository.root)
+            didFailDiff = false
+            selectFirstDiffFileIfNeeded()
+        } catch {
+            diffFiles = []
+            didFailDiff = true
+        }
+        isLoadingDiff = false
     }
 
     // MARK: - 评审
@@ -433,11 +481,11 @@ private struct PullRequestDetailView: View {
         // 只有真正新增了评论时才重载详情区。
         switch action {
         case .approve where !text.isEmpty:
-            await loadDetail()
+            await reloadThreads()
         case .approve:
             break
         case .comment, .requestChanges:
-            await loadDetail()
+            await reloadThreads()
         }
         isWorking = false
 
@@ -563,6 +611,77 @@ private struct PullRequestDetailView: View {
                          tint: mergeable == "CONFLICTING" ? .red : .secondary)
             }
         }
+    }
+
+    // MARK: - 代码评审
+
+    private var codeSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Text("代码变更")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                if !diffFiles.isEmpty {
+                    Text("\(diffFiles.count) 个文件")
+                        .font(.system(size: 10, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.tertiary)
+                }
+                if isLoadingDiff { ProgressView().controlSize(.mini) }
+                Spacer()
+                if didFailDiff {
+                    Button("重试") { Task { await reloadDiff() } }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 10.5))
+                }
+            }
+
+            Group {
+                if isLoadingDiff {
+                    ProgressView("正在加载代码改动…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if didFailDiff {
+                    ContentUnavailableView {
+                        Label("代码改动加载失败", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text("可以重试，或者暂时在浏览器里查看。")
+                    }
+                } else if diffFiles.isEmpty {
+                    ContentUnavailableView {
+                        Label("没有代码改动", systemImage: "equal.circle")
+                    } description: {
+                        Text("这个请求可能只修改了提交记录，或者服务端没有返回 diff。")
+                    }
+                } else {
+                    HSplitView {
+                        List(diffFiles, selection: $selectedDiffFileID) { file in
+                            DiffFileRow(file: file)
+                                .tag(file.id)
+                        }
+                        .listStyle(.inset)
+                        .frame(minWidth: 180, idealWidth: 260, maxWidth: 340, maxHeight: .infinity)
+
+                        if let file = selectedDiffFile {
+                            DiffContentView(files: [file], showsFileHeaders: true)
+                                .frame(minWidth: 320, maxHeight: .infinity)
+                        }
+                    }
+                }
+            }
+            .frame(height: 520)
+            .background(Color(nsColor: .textBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay { RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5) }
+        }
+    }
+
+    private var selectedDiffFile: FileDiff? {
+        diffFiles.first { $0.id == selectedDiffFileID } ?? diffFiles.first
+    }
+
+    private func selectFirstDiffFileIfNeeded() {
+        guard !diffFiles.contains(where: { $0.id == selectedDiffFileID }) else { return }
+        selectedDiffFileID = diffFiles.first?.id
     }
 
     private func statItem(_ title: String, _ value: String, _ icon: String, tint: Color = .secondary) -> some View {

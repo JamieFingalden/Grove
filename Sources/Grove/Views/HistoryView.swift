@@ -2,6 +2,7 @@ import SwiftUI
 
 struct HistoryView: View {
     @Bindable var model: WorktreeModel
+    @State private var selectedFileID: String?
 
     var body: some View {
         // 跟 ChangesView 同理：HSplitView 不会自己撑满父容器，得显式声明。
@@ -163,7 +164,7 @@ struct HistoryView: View {
                             Text("这可能是一个空提交或合并提交。")
                         }
                     } else {
-                        DiffContentView(files: diff)
+                        commitFilesAndDiff(diff)
                     }
                 } else {
                     ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -178,6 +179,60 @@ struct HistoryView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    /// 一个提交可能改几十个文件。先选文件、再看该文件的 diff，避免所有内容
+    /// 首尾相接挤成一张长页，也让用户随时知道当前代码属于哪个文件。
+    private func commitFilesAndDiff(_ files: [FileDiff]) -> some View {
+        VSplitView {
+            VStack(spacing: 0) {
+                HStack(spacing: 6) {
+                    Text("改动文件")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("\(files.count)")
+                        .font(.system(size: 10, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+
+                Divider()
+
+                List(files, selection: $selectedFileID) { file in
+                    DiffFileRow(file: file)
+                        .tag(file.id)
+                }
+                .listStyle(.inset)
+            }
+            // 文件少时只占实际需要的高度；文件多时封顶并让列表自己滚动。
+            // 固定吃满 240pt 会让只改一个文件的提交上方空出一大片无用区域。
+            .frame(height: fileListHeight(for: files))
+
+            if let file = selectedFile(in: files) {
+                DiffContentView(files: [file], showsFileHeaders: true)
+                    .frame(minHeight: 180)
+            }
+        }
+        .onAppear { selectFirstFileIfNeeded(from: files) }
+        .onChange(of: files.map(\.id)) { _, _ in
+            selectFirstFileIfNeeded(from: files)
+        }
+    }
+
+    private func selectedFile(in files: [FileDiff]) -> FileDiff? {
+        files.first { $0.id == selectedFileID } ?? files.first
+    }
+
+    private func selectFirstFileIfNeeded(from files: [FileDiff]) {
+        guard !files.contains(where: { $0.id == selectedFileID }) else { return }
+        selectedFileID = files.first?.id
+    }
+
+    private func fileListHeight(for files: [FileDiff]) -> CGFloat {
+        let renameDetails = files.filter(\.isRename).count
+        return min(240, 42 + CGFloat(files.count * 30 + renameDetails * 14))
     }
 }
 

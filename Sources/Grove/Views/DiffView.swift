@@ -158,6 +158,8 @@ struct DiffContentView: View {
     let files: [FileDiff]
     /// 有模型就允许勾选行（变更视图）；没有就是只读展示（提交历史）。
     var model: WorktreeModel?
+    /// 历史页一次只展示一个选中文件，仍要保留文件标题，避免代码失去归属感。
+    var showsFileHeaders = false
 
     var body: some View {
         ScrollView([.vertical, .horizontal]) {
@@ -182,7 +184,7 @@ struct DiffContentView: View {
                             }
                         }
                     } header: {
-                        if files.count > 1 {
+                        if showsFileHeaders || files.count > 1 {
                             FileDiffHeader(file: file)
                         }
                     }
@@ -231,6 +233,60 @@ private struct FileDiffHeader: View {
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.bar)
+    }
+}
+
+/// diff 文件导航里的共用行。历史和 PR 评审都使用同一套状态与增删统计。
+struct DiffFileRow: View {
+    let file: FileDiff
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(badge)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(tint)
+                .frame(width: 16, height: 16)
+                .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 3))
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(file.displayPath)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                if file.isRename, let oldPath = file.oldPath {
+                    Text("原路径：\(oldPath)")
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            Text("+\(file.additions)")
+                .foregroundStyle(.green)
+            Text("−\(file.deletions)")
+                .foregroundStyle(.red)
+        }
+        .font(.system(size: 10, weight: .semibold, design: .rounded))
+        .monospacedDigit()
+        .padding(.vertical, 1)
+    }
+
+    private var badge: String {
+        if file.isNewFile { return "A" }
+        if file.isDeletedFile { return "D" }
+        if file.isRename { return "R" }
+        return "M"
+    }
+
+    private var tint: Color {
+        if file.isNewFile { return .green }
+        if file.isDeletedFile { return .red }
+        if file.isRename { return .blue }
+        return .orange
     }
 }
 

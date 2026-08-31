@@ -6,18 +6,71 @@ struct GroveFailure: Identifiable, Sendable {
     let id = UUID()
     var title: String
     var detail: String
+    /// 面向开发者的原始输出默认收起来，避免一整屏 stderr 冒充用户提示。
+    var technicalDetail: String?
     var date: Date
 
     init(title: String, error: Error) {
         self.title = title
-        self.detail = error.localizedDescription
+        if let failure = error as? CommandFailure {
+            self.detail = Self.friendlyGitMessage(failure.output)
+            self.technicalDetail = [failure.commandLine, failure.output]
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
+        } else if error is CommandTimeout {
+            self.detail = "远端响应时间过长，操作已经停止。请检查网络或 VPN，确认远端服务可用后再试。"
+            self.technicalDetail = error.localizedDescription
+        } else {
+            self.detail = error.localizedDescription
+            self.technicalDetail = nil
+        }
         self.date = Date()
     }
 
     init(title: String, detail: String) {
         self.title = title
         self.detail = detail
+        self.technicalDetail = nil
         self.date = Date()
+    }
+
+    /// 把 Git 面向终端的报错翻译成用户能直接采取行动的说明。
+    private static func friendlyGitMessage(_ output: String) -> String {
+        let message = output.lowercased()
+
+        if message.contains("diverging branches") || message.contains("not possible to fast-forward") {
+            return "本地和远端都有新的提交，无法直接拉取。请先点「变基」，把本地提交接到远端最新提交之后，再重新拉取。"
+        }
+        if message.contains("non-fast-forward") || message.contains("fetch first") {
+            return "远端有本地尚未包含的提交，因此拒绝了推送。请先拉取；如果提示分支已分叉，就先完成变基，再重新推送。"
+        }
+        if message.contains("authentication failed")
+            || message.contains("could not read username")
+            || message.contains("permission denied (publickey)")
+            || message.contains("http basic: access denied") {
+            return "远端身份验证失败。请检查 Git 凭据或 SSH 密钥，确认当前账号有这个仓库的访问权限后重试。"
+        }
+        if message.contains("could not resolve host")
+            || message.contains("failed to connect")
+            || message.contains("connection timed out")
+            || message.contains("unable to access") {
+            return "无法连接远端仓库。请检查网络、VPN 和远端地址，确认服务可访问后重试。"
+        }
+        if message.contains("repository not found") {
+            return "找不到远端仓库，或当前账号没有访问权限。请检查远端地址和账号权限。"
+        }
+        if message.contains("protected branch")
+            || message.contains("pre-receive hook declined") {
+            return "远端规则拒绝了这次推送。该分支可能受保护，请改用功能分支并提交合并请求。"
+        }
+        if message.contains("has no upstream branch") {
+            return "当前分支还没有关联远端分支。请从推送按钮的菜单选择目标远端，首次推送会自动建立关联。"
+        }
+        if message.contains("could not resolve to a pullrequest") {
+            return "远端找不到这个评审请求。它可能已经结束、被删除，或者当前仓库与请求不匹配；请刷新后重新选择。"
+        }
+
+        return "Git 没有完成这次操作。请展开「技术详情」查看原始信息，处理后再试。"
     }
 }
 
@@ -62,20 +115,49 @@ final class AppModel {
             return
         }
 
-        github = await GitHubClient.resolve()
-        if let github {
-            githubNeedsAuth = !(await github.isAuthenticated())
-            githubHosts = await github.configuredHosts()
-        }
-
-        gitlab = await GitLabClient.resolve()
-        if let gitlab {
-            gitlabNeedsAuth = !(await gitlab.isAuthenticated())
-            gitlabHosts = await gitlab.configuredHosts()
-        }
+        // git 就绪后界面已经能工作，托管商和旧仓库恢复都放到后台并发进行。
+        // 一台离线的自建 GitLab 不应该把整个窗口锁在「正在准备」一分钟。
         toolsReady = true
 
-        await restoreBookmarkedRepositories()
+        async let repositoryRestore: Void = restoreBookmarkedRepositories()
+        await detectForges()
+        await repositoryRestore
+
+        // 启动恢复刻意只读本地 Git 状态；托管商探测完成后再补仓库标识。
+        // 这一步即使网络慢，仓库和工作树也早已可以使用。
+        for repository in repositories {
+            await repository.refreshForgeMetadata()
+        }
+    }
+
+    private func detectForges() async {
+        async let resolvedGitHub = GitHubClient.resolve()
+        async let resolvedGitLab = GitLabClient.resolve()
+        let (github, gitlab) = await (resolvedGitHub, resolvedGitLab)
+        self.github = github
+        self.gitlab = gitlab
+
+        async let githubProbe = probeGitHub(github)
+        async let gitlabProbe = probeGitLab(gitlab)
+        let (githubState, gitlabState) = await (githubProbe, gitlabProbe)
+        githubNeedsAuth = githubState.needsAuth
+        githubHosts = githubState.hosts
+        gitlabNeedsAuth = gitlabState.needsAuth
+        gitlabHosts = gitlabState.hosts
+    }
+
+    private func probeGitHub(_ client: GitHubClient?) async -> (needsAuth: Bool, hosts: Set<String>) {
+        guard let client else { return (false, []) }
+        async let authenticated = client.isAuthenticated()
+        async let hosts = client.configuredHosts()
+        return await (!(authenticated), hosts)
+    }
+
+    private func probeGitLab(_ client: GitLabClient?) async -> (needsAuth: Bool, hosts: Set<String>) {
+        guard let client else { return (false, []) }
+        async let authenticated = client.isAuthenticated()
+        async let hosts = client.configuredHosts()
+        return await (!(authenticated), hosts)
     }
 
     /// 某个远端该由哪个托管商客户端处理。认不出来返回 nil —— 评审功能就整块关闭，
@@ -160,25 +242,11 @@ final class AppModel {
     /// 不刷新的话 Grove 还认为这台主机不认识 —— 「登录完还得重启 app」
     /// 是个很没道理的要求。
     func redetectForges() async {
-        github = await GitHubClient.resolve()
-        if let github {
-            githubNeedsAuth = !(await github.isAuthenticated())
-            githubHosts = await github.configuredHosts()
-        } else {
-            githubHosts = []
-        }
-
-        gitlab = await GitLabClient.resolve()
-        if let gitlab {
-            gitlabNeedsAuth = !(await gitlab.isAuthenticated())
-            gitlabHosts = await gitlab.configuredHosts()
-        } else {
-            gitlabHosts = []
-        }
+        await detectForges()
 
         // 每个仓库都要重新判一次归属，否则刚登录的那台还是灰的。
         for repository in repositories {
-            await repository.refresh()
+            await repository.refreshForgeMetadata()
         }
     }
 
@@ -188,7 +256,15 @@ final class AppModel {
             // 上次打开的目录可能已经被删/改名了，静默跳过 —— 启动时弹一串
             // 「找不到仓库」的错误没有任何帮助。
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
-            await openRepository(at: url, persist: false, select: false)
+            if let repository = await openRepository(
+                at: url,
+                persist: false,
+                select: false,
+                loadForgeMetadata: false
+            ), selection == nil {
+                // 不等剩下的仓库全部刷新，第一座仓库可用后立刻进入它。
+                selectDefaultWorktree(in: repository)
+            }
         }
         bookmarks.save(repositories.map(\.root.path))
 
@@ -200,7 +276,12 @@ final class AppModel {
     // MARK: - 仓库管理
 
     @discardableResult
-    func openRepository(at url: URL, persist: Bool = true, select: Bool = true) async -> RepositoryModel? {
+    func openRepository(
+        at url: URL,
+        persist: Bool = true,
+        select: Bool = true,
+        loadForgeMetadata: Bool = true
+    ) async -> RepositoryModel? {
         guard let git else { return nil }
 
         guard let root = await git.repositoryRoot(for: url) else {
@@ -218,7 +299,7 @@ final class AppModel {
         repositories.append(repository)
         repositories.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
 
-        await repository.refresh()
+        await repository.refresh(loadForgeMetadata: loadForgeMetadata)
         if persist { bookmarks.save(repositories.map(\.root.path)) }
         if select { selectDefaultWorktree(in: repository) }
         return repository
