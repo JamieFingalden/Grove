@@ -158,14 +158,23 @@ final class WorktreeModel: Identifiable {
 
         // 选中的文件可能已经不在变更列表里了（被暂存/丢弃/提交掉）。
         // 不清掉的话 diff 面板会一直显示一份过时内容。
-        if let selectedPath, !status.changes.contains(where: { $0.path == selectedPath }) {
-            self.selectedPath = status.changes.first?.path
-        } else if selectedPath == nil {
-            selectedPath = status.changes.first?.path
+        if let selectedPath,
+           let change = status.changes.first(where: { $0.path == selectedPath }) {
+            let validSide = Self.validDiffSide(for: change, preferred: diffSide)
+            if validSide != diffSide {
+                // 暂存/取消暂存后，当前文件可能从一侧完整移动到另一侧。
+                // 自动跟过去，不能把用户留在已经没有内容的空面板。
+                diffSide = validSide
+            } else {
+                // 文件还在，但内容可能变了，重新取一次 diff。
+                diffTask?.cancel()
+                diffTask = Task { await loadDiff() }
+            }
+        } else if let first = status.changes.first {
+            diffSide = Self.validDiffSide(for: first, preferred: .worktree)
+            self.selectedPath = first.path
         } else {
-            // 文件还在，但内容可能变了，重新取一次 diff。
-            diffTask?.cancel()
-            diffTask = Task { await loadDiff() }
+            self.selectedPath = nil
         }
 
         await refreshLinkedPullRequest()
@@ -366,6 +375,13 @@ final class WorktreeModel: Identifiable {
     }
 
     enum HunkSelection { case none, partial, all }
+
+    /// 保留用户想看的侧；如果这一侧已经没有内容，就切到仍有内容的另一侧。
+    nonisolated static func validDiffSide(for change: FileChange, preferred: DiffSide) -> DiffSide {
+        if preferred == .staged, change.staged != nil { return .staged }
+        if preferred == .worktree, change.unstaged != nil { return .worktree }
+        return change.staged != nil ? .staged : .worktree
+    }
 
     var selectedLineCount: Int { selectedLines.count }
 

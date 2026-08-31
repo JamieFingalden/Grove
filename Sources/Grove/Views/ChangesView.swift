@@ -35,15 +35,12 @@ struct ChangesView: View {
                 }
                 .frame(maxHeight: .infinity)
             } else {
-                List(selection: Binding(
-                    get: { model.selectedPath },
-                    set: { model.selectedPath = $0 }
-                )) {
+                List(selection: selectedChange) {
                     if !stagedChanges.isEmpty {
                         Section {
                             ForEach(stagedChanges) { change in
                                 ChangeRow(change: change, isStaged: true, model: model)
-                                    .tag(change.path)
+                                    .tag(ChangeSelection(path: change.path, side: .staged))
                             }
                         } header: {
                             SectionHeader(
@@ -59,7 +56,7 @@ struct ChangesView: View {
                         Section {
                             ForEach(unstagedChanges) { change in
                                 ChangeRow(change: change, isStaged: false, model: model)
-                                    .tag(change.path)
+                                    .tag(ChangeSelection(path: change.path, side: .worktree))
                             }
                         } header: {
                             SectionHeader(
@@ -110,6 +107,31 @@ struct ChangesView: View {
 
     private var unstagedChanges: [FileChange] {
         model.status.changes.filter { $0.unstaged != nil }
+    }
+
+    /// 同一个文件可能同时出现在「已暂存」和「未暂存」两区，路径本身不足以表示选择。
+    /// 把所在侧一起放进 tag，点击哪一行就读取哪一侧的 diff。
+    private struct ChangeSelection: Hashable {
+        var path: String
+        var side: WorktreeModel.DiffSide
+    }
+
+    private var selectedChange: Binding<ChangeSelection?> {
+        Binding(
+            get: {
+                model.selectedPath.map { ChangeSelection(path: $0, side: model.diffSide) }
+            },
+            set: { selection in
+                guard let selection else {
+                    model.selectedPath = nil
+                    return
+                }
+                // 先切侧、再切路径。两个属性都会触发加载，但后一次会取消前一次，
+                // 最终只保留带正确 path + side 的查询。
+                model.diffSide = selection.side
+                model.selectedPath = selection.path
+            }
+        )
     }
 }
 

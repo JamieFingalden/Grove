@@ -1,6 +1,45 @@
 import XCTest
 @testable import Grove
 
+final class DiffSideSelectionTests: XCTestCase {
+    func testFullyStagedFileSwitchesToStagedDiff() {
+        let change = FileChange(
+            path: "app.swift",
+            originalPath: nil,
+            staged: .modified,
+            unstaged: nil,
+            isConflicted: false
+        )
+
+        XCTAssertEqual(WorktreeModel.validDiffSide(for: change, preferred: .worktree), .staged)
+    }
+
+    func testUnstagedFileSwitchesBackToWorktreeDiff() {
+        let change = FileChange(
+            path: "app.swift",
+            originalPath: nil,
+            staged: nil,
+            unstaged: .modified,
+            isConflicted: false
+        )
+
+        XCTAssertEqual(WorktreeModel.validDiffSide(for: change, preferred: .staged), .worktree)
+    }
+
+    func testPartiallyStagedFileKeepsTheSelectedSide() {
+        let change = FileChange(
+            path: "app.swift",
+            originalPath: nil,
+            staged: .modified,
+            unstaged: .modified,
+            isConflicted: false
+        )
+
+        XCTAssertEqual(WorktreeModel.validDiffSide(for: change, preferred: .staged), .staged)
+        XCTAssertEqual(WorktreeModel.validDiffSide(for: change, preferred: .worktree), .worktree)
+    }
+}
+
 /// 分行暂存的端到端测试：真的建仓库、真的改文件、真的跑 `git apply`、
 /// 再真的去问 git 索引里进了什么。
 ///

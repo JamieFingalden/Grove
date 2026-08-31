@@ -15,6 +15,8 @@ final class CommitPromptBuilderTests: XCTestCase {
         XCTAssertFalse(result.wasTruncated)
         XCTAssertTrue(result.text.contains(diff))
         XCTAssertTrue(result.text.contains("下面是完整的暂存区 diff"))
+        XCTAssertTrue(result.text.contains("具体行为变化或修复结果"))
+        XCTAssertTrue(result.text.contains("不得只用“完善”“优化”“调整”"))
     }
 
     func testLargeDiffIsBoundedAndDisclosesTruncation() {
