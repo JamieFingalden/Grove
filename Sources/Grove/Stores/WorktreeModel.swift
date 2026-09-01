@@ -552,7 +552,7 @@ final class WorktreeModel: Identifiable {
                 let generated = try await CodexCommitGenerator.generate(
                     in: self.path,
                     git: self.git,
-                    model: self.app?.aiGenerationModel ?? .luna
+                    model: self.app?.aiCommitModel ?? .luna
                 )
                 try Task.checkCancellation()
                 self.commitMessage = generated.text
@@ -579,7 +579,7 @@ final class WorktreeModel: Identifiable {
             in: path,
             base: base,
             git: git,
-            model: app?.aiGenerationModel ?? .luna
+            model: app?.aiCommitModel ?? .luna
         )
     }
 

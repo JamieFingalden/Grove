@@ -481,6 +481,7 @@ struct CleanupBranchesSheet: View {
 
 struct MergePullRequestSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppModel.self) private var appModel
     let repository: RepositoryModel
     let pullRequest: PullRequest
 
@@ -592,6 +593,10 @@ struct MergePullRequestSheet: View {
             failure = error.localizedDescription
             return
         }
+        appModel.removeCachedAIReview(
+            for: repository.root,
+            pullRequestNumber: pullRequest.number
+        )
         dismiss()
         // 服务端已经合并成功就立刻关弹窗。后面的 fetch、分支和所有工作树
         // 状态刷新可能需要几秒，它们是同步本地视图，不应让用户一直守着 loading。
@@ -603,29 +608,80 @@ struct MergePullRequestSheet: View {
 
 struct PreferencesView: View {
     @Environment(AppModel.self) private var model
+    @State private var selectedReviewRepositoryPath = ""
 
     var body: some View {
         Form {
             Section("AI 生成") {
-                Toggle("启用提交信息和 PR 描述生成", isOn: aiEnabled)
+                Toggle("启用提交信息、PR 描述和 AI Review", isOn: aiEnabled)
 
-                Picker("模型", selection: selectedModel) {
-                    ForEach(AIGenerationModel.allCases) { model in
-                        Text(model.name).tag(model)
+                Picker("提交与 PR 描述模型", selection: selectedCommitModel) {
+                    ForEach(AIGenerationModel.allCases) { option in
+                        Text(option.name).tag(option)
                     }
                 }
                 .disabled(!model.isAIGenerationEnabled)
 
-                Text(model.aiGenerationModel.summary)
+                Text(model.aiCommitModel.summary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                Picker("AI Review 模型", selection: selectedReviewModel) {
+                    ForEach(AIGenerationModel.allCases) { option in
+                        Text(option.name).tag(option)
+                    }
+                }
+                .disabled(!model.isAIGenerationEnabled)
+
+                Text(model.aiReviewModel.reviewSummary)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
 
                 LabeledContent("Codex CLI") { ToolStatusLabel(tool: "codex") }
 
-                Text("生成时会把已暂存的 diff、相关提交标题，或 PR 的已提交 diff 发送给 Codex；不会发送未暂存改动、未跟踪文件、仓库地址或分支名。")
+                Text("生成或 Review 时会把已暂存的 diff、相关提交标题，或 PR 的元信息、检查状态和服务端 diff 发送给 Codex；不会发送未暂存改动、未跟踪文件，也不会主动附加仓库地址。")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Section("AI Review 默认提示词") {
+                if model.repositories.isEmpty {
+                    Text("打开一个仓库后，可以在这里查看和修改 Grove 提供的默认 Review 提示词。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Picker("项目", selection: $selectedReviewRepositoryPath) {
+                        ForEach(model.repositories, id: \.root) { repository in
+                            Text(repository.name).tag(repository.root.path)
+                        }
+                    }
+
+                    TextEditor(text: selectedRepositoryInstructions)
+                        .font(.system(size: 11.5))
+                        .scrollContentBackground(.hidden)
+                        .frame(height: 240)
+                        .padding(6)
+                        .background(Color(nsColor: .textBackgroundColor),
+                                    in: RoundedRectangle(cornerRadius: 7))
+                        .overlay { RoundedRectangle(cornerRadius: 7).stroke(.separator, lineWidth: 0.5) }
+
+                    HStack {
+                        Text("直接编辑此项目使用的完整评审规则；安全边界和输出格式由 Grove 固定管理。")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("恢复 Grove 默认提示词") {
+                            guard let repository = selectedReviewRepository else { return }
+                            model.resetAIReviewInstructions(for: repository.root)
+                            selectedRepositoryInstructions.wrappedValue = PullRequestReviewPromptBuilder.defaultInstructions
+                        }
+                    }
+
+                    Text("PR 详情里的滑杆按钮还能为单次 Review 临时调整，不会覆盖这里的项目默认值。")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("外部工具") {
@@ -643,7 +699,12 @@ struct PreferencesView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500, height: 470)
+        .frame(width: 620, height: 720)
+        .onAppear {
+            if selectedReviewRepositoryPath.isEmpty {
+                selectedReviewRepositoryPath = model.repositories.first?.root.path ?? ""
+            }
+        }
     }
 
     private var aiEnabled: Binding<Bool> {
@@ -657,10 +718,35 @@ struct PreferencesView: View {
         )
     }
 
-    private var selectedModel: Binding<AIGenerationModel> {
+    private var selectedCommitModel: Binding<AIGenerationModel> {
         Binding(
-            get: { model.aiGenerationModel },
-            set: { model.setAIGenerationModel($0) }
+            get: { model.aiCommitModel },
+            set: { model.setAICommitModel($0) }
+        )
+    }
+
+    private var selectedReviewModel: Binding<AIGenerationModel> {
+        Binding(
+            get: { model.aiReviewModel },
+            set: { model.setAIReviewModel($0) }
+        )
+    }
+
+    private var selectedReviewRepository: RepositoryModel? {
+        model.repositories.first { $0.root.path == selectedReviewRepositoryPath }
+            ?? model.repositories.first
+    }
+
+    private var selectedRepositoryInstructions: Binding<String> {
+        Binding(
+            get: {
+                guard let repository = selectedReviewRepository else { return "" }
+                return model.aiReviewInstructions(for: repository.root)
+            },
+            set: { instructions in
+                guard let repository = selectedReviewRepository else { return }
+                model.setAIReviewInstructions(instructions, for: repository.root)
+            }
         )
     }
 }

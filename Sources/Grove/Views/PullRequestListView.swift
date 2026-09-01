@@ -304,6 +304,13 @@ private struct PullRequestDetailView: View {
     @State private var commentText = ""
     @State private var isWorking = false
     @State private var viewerHasApprovedOverride: Bool?
+    @State private var aiReview: PullRequestAIReview?
+    @State private var aiReviewIsStale = false
+    @State private var isReviewingAI = false
+    @State private var aiReviewTask: Task<Void, Never>?
+    @State private var aiReviewInstructions = ""
+    @State private var aiReviewAreas = Set(PullRequestAIReview.Assessment.Area.allCases)
+    @State private var showsAIReviewOptions = false
 
     /// 详情页要显示正文，而列表查询刻意没带 `body`（太大）。所以进来之后单独补一次。
     private var current: PullRequest { detailed ?? pullRequest }
@@ -320,12 +327,19 @@ private struct PullRequestDetailView: View {
                 }
                 bodySection
                 codeSection
+                if isReviewingAI || aiReview != nil { aiReviewSection }
                 reviewSection
             }
             .padding(18)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .task { await loadDetail() }
+        .task {
+            aiReviewInstructions = appModel.aiReviewInstructions(for: repository.root)
+            aiReviewAreas = appModel.aiReviewAreas(for: repository.root)
+            restoreCachedAIReview()
+            await loadDetail()
+        }
+        .onDisappear { cancelAIReview() }
     }
 
     /// 详情页补齐列表没有的正文、代码 diff 和评论线程。三项并发加载，
@@ -359,6 +373,7 @@ private struct PullRequestDetailView: View {
             diffFiles = files
             didFailDiff = false
             selectFirstDiffFileIfNeeded()
+            restoreCachedAIReview(for: files)
         } else {
             diffFiles = []
             didFailDiff = true
@@ -380,6 +395,7 @@ private struct PullRequestDetailView: View {
             diffFiles = try await forge.pullRequestDiff(number: pullRequest.number, in: repository.root)
             didFailDiff = false
             selectFirstDiffFileIfNeeded()
+            restoreCachedAIReview(for: diffFiles)
         } catch {
             diffFiles = []
             didFailDiff = true
@@ -599,6 +615,32 @@ private struct PullRequestDetailView: View {
                 Label("在浏览器打开", systemImage: "arrow.up.forward.square")
             }
 
+            if isReviewingAI {
+                Button {
+                    cancelAIReview()
+                } label: {
+                    Label("取消 Review", systemImage: "xmark.circle")
+                }
+            } else {
+                Button {
+                    startAIReview()
+                } label: {
+                    Label(aiReview == nil ? "AI Review" : "重新 Review", systemImage: "sparkles")
+                }
+                .disabled(!canStartAIReview)
+                .help(aiReviewHelp)
+
+                Button {
+                    showsAIReviewOptions.toggle()
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                }
+                .help("设置本次 AI Review 的补充提示词")
+                .popover(isPresented: $showsAIReviewOptions) {
+                    aiReviewOptions
+                }
+            }
+
             if current.status == .open || current.status == .draft {
                 Button {
                     onMerge()
@@ -618,6 +660,167 @@ private struct PullRequestDetailView: View {
                 }
             }
         }
+    }
+
+    private var canStartAIReview: Bool {
+        appModel.isAIGenerationEnabled && !isLoadingDiff && !diffFiles.isEmpty
+    }
+
+    private var aiReviewHelp: String {
+        if !appModel.isAIGenerationEnabled {
+            return "AI 生成功能已关闭，请先在 Grove 设置中开启。"
+        }
+        if isLoadingDiff { return "代码改动加载完成后才能 Review。" }
+        if diffFiles.isEmpty { return "这个请求没有可供 Review 的代码改动。" }
+        return "使用 \(appModel.aiReviewModel.name) 检查所选的 \(aiReviewAreas.count) 项合并风险"
+    }
+
+    private var aiReviewOptions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("审查范围")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button("全选") {
+                    aiReviewAreas = Set(PullRequestAIReview.Assessment.Area.allCases)
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 10.5))
+            }
+            Text("只会分析并输出勾选项；开始后会记作这个项目的默认选择。")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(PullRequestAIReview.Assessment.Area.allCases, id: \.self) { area in
+                    Toggle(isOn: reviewAreaBinding(area)) {
+                        HStack(spacing: 8) {
+                            Text(area.displayName)
+                                .frame(width: 126, alignment: .leading)
+                            Text(area.reviewDescription)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                    .disabled(aiReviewAreas.count == 1 && aiReviewAreas.contains(area))
+                }
+            }
+
+            Divider()
+
+            Text("本次 AI Review 提示词")
+                .font(.system(size: 13, weight: .semibold))
+            Text("当前内容来自项目默认提示词，可以针对这次改动临时修改。安全边界和 JSON 输出格式由 Grove 固定管理。")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextEditor(text: $aiReviewInstructions)
+                .font(.system(size: 11.5))
+                .scrollContentBackground(.hidden)
+                .frame(height: 150)
+                .padding(6)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+                .overlay { RoundedRectangle(cornerRadius: 7).stroke(.separator, lineWidth: 0.5) }
+
+            HStack {
+                Button("恢复项目默认") {
+                    aiReviewInstructions = appModel.aiReviewInstructions(for: repository.root)
+                }
+                Button("恢复 Grove 默认") {
+                    aiReviewInstructions = PullRequestReviewPromptBuilder.defaultInstructions
+                }
+                Button("保存为项目默认") {
+                    appModel.setAIReviewInstructions(aiReviewInstructions, for: repository.root)
+                }
+                Spacer()
+                Button("开始 Review") {
+                    showsAIReviewOptions = false
+                    startAIReview()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canStartAIReview)
+            }
+        }
+        .padding(14)
+        .frame(width: 520)
+    }
+
+    private func startAIReview() {
+        guard canStartAIReview else { return }
+        aiReviewTask?.cancel()
+        let request = current
+        let files = diffFiles
+        let model = appModel.aiReviewModel
+        let instructions = aiReviewInstructions
+        let selectedAreas = aiReviewAreas
+        appModel.setAIReviewAreas(selectedAreas, for: repository.root)
+        isReviewingAI = true
+
+        aiReviewTask = Task { @MainActor in
+            do {
+                let result = try await CodexPullRequestReviewGenerator.generate(
+                    pullRequest: request,
+                    files: files,
+                    customInstructions: instructions,
+                    selectedAreas: selectedAreas,
+                    model: model,
+                    in: repository.root
+                )
+                try Task.checkCancellation()
+                aiReview = result
+                aiReviewIsStale = false
+                appModel.saveAIReview(
+                    result,
+                    diffFingerprint: AIReviewCache.diffFingerprint(files),
+                    for: repository.root,
+                    pullRequestNumber: request.number
+                )
+            } catch is CancellationError {
+                // 用户主动取消不属于失败，不弹错误提醒。
+            } catch {
+                appModel.report(title: "AI Review 失败", error: error)
+            }
+            isReviewingAI = false
+            aiReviewTask = nil
+        }
+    }
+
+    private func reviewAreaBinding(
+        _ area: PullRequestAIReview.Assessment.Area
+    ) -> Binding<Bool> {
+        Binding(
+            get: { aiReviewAreas.contains(area) },
+            set: { selected in
+                if selected {
+                    aiReviewAreas.insert(area)
+                } else if aiReviewAreas.count > 1 {
+                    aiReviewAreas.remove(area)
+                }
+            }
+        )
+    }
+
+    private func cancelAIReview() {
+        aiReviewTask?.cancel()
+        aiReviewTask = nil
+        isReviewingAI = false
+    }
+
+    private func restoreCachedAIReview(for files: [FileDiff]? = nil) {
+        guard let cached = appModel.cachedAIReview(
+            for: repository.root,
+            pullRequestNumber: pullRequest.number
+        ) else {
+            aiReview = nil
+            aiReviewIsStale = false
+            return
+        }
+        aiReview = cached.review
+        aiReviewIsStale = files.map {
+            cached.diffFingerprint != AIReviewCache.diffFingerprint($0)
+        } ?? false
     }
 
     private var labelRow: some View {
@@ -722,6 +925,196 @@ private struct PullRequestDetailView: View {
             .background(Color(nsColor: .textBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay { RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5) }
+        }
+    }
+
+    @ViewBuilder
+    private var aiReviewSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                Label("AI Review", systemImage: "sparkles")
+                    .font(.system(size: 12, weight: .semibold))
+                if isReviewingAI {
+                    ProgressView().controlSize(.mini)
+                    Text("正在用 \(appModel.aiReviewModel.name) 检查代码…")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                } else if let aiReview {
+                    Spacer()
+                    Label(verdictLabel(aiReview.verdict), systemImage: verdictIcon(aiReview.verdict))
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(verdictTint(aiReview.verdict))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(verdictTint(aiReview.verdict).opacity(0.12), in: Capsule())
+                }
+            }
+
+            if let aiReview {
+                if aiReviewIsStale {
+                    Label("PR 代码已更新，这份结果基于旧 diff；建议重新 Review。",
+                          systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.orange)
+                }
+
+                Text(aiReview.summary)
+                    .font(.system(size: 11.5))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if aiReview.wasTruncated {
+                    Label("改动过大，只审查了按文件截取的片段；结论已按信息不足处理。",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.orange)
+                }
+
+                VStack(spacing: 7) {
+                    ForEach(aiReview.assessments) { assessment in
+                        aiReviewAssessment(assessment)
+                    }
+                }
+
+                Text("AI Review 根据 PR diff 和仓库只读上下文判断合并风险，不能代替实际构建与测试。")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 9))
+        .overlay { RoundedRectangle(cornerRadius: 9).stroke(.separator, lineWidth: 0.5) }
+    }
+
+    private func aiReviewAssessment(_ assessment: PullRequestAIReview.Assessment) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: assessmentIcon(assessment.status))
+                .foregroundStyle(assessmentTint(assessment.status))
+                .frame(width: 15)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(assessmentLabel(assessment.area))
+                        .font(.system(size: 11.5, weight: .semibold))
+                    Text(assessmentStatusLabel(assessment.status))
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(assessmentTint(assessment.status))
+                }
+                Text(assessment.summary)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let evidence = assessment.evidence,
+                   !evidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text(evidence)
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.tertiary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let file = assessment.file {
+                    Button {
+                        if let match = diffFiles.first(where: {
+                            $0.newPath == file || $0.oldPath == file || $0.displayPath == file
+                        }) {
+                            selectedDiffFileID = match.id
+                        }
+                    } label: {
+                        Text(file + (assessment.line.map { ":\($0)" } ?? ""))
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("在代码变更中选择这个文件")
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(9)
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+    }
+
+    private func verdictLabel(_ verdict: PullRequestAIReview.Verdict) -> String {
+        switch verdict {
+        case .ready:
+            switch externalMergeState {
+            case .conflict: "代码无明显问题，但存在冲突"
+            case .failedChecks: "代码无明显问题，但检查失败"
+            case .pendingChecks: "代码可合并，等待检查"
+            case .clear: "可以合并"
+            }
+        case .needsChanges: "建议修改后合并"
+        case .uncertain: "暂时无法判断"
+        }
+    }
+
+    private func verdictIcon(_ verdict: PullRequestAIReview.Verdict) -> String {
+        switch verdict {
+        case .ready:
+            switch externalMergeState {
+            case .conflict, .failedChecks: "exclamationmark.octagon.fill"
+            case .pendingChecks: "clock.fill"
+            case .clear: "checkmark.seal.fill"
+            }
+        case .needsChanges: "exclamationmark.octagon.fill"
+        case .uncertain: "questionmark.diamond.fill"
+        }
+    }
+
+    private func verdictTint(_ verdict: PullRequestAIReview.Verdict) -> Color {
+        switch verdict {
+        case .ready:
+            switch externalMergeState {
+            case .conflict, .failedChecks: .red
+            case .pendingChecks: .orange
+            case .clear: .green
+            }
+        case .needsChanges: .red
+        case .uncertain: .orange
+        }
+    }
+
+    private enum ExternalMergeState {
+        case conflict, failedChecks, pendingChecks, clear
+    }
+
+    private var externalMergeState: ExternalMergeState {
+        if current.mergeable?.uppercased() == "CONFLICTING" { return .conflict }
+        switch current.checks {
+        case .failing: return .failedChecks
+        case .running: return .pendingChecks
+        case .passing, .none: return .clear
+        }
+    }
+
+    private func assessmentLabel(_ area: PullRequestAIReview.Assessment.Area) -> String {
+        area.displayName
+    }
+
+    private func assessmentStatusLabel(_ status: PullRequestAIReview.Assessment.Status) -> String {
+        switch status {
+        case .clear: "未发现风险"
+        case .risk: "存在风险"
+        case .unknown: "信息不足"
+        }
+    }
+
+    private func assessmentIcon(_ status: PullRequestAIReview.Assessment.Status) -> String {
+        switch status {
+        case .clear: "checkmark.circle.fill"
+        case .risk: "exclamationmark.triangle.fill"
+        case .unknown: "questionmark.circle.fill"
+        }
+    }
+
+    private func assessmentTint(_ status: PullRequestAIReview.Assessment.Status) -> Color {
+        switch status {
+        case .clear: .green
+        case .risk: .red
+        case .unknown: .orange
         }
     }
 

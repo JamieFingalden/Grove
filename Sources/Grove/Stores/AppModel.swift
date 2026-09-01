@@ -98,7 +98,8 @@ final class AppModel {
     var selection: Selection?
     var failures: [GroveFailure] = []
     private(set) var isAIGenerationEnabled: Bool
-    private(set) var aiGenerationModel: AIGenerationModel
+    private(set) var aiCommitModel: AIGenerationModel
+    private(set) var aiReviewModel: AIGenerationModel
 
     /// 侧边栏选中项。仓库和工作树用同一个枚举，`NavigationSplitView` 的选择才好绑。
     enum Selection: Hashable, Sendable {
@@ -109,11 +110,17 @@ final class AppModel {
 
     private let bookmarks = RepositoryBookmarks()
     @ObservationIgnored private let aiGenerationSettings: AIGenerationSettings
+    @ObservationIgnored private let aiReviewCache: AIReviewCache
 
-    init(aiGenerationSettings: AIGenerationSettings = AIGenerationSettings()) {
+    init(
+        aiGenerationSettings: AIGenerationSettings = AIGenerationSettings(),
+        aiReviewCache: AIReviewCache = AIReviewCache()
+    ) {
         self.aiGenerationSettings = aiGenerationSettings
+        self.aiReviewCache = aiReviewCache
         self.isAIGenerationEnabled = aiGenerationSettings.isEnabled
-        self.aiGenerationModel = aiGenerationSettings.model
+        self.aiCommitModel = aiGenerationSettings.commitModel
+        self.aiReviewModel = aiGenerationSettings.reviewModel
     }
 
     func setAIGenerationEnabled(_ enabled: Bool) {
@@ -121,9 +128,59 @@ final class AppModel {
         isAIGenerationEnabled = enabled
     }
 
-    func setAIGenerationModel(_ model: AIGenerationModel) {
-        aiGenerationSettings.setModel(model)
-        aiGenerationModel = model
+    func setAICommitModel(_ model: AIGenerationModel) {
+        aiGenerationSettings.setCommitModel(model)
+        aiCommitModel = model
+    }
+
+    func setAIReviewModel(_ model: AIGenerationModel) {
+        aiGenerationSettings.setReviewModel(model)
+        aiReviewModel = model
+    }
+
+    func aiReviewInstructions(for repository: URL) -> String {
+        aiGenerationSettings.reviewInstructions(for: repository)
+    }
+
+    func setAIReviewInstructions(_ instructions: String, for repository: URL) {
+        aiGenerationSettings.setReviewInstructions(instructions, for: repository)
+    }
+
+    func resetAIReviewInstructions(for repository: URL) {
+        aiGenerationSettings.resetReviewInstructions(for: repository)
+    }
+
+    func aiReviewAreas(for repository: URL) -> Set<PullRequestAIReview.Assessment.Area> {
+        aiGenerationSettings.reviewAreas(for: repository)
+    }
+
+    func setAIReviewAreas(
+        _ areas: Set<PullRequestAIReview.Assessment.Area>,
+        for repository: URL
+    ) {
+        aiGenerationSettings.setReviewAreas(areas, for: repository)
+    }
+
+    func cachedAIReview(for repository: URL, pullRequestNumber: Int) -> CachedPullRequestAIReview? {
+        aiReviewCache.review(for: repository, pullRequestNumber: pullRequestNumber)
+    }
+
+    func saveAIReview(
+        _ review: PullRequestAIReview,
+        diffFingerprint: String,
+        for repository: URL,
+        pullRequestNumber: Int
+    ) {
+        aiReviewCache.save(
+            review,
+            diffFingerprint: diffFingerprint,
+            for: repository,
+            pullRequestNumber: pullRequestNumber
+        )
+    }
+
+    func removeCachedAIReview(for repository: URL, pullRequestNumber: Int) {
+        aiReviewCache.remove(for: repository, pullRequestNumber: pullRequestNumber)
     }
 
     // MARK: - 启动

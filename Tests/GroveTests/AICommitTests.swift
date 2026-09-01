@@ -181,12 +181,56 @@ final class AIGenerationSettingsTests: XCTestCase {
         XCTAssertTrue(AIGenerationSettings(defaults: defaults).isEnabled)
     }
 
-    func testDefaultsToLunaAndPersistsSelectedModel() {
+    func testUsesSeparateDefaultsAndPersistsSelectedModels() {
         let settings = AIGenerationSettings(defaults: defaults)
-        XCTAssertEqual(settings.model, .luna)
+        XCTAssertEqual(settings.commitModel, .luna)
+        XCTAssertEqual(settings.reviewModel, .terra)
 
-        settings.setModel(.terra)
-        XCTAssertEqual(AIGenerationSettings(defaults: defaults).model, .terra)
+        settings.setCommitModel(.terra)
+        settings.setReviewModel(.sol)
+        let reloaded = AIGenerationSettings(defaults: defaults)
+        XCTAssertEqual(reloaded.commitModel, .terra)
+        XCTAssertEqual(reloaded.reviewModel, .sol)
+    }
+
+    func testPersistsReviewInstructionsPerRepository() {
+        let first = URL(fileURLWithPath: "/repo/first")
+        let second = URL(fileURLWithPath: "/repo/second")
+        let settings = AIGenerationSettings(defaults: defaults)
+
+        settings.setReviewInstructions("重点检查坐标换算", for: first)
+        let reloaded = AIGenerationSettings(defaults: defaults)
+        XCTAssertEqual(reloaded.reviewInstructions(for: first), "重点检查坐标换算")
+        XCTAssertEqual(
+            reloaded.reviewInstructions(for: second),
+            PullRequestReviewPromptBuilder.defaultInstructions
+        )
+
+        reloaded.resetReviewInstructions(for: first)
+        XCTAssertEqual(
+            AIGenerationSettings(defaults: defaults).reviewInstructions(for: first),
+            PullRequestReviewPromptBuilder.defaultInstructions
+        )
+    }
+
+    func testPersistsReviewAreasPerRepository() {
+        let first = URL(fileURLWithPath: "/repo/first")
+        let second = URL(fileURLWithPath: "/repo/second")
+        let selected: Set<PullRequestAIReview.Assessment.Area> = [.compilation, .performance]
+        let settings = AIGenerationSettings(defaults: defaults)
+
+        XCTAssertEqual(
+            settings.reviewAreas(for: first),
+            Set(PullRequestAIReview.Assessment.Area.allCases)
+        )
+        settings.setReviewAreas(selected, for: first)
+
+        let reloaded = AIGenerationSettings(defaults: defaults)
+        XCTAssertEqual(reloaded.reviewAreas(for: first), selected)
+        XCTAssertEqual(
+            reloaded.reviewAreas(for: second),
+            Set(PullRequestAIReview.Assessment.Area.allCases)
+        )
     }
 }
 
