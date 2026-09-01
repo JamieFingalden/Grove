@@ -391,6 +391,14 @@ struct GitLabClient: ForgeClient {
         )
     }
 
+    func unapprove(number: Int, in directory: URL) async throws {
+        _ = try await api(
+            "projects/:id/merge_requests/\(number)/unapprove",
+            in: directory,
+            method: "POST"
+        )
+    }
+
     func requestChanges(number: Int, body: String, in directory: URL) async throws {
         // GitLab 没有「要求修改」这个独立动作（那是 GitHub 评审模型的概念）。
         // 最接近的等价物是留一条评论 —— 加个前缀让对方一眼看出意图。

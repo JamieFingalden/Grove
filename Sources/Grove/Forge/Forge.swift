@@ -116,12 +116,18 @@ protocol ForgeClient: Sendable {
     func merge(number: Int, strategy: MergeStrategy, deleteBranch: Bool, in directory: URL) async throws
     /// 批准。GitHub 是提交一条 APPROVE 评审，GitLab 是 approve 接口。
     func approve(number: Int, in directory: URL) async throws
+    /// 撤销当前用户的批准。GitLab 原生支持；其他平台可以按能力降级。
+    func unapprove(number: Int, in directory: URL) async throws
     /// 要求修改。GitLab 没有这个动作，实现里降级成一条普通评论。
     func requestChanges(number: Int, body: String, in directory: URL) async throws
     func comment(number: Int, body: String, in directory: URL) async throws
 }
 
 extension ForgeClient {
+    func unapprove(number: Int, in directory: URL) async throws {
+        throw ForgeReviewError.unapproveUnsupported
+    }
+
     /// 某个工作树分支当前关联的开放 PR/MR。这是「工作树 ↔ 评审」这条主线的唯一入口，
     /// 界面和 `--doctor` 都走它，保证两边看到的是同一套规则。已结束的请求只算历史记录。
     func linkedPullRequest(branch: String, defaultBranch: String?, in directory: URL) async -> PullRequest? {
@@ -139,6 +145,17 @@ extension ForgeClient {
         }
 
         return linkedRequest?.isActive == true ? linkedRequest : nil
+    }
+}
+
+enum ForgeReviewError: LocalizedError, Sendable {
+    case unapproveUnsupported
+
+    var errorDescription: String? {
+        switch self {
+        case .unapproveUnsupported:
+            "当前代码托管平台不支持在 Grove 中撤销批准，请暂时在浏览器里操作。"
+        }
     }
 }
 

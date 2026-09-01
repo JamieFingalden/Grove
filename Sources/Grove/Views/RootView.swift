@@ -3,6 +3,9 @@ import SwiftUI
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @State private var sheet: ActiveSheet?
+    @State private var sidebarVisibility: NavigationSplitViewVisibility = .automatic
+    @State private var showsHoverSidebar = false
+    @State private var sidebarDismissTask: Task<Void, Never>?
 
     /// 用一个枚举驱动所有弹窗，而不是给每个 sheet 一个 Bool ——
     /// 多个 Bool 会出现「两个都为 true」的非法状态，SwiftUI 那时的表现是未定义的。
@@ -25,16 +28,99 @@ struct RootView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $sidebarVisibility) {
             SidebarView(sheet: $sheet)
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 380)
         } detail: {
             detail
         }
         .toolbar { toolbarContent }
+        .overlay(alignment: .leading) { hoverSidebar }
         .overlay(alignment: .bottom) { failureBanner }
         .sheet(item: $sheet)
         .task(id: refreshTrigger) { await refreshSelection() }
+        .onChange(of: sidebarVisibility) { _, visibility in
+            guard visibility != .detailOnly else { return }
+            dismissHoverSidebar()
+        }
+    }
+
+    // MARK: - 临时侧栏
+
+    /// 永久侧栏收起后，窗口左缘保留一条窄热点；悬停时用浮层展示，不挤压详情区。
+    @ViewBuilder
+    private var hoverSidebar: some View {
+        if sidebarVisibility == .detailOnly {
+            Group {
+                if showsHoverSidebar {
+                    ZStack(alignment: .leading) {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture { dismissHoverSidebar() }
+
+                    SidebarView(sheet: $sheet)
+                        .frame(width: 272)
+                        .frame(maxHeight: .infinity)
+                        .background(.regularMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(.separator.opacity(0.7), lineWidth: 0.5)
+                        }
+                        .shadow(color: .black.opacity(0.22), radius: 20, x: 6, y: 3)
+                        .padding(8)
+                        .onHover(perform: updateHoverSidebar)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                } else {
+                    Button {
+                        presentHoverSidebar()
+                    } label: {
+                        Color.clear
+                            .frame(width: 8)
+                            .frame(maxHeight: .infinity)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("临时显示边栏")
+                    .onHover { isHovering in
+                        if isHovering { updateHoverSidebar(true) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func updateHoverSidebar(_ isHovering: Bool) {
+        sidebarDismissTask?.cancel()
+        if isHovering {
+            presentHoverSidebar()
+            return
+        }
+
+        sidebarDismissTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: 0.18)) {
+                showsHoverSidebar = false
+            }
+        }
+    }
+
+    private func presentHoverSidebar() {
+        sidebarDismissTask?.cancel()
+        guard !showsHoverSidebar else { return }
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+            showsHoverSidebar = true
+        }
+    }
+
+    private func dismissHoverSidebar() {
+        sidebarDismissTask?.cancel()
+        guard showsHoverSidebar else { return }
+        withAnimation(.easeInOut(duration: 0.18)) {
+            showsHoverSidebar = false
+        }
     }
 
     // MARK: - 详情区

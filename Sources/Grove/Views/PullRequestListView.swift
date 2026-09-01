@@ -303,7 +303,7 @@ private struct PullRequestDetailView: View {
     @State private var didFailDiff = false
     @State private var commentText = ""
     @State private var isWorking = false
-    @State private var didApprove = false
+    @State private var viewerHasApprovedOverride: Bool?
 
     /// 详情页要显示正文，而列表查询刻意没带 `body`（太大）。所以进来之后单独补一次。
     private var current: PullRequest { detailed ?? pullRequest }
@@ -335,6 +335,10 @@ private struct PullRequestDetailView: View {
         isLoadingThreads = true
         isLoadingDiff = true
 
+        async let loadedDetail = try? await forge.pullRequest(
+            number: pullRequest.number,
+            in: repository.root
+        )
         async let loadedThreads = try? await forge.reviewThreads(
             number: pullRequest.number,
             in: repository.root
@@ -344,9 +348,9 @@ private struct PullRequestDetailView: View {
             in: repository.root
         )
 
-        if pullRequest.body == nil {
-            detailed = try? await forge.pullRequest(number: pullRequest.number, in: repository.root)
-        }
+        // 完整详情不只补正文，还包含当前用户的审批状态。即使列表接口已经
+        // 带了正文也必须加载，否则批准过的 MR 仍会错误显示「批准」。
+        detailed = await loadedDetail
 
         threads = await loadedThreads ?? []
         isLoadingThreads = false
@@ -445,9 +449,19 @@ private struct PullRequestDetailView: View {
 
                 Spacer()
 
-                if current.viewerHasApproved || didApprove {
-                    Label("已批准", systemImage: "checkmark.seal.fill")
-                        .foregroundStyle(.green)
+                if viewerHasApprovedOverride ?? current.viewerHasApproved {
+                    if current.forge == .gitlab {
+                        Button {
+                            Task { await act(.unapprove) }
+                        } label: {
+                            Label("撤销批准", systemImage: "checkmark.seal.fill")
+                        }
+                        .tint(.green)
+                        .disabled(isWorking)
+                    } else {
+                        Label("已批准", systemImage: "checkmark.seal.fill")
+                            .foregroundStyle(.green)
+                    }
                 } else {
                     Button {
                         Task { await act(.approve) }
@@ -464,7 +478,7 @@ private struct PullRequestDetailView: View {
         }
     }
 
-    private enum ReviewAction { case comment, requestChanges, approve }
+    private enum ReviewAction { case comment, requestChanges, approve, unapprove }
 
     private func act(_ action: ReviewAction) async {
         guard let forge = repository.forge else { return }
@@ -479,13 +493,21 @@ private struct PullRequestDetailView: View {
                 try await forge.requestChanges(number: current.number, body: text, in: repository.root)
             case .approve:
                 try await forge.approve(number: current.number, in: repository.root)
-                didApprove = true
+                viewerHasApprovedOverride = true
                 // 批准时顺手把写了的评论也发出去，不然那段字会被静默丢掉。
                 if !text.isEmpty {
                     try await forge.comment(number: current.number, body: text, in: repository.root)
                 }
+            case .unapprove:
+                try await forge.unapprove(number: current.number, in: repository.root)
+                viewerHasApprovedOverride = false
             }
-            commentText = ""
+            switch action {
+            case .unapprove:
+                break
+            case .comment, .requestChanges, .approve:
+                commentText = ""
+            }
         } catch {
             isWorking = false
             appModel.report(title: "操作失败", error: error)
@@ -496,7 +518,7 @@ private struct PullRequestDetailView: View {
         switch action {
         case .approve where !text.isEmpty:
             await reloadThreads()
-        case .approve:
+        case .approve, .unapprove:
             break
         case .comment, .requestChanges:
             await reloadThreads()
