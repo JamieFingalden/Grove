@@ -34,6 +34,13 @@ enum ForgeKind: String, Sendable, Hashable, CaseIterable {
         }
     }
 
+    var displayName: String {
+        switch self {
+        case .github: "GitHub"
+        case .gitlab: "GitLab"
+        }
+    }
+
     /// 抓取某个 PR/MR 的完整 refspec。
     ///
     /// 两个平台都提供一个只读的服务端 ref 指向请求的头提交，不管它来自
@@ -102,6 +109,10 @@ protocol ForgeClient: Sendable {
     /// 不属于这个托管商时返回 nil。
     func repositorySlug(in directory: URL) async -> String?
 
+    /// 在当前本地仓库对应的平台创建远程仓库，并添加 `origin`。
+    /// 首次推送仍由 GitClient 完成，两种平台保持完全一致的 Git 行为。
+    func createRepository(_ request: NewRemoteRepository, in directory: URL) async throws
+
     func pullRequests(in directory: URL, limit: Int, includeClosed: Bool) async throws -> [PullRequest]
     func pullRequest(number: Int, in directory: URL) async throws -> PullRequest
     /// 某个分支对应的 PR/MR。找不到返回 nil（不是错误）。
@@ -121,6 +132,53 @@ protocol ForgeClient: Sendable {
     /// 要求修改。GitLab 没有这个动作，实现里降级成一条普通评论。
     func requestChanges(number: Int, body: String, in directory: URL) async throws
     func comment(number: Int, body: String, in directory: URL) async throws
+}
+
+/// 新建远程仓库的参数。`path` 可以只写仓库名，也可以写 `组织/仓库名`。
+struct NewRemoteRepository: Sendable {
+    var kind: ForgeKind
+    var path: String
+    var description: String
+    var host: String
+    var visibility: RemoteRepositoryVisibility
+}
+
+enum RemoteRepositoryVisibility: String, Sendable, CaseIterable, Identifiable {
+    case privateRepository
+    case publicRepository
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .privateRepository: "私有"
+        case .publicRepository: "公开"
+        }
+    }
+
+    var commandFlag: String {
+        switch self {
+        case .privateRepository: "--private"
+        case .publicRepository: "--public"
+        }
+    }
+}
+
+enum RemoteRepositoryCreationError: LocalizedError, Sendable {
+    case originAlreadyExists
+    case forgeUnavailable(ForgeKind)
+    case invalidPath
+
+    var errorDescription: String? {
+        switch self {
+        case .originAlreadyExists:
+            "这个本地仓库已经有 origin，不能再创建另一个同名远端。"
+        case .forgeUnavailable(let kind):
+            "\(kind.displayName) 命令行工具尚未安装或登录。请先在设置中完成配置。"
+        case .invalidPath:
+            "仓库路径不能为空，也不能以斜杠开头或结尾。"
+        }
+    }
 }
 
 extension ForgeClient {

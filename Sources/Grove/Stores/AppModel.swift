@@ -50,8 +50,16 @@ struct GroveFailure: Identifiable, Sendable {
         if message.contains("authentication failed")
             || message.contains("could not read username")
             || message.contains("permission denied (publickey)")
-            || message.contains("http basic: access denied") {
+            || message.contains("http basic: access denied")
+            || message.contains("not logged into")
+            || message.contains("authentication required") {
             return "远端身份验证失败。请检查 Git 凭据或 SSH 密钥，确认当前账号有这个仓库的访问权限后重试。"
+        }
+        if message.contains("already exists") || message.contains("has already been taken") {
+            return "远端已经有同名仓库。请换一个仓库路径，或把本地仓库连接到已有远端。"
+        }
+        if message.contains("403") || message.contains("forbidden") {
+            return "当前账号没有在这个组织或群组中创建仓库的权限。请更换仓库路径或联系管理员。"
         }
         if message.contains("could not resolve host")
             || message.contains("failed to connect")
@@ -255,6 +263,21 @@ final class AppModel {
         if githubHosts.contains(where: { remote.matchesHost($0) }) { return github }
         if gitlabHosts.contains(where: { remote.matchesHost($0) }) { return gitlab }
         return nil
+    }
+
+    func forge(of kind: ForgeKind) -> (any ForgeClient)? {
+        switch kind {
+        case .github: github
+        case .gitlab: gitlab
+        }
+    }
+
+    func configuredHosts(for kind: ForgeKind) -> [String] {
+        let hosts = switch kind {
+        case .github: githubHosts
+        case .gitlab: gitlabHosts
+        }
+        return hosts.sorted()
     }
 
     /// 认不出托管商时，给一份**能照着做完**的指引。

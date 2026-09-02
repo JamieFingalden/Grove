@@ -35,6 +35,11 @@ final class RepositoryModel: Identifiable {
     var activity: String?
     var aiCommitEnabled: Bool { app?.isAIGenerationEnabled == true }
 
+    struct InitialPushTarget {
+        var directory: URL
+        var branch: String
+    }
+
     nonisolated var id: URL { root }
     nonisolated var name: String { root.lastPathComponent }
 
@@ -175,6 +180,49 @@ final class RepositoryModel: Identifiable {
         }
         await refresh()
         await refreshPullRequests()
+    }
+
+    func initialPushTarget() -> InitialPushTarget? {
+        if let selected = app?.selectedWorktreeModel,
+           selected.repositoryRoot == root,
+           let branch = selected.worktree.branch,
+           selected.worktree.head != nil {
+            return InitialPushTarget(directory: selected.path, branch: branch)
+        }
+        guard let primary = worktrees.first(where: \.isPrimary),
+              let branch = primary.branch,
+              primary.head != nil else { return nil }
+        return InitialPushTarget(directory: primary.path, branch: branch)
+    }
+
+    func createRemoteRepository(
+        _ request: NewRemoteRepository,
+        push target: InitialPushTarget?
+    ) async throws {
+        guard !hasRemote else { throw RemoteRepositoryCreationError.originAlreadyExists }
+        guard let forge = app?.forge(of: request.kind) else {
+            throw RemoteRepositoryCreationError.forgeUnavailable(request.kind)
+        }
+
+        activity = "正在创建远程仓库…"
+        defer { activity = nil }
+
+        do {
+            try await forge.createRepository(request, in: root)
+            if let target {
+                try await git.push(
+                    in: target.directory,
+                    remote: "origin",
+                    branch: target.branch,
+                    setUpstream: true
+                )
+            }
+        } catch {
+            // 平台创建成功但首次推送失败时，也要立刻识别刚添加的 origin。
+            await refresh()
+            throw error
+        }
+        await refresh()
     }
 
     private func perform(_ label: String, _ work: @escaping () async throws -> Void) async {

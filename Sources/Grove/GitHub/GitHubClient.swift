@@ -103,6 +103,32 @@ struct GitHubClient: ForgeClient {
         return slug.isEmpty ? nil : slug
     }
 
+    func createRepository(_ request: NewRemoteRepository, in directory: URL) async throws {
+        var commandEnvironment = environment
+        commandEnvironment["GH_HOST"] = request.host
+        try await ProcessRunner.runChecked(
+            executable: executable,
+            arguments: Self.createRepositoryArguments(request),
+            workingDirectory: directory,
+            environment: commandEnvironment,
+            timeout: ProcessRunner.networkTimeout
+        )
+    }
+
+    static func createRepositoryArguments(_ request: NewRemoteRepository) -> [String] {
+        var arguments = [
+            "repo", "create", request.path,
+            request.visibility.commandFlag,
+            "--source", ".",
+            "--remote", "origin"
+        ]
+        let description = request.description.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !description.isEmpty {
+            arguments.append(contentsOf: ["--description", description])
+        }
+        return arguments
+    }
+
     // MARK: - 查询
 
     func pullRequests(in directory: URL, limit: Int = 50, includeClosed: Bool = false) async throws -> [PullRequest] {

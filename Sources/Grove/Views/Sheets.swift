@@ -1,5 +1,215 @@
 import SwiftUI
 
+/// 把已经存在的本地仓库发布到 GitHub / GitLab。
+struct CreateRemoteRepositorySheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(AppModel.self) private var app
+    let repository: RepositoryModel
+
+    @State private var kind: ForgeKind = .github
+    @State private var host = ""
+    @State private var repositoryPath = ""
+    @State private var description = ""
+    @State private var visibility: RemoteRepositoryVisibility = .privateRepository
+    @State private var pushesCurrentBranch = true
+    @State private var isWorking = false
+    @State private var isCreated = false
+    @State private var pushFailed = false
+
+    private var availableKinds: [ForgeKind] {
+        ForgeKind.allCases.filter { app.availability(of: $0).isReady }
+    }
+
+    private var hosts: [String] { app.configuredHosts(for: kind) }
+    private var pushTarget: RepositoryModel.InitialPushTarget? { repository.initialPushTarget() }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+
+            if isCreated {
+                successView
+            } else {
+                form
+                Divider()
+                footer
+            }
+        }
+        .frame(width: 520, height: 430)
+        .onAppear(perform: prefill)
+        .onChange(of: kind) { _, _ in selectDefaultHost() }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("创建远程仓库")
+                .font(.system(size: 15, weight: .semibold))
+            Text(repository.root.path)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var form: some View {
+        Form {
+            Picker("托管平台", selection: $kind) {
+                ForEach(availableKinds, id: \.self) { kind in
+                    Text(kind.displayName).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if hosts.count > 1 {
+                Picker("主机", selection: $host) {
+                    ForEach(hosts, id: \.self) { Text($0).tag($0) }
+                }
+            } else {
+                LabeledContent("主机") {
+                    Text(host.isEmpty ? "尚未登录" : host)
+                        .foregroundStyle(host.isEmpty ? .secondary : .primary)
+                }
+            }
+
+            TextField("仓库路径", text: $repositoryPath, prompt: Text("组织/仓库名"))
+            TextField("描述（可选）", text: $description)
+
+            Picker("可见性", selection: $visibility) {
+                ForEach(RemoteRepositoryVisibility.allCases) { visibility in
+                    Text(visibility.label).tag(visibility)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if let pushTarget {
+                Toggle(isOn: $pushesCurrentBranch) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("创建后推送当前分支")
+                        Text(pushTarget.branch)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.checkbox)
+            } else {
+                Label("当前仓库还没有可推送的提交；将只创建 origin。", systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if availableKinds.isEmpty {
+                Label("请先安装并登录 gh 或 glab，然后在设置中重新检测。", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private var footer: some View {
+        HStack {
+            Button("取消") { dismiss() }
+                .keyboardShortcut(.cancelAction)
+            Spacer()
+            Button {
+                Task { await createRepository() }
+            } label: {
+                if isWorking {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Text("创建并连接")
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut(.defaultAction)
+            .disabled(!canCreate)
+        }
+        .padding(16)
+    }
+
+    private var successView: some View {
+        VStack(spacing: 15) {
+            Image(systemName: pushFailed ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                .font(.system(size: 44))
+                .foregroundStyle(pushFailed ? .orange : .green)
+            Text(pushFailed ? "远程仓库已创建" : "远程仓库已连接")
+                .font(.title3.weight(.semibold))
+            Text(pushFailed
+                 ? "origin 已添加，但当前分支没有推送成功。请查看底部的失败提醒。"
+                 : "已添加 origin\(pushesCurrentBranch && pushTarget != nil ? "，并完成首次推送" : "")。")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button("完成") { dismiss() }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(40)
+    }
+
+    private var canCreate: Bool {
+        !isWorking
+            && availableKinds.contains(kind)
+            && !host.isEmpty
+            && isValidRepositoryPath
+    }
+
+    private var isValidRepositoryPath: Bool {
+        let path = repositoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !path.isEmpty && !path.hasPrefix("/") && !path.hasSuffix("/")
+    }
+
+    private func prefill() {
+        repositoryPath = repository.name
+        if !availableKinds.contains(kind), let first = availableKinds.first { kind = first }
+        selectDefaultHost()
+        if pushTarget == nil { pushesCurrentBranch = false }
+    }
+
+    private func selectDefaultHost() {
+        let currentHosts = app.configuredHosts(for: kind)
+        if !currentHosts.contains(host) { host = currentHosts.first ?? "" }
+    }
+
+    @MainActor
+    private func createRepository() async {
+        guard isValidRepositoryPath else {
+            app.report(title: "创建远程仓库失败", error: RemoteRepositoryCreationError.invalidPath)
+            return
+        }
+        isWorking = true
+        defer { isWorking = false }
+
+        let request = NewRemoteRepository(
+            kind: kind,
+            path: repositoryPath.trimmingCharacters(in: .whitespacesAndNewlines),
+            description: description,
+            host: host,
+            visibility: visibility
+        )
+        do {
+            try await repository.createRemoteRepository(
+                request,
+                push: pushesCurrentBranch ? pushTarget : nil
+            )
+            isCreated = true
+        } catch {
+            if repository.hasRemote {
+                pushFailed = true
+                isCreated = true
+                app.report(title: "远程仓库已创建，但首次推送失败", error: error)
+            } else {
+                app.report(title: "创建远程仓库失败", error: error)
+            }
+        }
+    }
+}
+
 /// 提 PR。会先把分支推上去，再调 `gh pr create`。
 struct CreatePullRequestSheet: View {
     @Environment(\.dismiss) private var dismiss

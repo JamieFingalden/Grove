@@ -11,6 +11,7 @@ struct RootView: View {
     /// 多个 Bool 会出现「两个都为 true」的非法状态，SwiftUI 那时的表现是未定义的。
     enum ActiveSheet: Identifiable {
         case newWorktree(RepositoryModel)
+        case createRemoteRepository(RepositoryModel)
         case createPullRequest(WorktreeModel)
         case removeWorktree(RepositoryModel, Worktree)
         case cleanupBranches(RepositoryModel)
@@ -19,6 +20,7 @@ struct RootView: View {
         var id: String {
             switch self {
             case .newWorktree(let repository): "new-\(repository.root.path)"
+            case .createRemoteRepository(let repository): "remote-\(repository.root.path)"
             case .createPullRequest(let worktree): "pr-\(worktree.identity.path)"
             case .removeWorktree(_, let worktree): "remove-\(worktree.path.path)"
             case .cleanupBranches(let repository): "cleanup-\(repository.root.path)"
@@ -179,6 +181,15 @@ struct RootView: View {
 
         ToolbarItemGroup {
             if let repository = model.selectedRepository {
+                if !repository.hasRemote {
+                    Button {
+                        sheet = .createRemoteRepository(repository)
+                    } label: {
+                        Label("创建远程仓库", systemImage: "externaldrive.badge.plus")
+                    }
+                    .help("在 GitHub 或 GitLab 创建仓库，添加 origin 并首次推送")
+                }
+
                 Button {
                     sheet = .newWorktree(repository)
                 } label: {
@@ -261,6 +272,8 @@ private extension View {
             switch active {
             case .newWorktree(let repository):
                 NewWorktreeSheet(repository: repository)
+            case .createRemoteRepository(let repository):
+                CreateRemoteRepositorySheet(repository: repository)
             case .createPullRequest(let worktree):
                 CreatePullRequestSheet(model: worktree)
             case .removeWorktree(let repository, let worktree):
