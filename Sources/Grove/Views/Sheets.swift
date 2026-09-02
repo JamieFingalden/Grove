@@ -199,7 +199,7 @@ struct CreateRemoteRepositorySheet: View {
             )
             isCreated = true
         } catch {
-            if repository.hasRemote {
+            if repository.hasOrigin {
                 pushFailed = true
                 isCreated = true
                 app.report(title: "远程仓库已创建，但首次推送失败", error: error)

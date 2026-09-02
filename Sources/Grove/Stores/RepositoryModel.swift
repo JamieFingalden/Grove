@@ -27,6 +27,7 @@ final class RepositoryModel: Identifiable {
     /// 仓库配置的所有远端。多于一个时，推送要让用户选推到哪。
     var remotes: [NamedRemote] = []
     var defaultBranch: String?
+    var hasOrigin = false
     var hasRemote = false
 
     var isRefreshing = false
@@ -96,7 +97,8 @@ final class RepositoryModel: Identifiable {
             loadedRemotes, loadedOriginURL, loadedDefaultBranch
         )
         remotes = resolvedRemotes ?? []
-        hasRemote = originURL != nil
+        hasOrigin = originURL != nil
+        hasRemote = !remotes.isEmpty
         origin = originURL.flatMap(GitRemote.parse)
         // 托管商只按 origin 认。一个仓库可能同时挂着内网 GitLab 的 origin 和
         // GitHub 备份 remote，让 CLI 自己去猜会认错到另一个仓库上。
@@ -199,7 +201,7 @@ final class RepositoryModel: Identifiable {
         _ request: NewRemoteRepository,
         push target: InitialPushTarget?
     ) async throws {
-        guard !hasRemote else { throw RemoteRepositoryCreationError.originAlreadyExists }
+        guard !hasOrigin else { throw RemoteRepositoryCreationError.originAlreadyExists }
         guard let forge = app?.forge(of: request.kind) else {
             throw RemoteRepositoryCreationError.forgeUnavailable(request.kind)
         }

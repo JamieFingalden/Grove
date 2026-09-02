@@ -56,7 +56,7 @@ struct GroveCommands: Commands {
                 Task { await model.selectedRepository?.fetch() }
             }
             .keyboardShortcut("f", modifiers: [.command, .shift])
-            .disabled(model.selectedRepository == nil)
+            .disabled(model.selectedRepository?.hasRemote != true)
         }
     }
 }

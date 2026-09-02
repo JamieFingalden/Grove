@@ -55,11 +55,6 @@ struct RootView: View {
         if sidebarVisibility == .detailOnly {
             Group {
                 if showsHoverSidebar {
-                    ZStack(alignment: .leading) {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .onTapGesture { dismissHoverSidebar() }
-
                     SidebarView(sheet: $sheet)
                         .frame(width: 272)
                         .frame(maxHeight: .infinity)
@@ -72,8 +67,9 @@ struct RootView: View {
                         .shadow(color: .black.opacity(0.22), radius: 20, x: 6, y: 3)
                         .padding(8)
                         .onHover(perform: updateHoverSidebar)
+                        // 淡出中的旧视图不能再把自己唤回来，也不能挡住下面的文件列表。
+                        .allowsHitTesting(showsHoverSidebar)
                         .transition(.move(edge: .leading).combined(with: .opacity))
-                    }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 } else {
                     Button {
@@ -86,7 +82,7 @@ struct RootView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("临时显示边栏")
                     .onHover { isHovering in
-                        if isHovering { updateHoverSidebar(true) }
+                        if isHovering { presentHoverSidebar() }
                     }
                 }
             }
@@ -95,15 +91,12 @@ struct RootView: View {
 
     private func updateHoverSidebar(_ isHovering: Bool) {
         sidebarDismissTask?.cancel()
-        if isHovering {
-            presentHoverSidebar()
-            return
-        }
+        guard showsHoverSidebar, !isHovering else { return }
 
         sidebarDismissTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(300))
+            try? await Task.sleep(for: .milliseconds(100))
             guard !Task.isCancelled else { return }
-            withAnimation(.easeInOut(duration: 0.18)) {
+            withAnimation(.easeOut(duration: 0.14)) {
                 showsHoverSidebar = false
             }
         }
@@ -112,7 +105,7 @@ struct RootView: View {
     private func presentHoverSidebar() {
         sidebarDismissTask?.cancel()
         guard !showsHoverSidebar else { return }
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
             showsHoverSidebar = true
         }
     }
@@ -120,7 +113,7 @@ struct RootView: View {
     private func dismissHoverSidebar() {
         sidebarDismissTask?.cancel()
         guard showsHoverSidebar else { return }
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(.easeOut(duration: 0.14)) {
             showsHoverSidebar = false
         }
     }
@@ -181,7 +174,7 @@ struct RootView: View {
 
         ToolbarItemGroup {
             if let repository = model.selectedRepository {
-                if !repository.hasRemote {
+                if !repository.hasOrigin {
                     Button {
                         sheet = .createRemoteRepository(repository)
                     } label: {
@@ -200,7 +193,7 @@ struct RootView: View {
                 Button {
                     Task { await repository.fetch() }
                 } label: {
-                    Label("抓取", systemImage: "arrow.down.circle")
+                    Label("Fetch", systemImage: "arrow.down.circle")
                 }
                 .help("git fetch --all --prune（⇧⌘F）")
                 .disabled(!repository.hasRemote)
