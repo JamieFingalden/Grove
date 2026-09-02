@@ -73,13 +73,20 @@ struct PullRequestListView: View {
                     Text(repository.slug.map { "仓库：\($0)" } ?? "")
                 }
             } else {
-                List(selection: $selection) {
+                List {
                     ForEach(filtered) { pullRequest in
-                        PullRequestRow(
-                            pullRequest: pullRequest,
-                            worktree: worktree(for: pullRequest)
-                        )
-                        .tag(pullRequest.number)
+                        let isSelected = selection == pullRequest.number
+                        Button {
+                            selection = pullRequest.number
+                        } label: {
+                            PullRequestRow(
+                                pullRequest: pullRequest,
+                                worktree: worktree(for: pullRequest),
+                                isSelected: isSelected
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(selectionBackground(isSelected))
                         .contextMenu { menu(for: pullRequest) }
                     }
                 }
@@ -126,6 +133,14 @@ struct PullRequestListView: View {
                 || (pullRequest.author?.login.lowercased().contains(query) ?? false)
                 || String(pullRequest.number).contains(query)
         }
+    }
+
+    /// 跟 Finder 侧栏一致：浅灰圆角底配强调色文字，不使用整块高饱和蓝色。
+    private func selectionBackground(_ isSelected: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 9, style: .continuous)
+            .fill(isSelected
+                  ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
+                  : .clear)
     }
 
     /// 这个 PR 的分支有没有已经检出成本地工作树。有的话就直接给「跳过去」的入口，
@@ -190,12 +205,13 @@ struct PullRequestListView: View {
 private struct PullRequestRow: View {
     let pullRequest: PullRequest
     let worktree: Worktree?
+    let isSelected: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: pullRequest.status.systemImage)
                 .font(.system(size: 12))
-                .foregroundStyle(statusTint)
+                .foregroundStyle(isSelected ? Color.accentColor : statusTint)
                 .frame(width: 15)
 
             VStack(alignment: .leading, spacing: 3) {
@@ -203,9 +219,14 @@ private struct PullRequestRow: View {
                     Text(pullRequest.displayNumber)
                         .font(.system(size: 10.5, weight: .bold, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(
+                            isSelected
+                                ? Color.accentColor.opacity(0.75)
+                                : Color(nsColor: .tertiaryLabelColor)
+                        )
                     Text(pullRequest.title)
                         .font(.system(size: 12))
+                        .foregroundStyle(isSelected ? Color.accentColor : .primary)
                         .lineLimit(2)
                 }
 
@@ -239,6 +260,8 @@ private struct PullRequestRow: View {
             }
         }
         .padding(.vertical, 3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     private var statusTint: Color {
