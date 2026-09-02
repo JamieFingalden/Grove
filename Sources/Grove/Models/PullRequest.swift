@@ -36,6 +36,9 @@ struct PullRequest: Identifiable, Hashable, Sendable, Decodable {
     /// 当前登录用户是否已批准。GitHub 列表接口不提供这个字段，默认为 false。
     var viewerHasApproved = false
 
+    /// 请求创建时间。列表用它表示“提交了多久”，缺失时才退回最近更新时间。
+    var createdAt: Date? = nil
+
     /// 来源平台。GitHub 的 JSON 里没有这个字段，解码后由客户端补上。
     var forge: ForgeKind = .github
 
@@ -44,11 +47,13 @@ struct PullRequest: Identifiable, Hashable, Sendable, Decodable {
     /// 界面上的编号写法：GitHub 是 `#123`，GitLab 是 `!123`。
     var displayNumber: String { "\(forge.numberPrefix)\(number)" }
 
+    var listTimestamp: Date { createdAt ?? updatedAt }
+
     // GitHub 的 JSON 里没有 forge 字段，得显式列出要解码的键，
     // 否则合成的 CodingKeys 会去找一个不存在的 "forge" 而失败。
     enum CodingKeys: String, CodingKey {
         case number, title, state, isDraft, headRefName, baseRefName, url, author
-        case updatedAt, additions, deletions, changedFiles, reviewDecision, mergeable
+        case updatedAt, createdAt, additions, deletions, changedFiles, reviewDecision, mergeable
         case isCrossRepository, labels, statusCheckRollup, body, headRepositoryOwner
     }
 

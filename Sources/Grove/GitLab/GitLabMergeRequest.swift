@@ -190,6 +190,7 @@ extension GitLabMergeRequest {
             body: description,
             headRepositoryOwner: nil,
             viewerHasApproved: approvals?.userHasApproved ?? false,
+            createdAt: createdAt,
             forge: .gitlab
         )
     }

@@ -803,6 +803,7 @@ struct MergePullRequestSheet: View {
             failure = error.localizedDescription
             return
         }
+        repository.removeMergedPullRequest(number: pullRequest.number)
         appModel.removeCachedAIReview(
             for: repository.root,
             pullRequestNumber: pullRequest.number

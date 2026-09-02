@@ -328,7 +328,12 @@ enum RelativeDate {
     /// 用 `.relative` FormatStyle 而不是 `RelativeDateTimeFormatter`：
     /// 后者是引用类型、非 Sendable，共享静态实例在 Swift 6 下过不了编译。
     static func format(_ date: Date) -> String {
-        date.formatted(.relative(presentation: .numeric, unitsStyle: .narrow))
+        normalizedForDisplay(date).formatted(.relative(presentation: .numeric, unitsStyle: .narrow))
+    }
+
+    /// 自建 GitLab 和本机可能有几秒时钟偏差，不能因此向用户显示“几秒后”。
+    static func normalizedForDisplay(_ date: Date, now: Date = Date()) -> Date {
+        min(date, now)
     }
 }
 

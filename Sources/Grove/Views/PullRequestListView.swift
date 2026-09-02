@@ -217,7 +217,7 @@ private struct PullRequestRow: View {
                         .font(.system(size: 9.5, design: .monospaced))
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Text(RelativeDate.format(pullRequest.updatedAt))
+                    Text(RelativeDate.format(pullRequest.listTimestamp))
                 }
                 .font(.system(size: 9.5))
                 .foregroundStyle(.tertiary)

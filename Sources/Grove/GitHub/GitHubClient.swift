@@ -20,7 +20,7 @@ struct GitHubClient: ForgeClient {
     /// 列一屏 30 个 PR 就是几 MB 的无用传输，正文留到详情页再单独取。
     private static let listFields = [
         "number", "title", "state", "isDraft", "headRefName", "baseRefName",
-        "url", "author", "updatedAt", "additions", "deletions", "changedFiles",
+        "url", "author", "createdAt", "updatedAt", "additions", "deletions", "changedFiles",
         "reviewDecision", "mergeable", "isCrossRepository", "labels",
         "statusCheckRollup", "headRepositoryOwner"
     ].joined(separator: ",")

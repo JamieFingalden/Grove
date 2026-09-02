@@ -16,6 +16,7 @@ final class PullRequestDecodingTests: XCTestCase {
           "author": {"is_bot": true, "login": "app/dependabot"},
           "baseRefName": "trunk",
           "changedFiles": 2,
+          "createdAt": "2026-08-27T13:01:02Z",
           "deletions": 3,
           "headRefName": "dependabot/go_modules/bubbles",
           "headRepositoryOwner": {"login": "cli"},
@@ -52,6 +53,15 @@ final class PullRequestDecodingTests: XCTestCase {
         // 机器人的 login 形如 `app/dependabot`，展示时要去掉前缀。
         XCTAssertEqual(pullRequest.author?.displayName, "dependabot")
         XCTAssertEqual(pullRequest.headRepositoryOwner?.login, "cli")
+        XCTAssertEqual(pullRequest.listTimestamp, Date(timeIntervalSince1970: 1_787_835_662))
+    }
+
+    func testFutureRelativeDateIsClampedToNow() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(
+            RelativeDate.normalizedForDisplay(Date(timeIntervalSince1970: 1_015), now: now),
+            now
+        )
     }
 
     func testDraftAndMergedStatesOverrideOpen() throws {

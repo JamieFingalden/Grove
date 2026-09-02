@@ -79,6 +79,7 @@ final class GitLabMergeRequestTests: XCTestCase {
         XCTAssertEqual(pullRequest.status, .open)
         XCTAssertEqual(pullRequest.headRefName, "jnutt/622286-document-ot-recovery-path")
         XCTAssertEqual(pullRequest.mergeable, "MERGEABLE")
+        XCTAssertEqual(pullRequest.listTimestamp, try XCTUnwrap(try decodeList()[0].createdAt))
         XCTAssertEqual(pullRequest.labels.count, 2)
         XCTAssertEqual(pullRequest.labels[0].name, "Category:Importers")
     }
