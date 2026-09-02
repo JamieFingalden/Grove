@@ -7,16 +7,29 @@ struct ChangesView: View {
         // HSplitView 只按内容的固有高度撑开，不会自己吃掉父容器给的全部空间。
         // 不显式声明撑满的话，整个详情区会缩成中间一条、上下留出大片空白，
         // 而文件列表被挤到几乎没有高度、内容直接被裁掉。
-        HSplitView {
-            VStack(spacing: 0) {
-                fileList
-                Divider()
-                CommitBox(model: model)
-            }
-            .frame(minWidth: 260, idealWidth: 320, maxWidth: 460, maxHeight: .infinity)
+        GeometryReader { geometry in
+            let defaultListWidth = max(260, geometry.size.width * 0.3)
+            HSplitView {
+                VStack(spacing: 0) {
+                    fileList
+                    Divider()
+                    CommitBox(model: model)
+                }
+                .frame(
+                    minWidth: defaultListWidth,
+                    idealWidth: defaultListWidth,
+                    maxWidth: max(defaultListWidth, geometry.size.width * 0.45),
+                    maxHeight: .infinity
+                )
 
-            DiffPane(model: model)
-                .frame(minWidth: 380, maxHeight: .infinity)
+                DiffPane(model: model)
+                    .frame(
+                        minWidth: 380,
+                        idealWidth: geometry.size.width * 0.7,
+                        maxHeight: .infinity
+                    )
+                    .layoutPriority(1)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
