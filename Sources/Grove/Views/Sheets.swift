@@ -456,7 +456,7 @@ struct CreatePullRequestSheet: View {
             } catch is CancellationError {
                 // 用户取消时保留原有描述，不显示错误。
             } catch {
-                canRetryDescriptionGeneration = (error as? CodexGenerationError) == .timeout
+                canRetryDescriptionGeneration = (error as? CodexGenerationError)?.isTimeout == true
                 app.report(title: "AI PR 描述生成失败", error: error)
             }
             isGeneratingDescription = false

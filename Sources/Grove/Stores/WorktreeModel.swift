@@ -561,7 +561,7 @@ final class WorktreeModel: Identifiable {
             } catch is CancellationError {
                 // 用户主动取消不属于失败，静默回到空闲状态。
             } catch {
-                self.canRetryCommitMessageGeneration = (error as? CodexGenerationError) == .timeout
+                self.canRetryCommitMessageGeneration = (error as? CodexGenerationError)?.isTimeout == true
                 self.app?.report(title: "AI 提交信息生成失败", error: error)
             }
             self.isGeneratingCommitMessage = false

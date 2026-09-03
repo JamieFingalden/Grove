@@ -1,6 +1,17 @@
 import Foundation
 import Observation
 
+struct AIReviewGenerationRequest: Sendable {
+    var pullRequest: PullRequest
+    var files: [FileDiff]
+    var customInstructions: String
+    var selectedAreas: Set<PullRequestAIReview.Assessment.Area>
+    var model: AIGenerationModel
+    var repositoryRoot: URL
+}
+
+typealias AIReviewGenerator = @Sendable (AIReviewGenerationRequest) async throws -> PullRequestAIReview
+
 /// 一次操作失败的记录，用来在界面上显示横幅。
 struct GroveFailure: Identifiable, Sendable {
     let id = UUID()
@@ -89,6 +100,21 @@ struct GroveFailure: Identifiable, Sendable {
 @MainActor
 @Observable
 final class AppModel {
+    private struct AIReviewJobKey: Hashable {
+        var repositoryPath: String
+        var pullRequestNumber: Int
+
+        init(repository: URL, pullRequestNumber: Int) {
+            repositoryPath = repository.standardizedFileURL.path
+            self.pullRequestNumber = pullRequestNumber
+        }
+    }
+
+    private struct AIReviewJob {
+        var id: UUID
+        var model: AIGenerationModel
+    }
+
     private(set) var git: GitClient?
     private(set) var github: GitHubClient?
     private(set) var gitlab: GitLabClient?
@@ -108,6 +134,8 @@ final class AppModel {
     private(set) var isAIGenerationEnabled: Bool
     private(set) var aiCommitModel: AIGenerationModel
     private(set) var aiReviewModel: AIGenerationModel
+    private(set) var aiReviewResultsRevision = 0
+    private var aiReviewJobs: [AIReviewJobKey: AIReviewJob] = [:]
 
     /// 侧边栏选中项。仓库和工作树用同一个枚举，`NavigationSplitView` 的选择才好绑。
     enum Selection: Hashable, Sendable {
@@ -119,13 +147,26 @@ final class AppModel {
     private let bookmarks = RepositoryBookmarks()
     @ObservationIgnored private let aiGenerationSettings: AIGenerationSettings
     @ObservationIgnored private let aiReviewCache: AIReviewCache
+    @ObservationIgnored private let aiReviewGenerator: AIReviewGenerator
+    @ObservationIgnored private var aiReviewTasks: [AIReviewJobKey: Task<Void, Never>] = [:]
 
     init(
         aiGenerationSettings: AIGenerationSettings = AIGenerationSettings(),
-        aiReviewCache: AIReviewCache = AIReviewCache()
+        aiReviewCache: AIReviewCache = AIReviewCache(),
+        aiReviewGenerator: @escaping AIReviewGenerator = { request in
+            try await CodexPullRequestReviewGenerator.generate(
+                pullRequest: request.pullRequest,
+                files: request.files,
+                customInstructions: request.customInstructions,
+                selectedAreas: request.selectedAreas,
+                model: request.model,
+                in: request.repositoryRoot
+            )
+        }
     ) {
         self.aiGenerationSettings = aiGenerationSettings
         self.aiReviewCache = aiReviewCache
+        self.aiReviewGenerator = aiReviewGenerator
         self.isAIGenerationEnabled = aiGenerationSettings.isEnabled
         self.aiCommitModel = aiGenerationSettings.commitModel
         self.aiReviewModel = aiGenerationSettings.reviewModel
@@ -185,10 +226,72 @@ final class AppModel {
             for: repository,
             pullRequestNumber: pullRequestNumber
         )
+        aiReviewResultsRevision &+= 1
     }
 
     func removeCachedAIReview(for repository: URL, pullRequestNumber: Int) {
+        cancelAIReview(for: repository, pullRequestNumber: pullRequestNumber)
         aiReviewCache.remove(for: repository, pullRequestNumber: pullRequestNumber)
+        aiReviewResultsRevision &+= 1
+    }
+
+    func isAIReviewing(for repository: URL, pullRequestNumber: Int) -> Bool {
+        aiReviewJobs[AIReviewJobKey(
+            repository: repository,
+            pullRequestNumber: pullRequestNumber
+        )] != nil
+    }
+
+    func aiReviewingModel(for repository: URL, pullRequestNumber: Int) -> AIGenerationModel? {
+        aiReviewJobs[AIReviewJobKey(
+            repository: repository,
+            pullRequestNumber: pullRequestNumber
+        )]?.model
+    }
+
+    var activeAIReviewCount: Int { aiReviewJobs.count }
+
+    func startAIReview(_ request: AIReviewGenerationRequest) {
+        let key = AIReviewJobKey(
+            repository: request.repositoryRoot,
+            pullRequestNumber: request.pullRequest.number
+        )
+        cancelAIReview(for: request.repositoryRoot, pullRequestNumber: request.pullRequest.number)
+
+        let jobID = UUID()
+        aiReviewJobs[key] = AIReviewJob(id: jobID, model: request.model)
+        aiReviewTasks[key] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await aiReviewGenerator(request)
+                try Task.checkCancellation()
+                guard aiReviewJobs[key]?.id == jobID else { return }
+                saveAIReview(
+                    result,
+                    diffFingerprint: AIReviewCache.diffFingerprint(request.files),
+                    for: request.repositoryRoot,
+                    pullRequestNumber: request.pullRequest.number
+                )
+            } catch is CancellationError {
+                // 用户取消或请求已经合并时静默结束，不生成失败提醒。
+            } catch {
+                guard aiReviewJobs[key]?.id == jobID else { return }
+                report(title: "AI Review 失败", error: error)
+            }
+            finishAIReview(key: key, jobID: jobID)
+        }
+    }
+
+    func cancelAIReview(for repository: URL, pullRequestNumber: Int) {
+        let key = AIReviewJobKey(repository: repository, pullRequestNumber: pullRequestNumber)
+        aiReviewTasks.removeValue(forKey: key)?.cancel()
+        aiReviewJobs.removeValue(forKey: key)
+    }
+
+    private func finishAIReview(key: AIReviewJobKey, jobID: UUID) {
+        guard aiReviewJobs[key]?.id == jobID else { return }
+        aiReviewTasks.removeValue(forKey: key)
+        aiReviewJobs.removeValue(forKey: key)
     }
 
     // MARK: - 启动

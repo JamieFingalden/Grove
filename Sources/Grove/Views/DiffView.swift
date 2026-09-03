@@ -162,41 +162,98 @@ struct DiffContentView: View {
     var showsFileHeaders = false
 
     var body: some View {
-        ScrollView([.vertical, .horizontal]) {
-            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
-                ForEach(files) { file in
-                    Section {
-                        if file.isBinary {
-                            DiffNotice(
-                                text: "二进制文件，无法按行比较。",
-                                systemImage: "doc.badge.gearshape"
-                            )
-                        } else if file.isModeChangeOnly {
-                            DiffNotice(
-                                text: "只有文件权限变了：\(file.oldMode ?? "?") → \(file.newMode ?? "?")",
-                                systemImage: "lock.rotation"
-                            )
-                        } else if file.hunks.isEmpty {
-                            DiffNotice(text: "内容没有变化。", systemImage: "equal.circle")
-                        } else {
-                            ForEach(file.hunks) { hunk in
-                                HunkView(hunk: hunk, model: model)
+        GeometryReader { geometry in
+            ScrollView([.vertical, .horizontal]) {
+                ZStack(alignment: .topLeading) {
+                    // 透明标尺只负责告诉 NSScrollView 完整横向范围，不把每一行都拉成
+                    // 最长行那么宽；后者会让大 diff 为成千上万行分配巨型背景图层。
+                    Color.clear
+                        .frame(
+                            width: max(
+                                geometry.size.width,
+                                DiffContentMetrics.width(for: files, selectable: model != nil)
+                            ),
+                            height: 1
+                        )
+
+                    LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
+                        ForEach(files) { file in
+                            Section {
+                                if file.isBinary {
+                                    DiffNotice(
+                                        text: "二进制文件，无法按行比较。",
+                                        systemImage: "doc.badge.gearshape"
+                                    )
+                                } else if file.isModeChangeOnly {
+                                    DiffNotice(
+                                        text: "只有文件权限变了：\(file.oldMode ?? "?") → \(file.newMode ?? "?")",
+                                        systemImage: "lock.rotation"
+                                    )
+                                } else if file.hunks.isEmpty {
+                                    DiffNotice(text: "内容没有变化。", systemImage: "equal.circle")
+                                } else {
+                                    ForEach(file.hunks) { hunk in
+                                        HunkView(hunk: hunk, model: model)
+                                    }
+                                }
+                            } header: {
+                                if showsFileHeaders || files.count > 1 {
+                                    FileDiffHeader(file: file)
+                                }
                             }
                         }
-                    } header: {
-                        if showsFileHeaders || files.count > 1 {
-                            FileDiffHeader(file: file)
-                        }
                     }
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(minWidth: geometry.size.width, alignment: .leading)
                 }
+                // LazyVStack 不会用尚未显示的行参与理想宽度计算，长行位于视口外时
+                // 横向滚动范围会偏短。提前量出所有文本的最大宽度，确保能滚到行尾。
+                .padding(.bottom, 12)
             }
-            .padding(.bottom, 12)
+            .scrollIndicators(.visible, axes: [.vertical, .horizontal])
+            // 内容比视口小的时候，双向滚动的 ScrollView 会把它居中 ——
+            // 一个只改了两行的 diff 就会飘在面板正中间。锚到左上角才是代码该有的样子。
+            .defaultScrollAnchor(.topLeading)
         }
-        // 内容比视口小的时候，双向滚动的 ScrollView 会把它居中 ——
-        // 一个只改了两行的 diff 就会飘在面板正中间。锚到左上角才是代码该有的样子。
-        .defaultScrollAnchor(.topLeading)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
+    }
+}
+
+@MainActor
+private enum DiffContentMetrics {
+    private static let codeFont = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
+    private static let hunkFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular)
+    private static let headerFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold)
+
+    /// 行号、标记和右侧呼吸空间。宽度宁可多留一点，也不能让最后几个字符不可达。
+    private static let codeChromeWidth: CGFloat = 16 + 38 + 38 + 6 + 10 + 24
+
+    static func width(for files: [FileDiff], selectable: Bool) -> CGFloat {
+        var maximum: CGFloat = 0
+
+        for file in files {
+            let header = file.displayPath
+                + (file.oldPath.map { " ← \($0)" } ?? "")
+                + "  +\(file.additions)  −\(file.deletions)"
+            maximum = max(maximum, textWidth(header, font: headerFont) + 24)
+
+            for hunk in file.hunks {
+                maximum = max(
+                    maximum,
+                    textWidth(hunk.header, font: hunkFont) + 24 + (selectable ? 22 : 0)
+                )
+                for line in hunk.lines {
+                    maximum = max(maximum, textWidth(line.text.isEmpty ? " " : line.text, font: codeFont) + codeChromeWidth)
+                }
+            }
+        }
+
+        return ceil(maximum)
+    }
+
+    private static func textWidth(_ text: String, font: NSFont) -> CGFloat {
+        (text as NSString).size(withAttributes: [.font: font]).width
     }
 }
 

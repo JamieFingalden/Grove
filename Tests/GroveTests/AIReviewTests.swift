@@ -3,6 +3,14 @@ import XCTest
 @testable import Grove
 
 final class PullRequestReviewPromptBuilderTests: XCTestCase {
+    func testReviewUsesExtendedTimeout() {
+        XCTAssertEqual(CodexPullRequestReviewGenerator.reviewTimeout, 300)
+        XCTAssertEqual(
+            CodexGenerationError.timeout(seconds: 300).errorDescription,
+            "AI 任务在 300 秒内没有完成，已停止等待。可能是改动较大、连接中断未返回，或 OpenAI 服务暂时拥堵；请确认网络后重试。"
+        )
+    }
+
     func testPromptIncludesProvidedDiffAndRejectsEmbeddedInstructions() {
         let files = DiffParser.parse("""
         diff --git a/a.swift b/a.swift
@@ -211,6 +219,82 @@ final class AIReviewCacheTests: XCTestCase {
         XCTAssertNotEqual(
             AIReviewCache.diffFingerprint(original),
             AIReviewCache.diffFingerprint(changed)
+        )
+    }
+}
+
+@MainActor
+final class AIReviewCoordinatorTests: XCTestCase {
+    func testMultipleReviewsRunIndependentlyAndPersistResults() async throws {
+        let suiteName = "AIReviewCoordinatorTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let repository = URL(fileURLWithPath: "/tmp/review-coordinator")
+        let files = DiffParser.parse("""
+        diff --git a/a.swift b/a.swift
+        --- a/a.swift
+        +++ b/a.swift
+        @@ -1 +1 @@
+        -return false
+        +return true
+        """)
+        let result = PullRequestAIReview(
+            verdict: .ready,
+            summary: "未发现合并风险。",
+            assessments: [],
+            wasTruncated: false
+        )
+        let model = AppModel(
+            aiGenerationSettings: AIGenerationSettings(defaults: defaults),
+            aiReviewCache: AIReviewCache(defaults: defaults),
+            aiReviewGenerator: { _ in
+                await Task.yield()
+                return result
+            }
+        )
+
+        for number in [1, 2] {
+            model.startAIReview(.init(
+                pullRequest: makePullRequest(number: number),
+                files: files,
+                customInstructions: "检查合并风险。",
+                selectedAreas: [.compilation],
+                model: .terra,
+                repositoryRoot: repository
+            ))
+        }
+
+        XCTAssertEqual(model.activeAIReviewCount, 2)
+        for _ in 0..<100 where model.activeAIReviewCount > 0 {
+            await Task.yield()
+        }
+        XCTAssertEqual(model.activeAIReviewCount, 0)
+        XCTAssertNotNil(model.cachedAIReview(for: repository, pullRequestNumber: 1))
+        XCTAssertNotNil(model.cachedAIReview(for: repository, pullRequestNumber: 2))
+    }
+
+    private func makePullRequest(number: Int) -> PullRequest {
+        PullRequest(
+            number: number,
+            title: "并行审查 \(number)",
+            state: "OPEN",
+            isDraft: false,
+            headRefName: "feature-\(number)",
+            baseRefName: "main",
+            url: "https://example.invalid/pr/\(number)",
+            author: nil,
+            updatedAt: Date(timeIntervalSince1970: 0),
+            additions: 1,
+            deletions: 1,
+            changedFiles: 1,
+            reviewDecision: nil,
+            mergeable: "MERGEABLE",
+            isCrossRepository: false,
+            labels: [],
+            statusCheckRollup: nil,
+            body: nil,
+            headRepositoryOwner: nil
         )
     }
 }

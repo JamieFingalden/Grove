@@ -206,6 +206,9 @@ enum PullRequestReviewPromptBuilder {
 }
 
 struct CodexPullRequestReviewGenerator {
+    /// 大型 PR 需要读取更多上下文，不能沿用短文本生成的 180 秒上限。
+    static let reviewTimeout: Double = 300
+
     static let outputSchema = outputSchema(for: Set(PullRequestAIReview.Assessment.Area.allCases))
 
     static func outputSchema(for areas: Set<PullRequestAIReview.Assessment.Area>) -> String {
@@ -299,6 +302,7 @@ struct CodexPullRequestReviewGenerator {
             prompt: input.text,
             schema: outputSchema(for: selectedAreas),
             model: model,
+            timeout: reviewTimeout,
             in: directory
         )
         return try decode(data, wasTruncated: input.wasTruncated, selectedAreas: selectedAreas)

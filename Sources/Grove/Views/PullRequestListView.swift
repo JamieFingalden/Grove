@@ -82,7 +82,11 @@ struct PullRequestListView: View {
                             PullRequestRow(
                                 pullRequest: pullRequest,
                                 worktree: worktree(for: pullRequest),
-                                isSelected: isSelected
+                                isSelected: isSelected,
+                                isAIReviewing: appModel.isAIReviewing(
+                                    for: repository.root,
+                                    pullRequestNumber: pullRequest.number
+                                )
                             )
                         }
                         .buttonStyle(.plain)
@@ -206,6 +210,7 @@ private struct PullRequestRow: View {
     let pullRequest: PullRequest
     let worktree: Worktree?
     let isSelected: Bool
+    let isAIReviewing: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -244,6 +249,9 @@ private struct PullRequestRow: View {
                 .foregroundStyle(.tertiary)
 
                 HStack(spacing: 5) {
+                    if isAIReviewing {
+                        MiniBadge(text: "Review 中", systemImage: "sparkles", tint: .purple)
+                    }
                     if let checks = pullRequest.checks.label, let icon = pullRequest.checks.systemImage {
                         MiniBadge(text: checks, systemImage: icon, tint: checksTint)
                     }
@@ -329,8 +337,6 @@ private struct PullRequestDetailView: View {
     @State private var viewerHasApprovedOverride: Bool?
     @State private var aiReview: PullRequestAIReview?
     @State private var aiReviewIsStale = false
-    @State private var isReviewingAI = false
-    @State private var aiReviewTask: Task<Void, Never>?
     @State private var aiReviewInstructions = ""
     @State private var aiReviewAreas = Set(PullRequestAIReview.Assessment.Area.allCases)
     @State private var showsAIReviewOptions = false
@@ -362,7 +368,9 @@ private struct PullRequestDetailView: View {
             restoreCachedAIReview()
             await loadDetail()
         }
-        .onDisappear { cancelAIReview() }
+        .onChange(of: appModel.aiReviewResultsRevision) { _, _ in
+            restoreCachedAIReview(for: diffFiles.isEmpty ? nil : diffFiles)
+        }
     }
 
     /// 详情页补齐列表没有的正文、代码 diff 和评论线程。三项并发加载，
@@ -689,6 +697,13 @@ private struct PullRequestDetailView: View {
         appModel.isAIGenerationEnabled && !isLoadingDiff && !diffFiles.isEmpty
     }
 
+    private var isReviewingAI: Bool {
+        appModel.isAIReviewing(
+            for: repository.root,
+            pullRequestNumber: pullRequest.number
+        )
+    }
+
     private var aiReviewHelp: String {
         if !appModel.isAIGenerationEnabled {
             return "AI 生成功能已关闭，请先在 Grove 设置中开启。"
@@ -772,42 +787,20 @@ private struct PullRequestDetailView: View {
 
     private func startAIReview() {
         guard canStartAIReview else { return }
-        aiReviewTask?.cancel()
         let request = current
         let files = diffFiles
         let model = appModel.aiReviewModel
         let instructions = aiReviewInstructions
         let selectedAreas = aiReviewAreas
         appModel.setAIReviewAreas(selectedAreas, for: repository.root)
-        isReviewingAI = true
-
-        aiReviewTask = Task { @MainActor in
-            do {
-                let result = try await CodexPullRequestReviewGenerator.generate(
-                    pullRequest: request,
-                    files: files,
-                    customInstructions: instructions,
-                    selectedAreas: selectedAreas,
-                    model: model,
-                    in: repository.root
-                )
-                try Task.checkCancellation()
-                aiReview = result
-                aiReviewIsStale = false
-                appModel.saveAIReview(
-                    result,
-                    diffFingerprint: AIReviewCache.diffFingerprint(files),
-                    for: repository.root,
-                    pullRequestNumber: request.number
-                )
-            } catch is CancellationError {
-                // 用户主动取消不属于失败，不弹错误提醒。
-            } catch {
-                appModel.report(title: "AI Review 失败", error: error)
-            }
-            isReviewingAI = false
-            aiReviewTask = nil
-        }
+        appModel.startAIReview(.init(
+            pullRequest: request,
+            files: files,
+            customInstructions: instructions,
+            selectedAreas: selectedAreas,
+            model: model,
+            repositoryRoot: repository.root
+        ))
     }
 
     private func reviewAreaBinding(
@@ -826,9 +819,10 @@ private struct PullRequestDetailView: View {
     }
 
     private func cancelAIReview() {
-        aiReviewTask?.cancel()
-        aiReviewTask = nil
-        isReviewingAI = false
+        appModel.cancelAIReview(
+            for: repository.root,
+            pullRequestNumber: pullRequest.number
+        )
     }
 
     private func restoreCachedAIReview(for files: [FileDiff]? = nil) {
@@ -959,7 +953,7 @@ private struct PullRequestDetailView: View {
                     .font(.system(size: 12, weight: .semibold))
                 if isReviewingAI {
                     ProgressView().controlSize(.mini)
-                    Text("正在用 \(appModel.aiReviewModel.name) 检查代码…")
+                    Text("正在用 \(activeAIReviewModel.name) 检查代码…")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                 } else if let aiReview {
@@ -1008,6 +1002,13 @@ private struct PullRequestDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 9))
         .overlay { RoundedRectangle(cornerRadius: 9).stroke(.separator, lineWidth: 0.5) }
+    }
+
+    private var activeAIReviewModel: AIGenerationModel {
+        appModel.aiReviewingModel(
+            for: repository.root,
+            pullRequestNumber: pullRequest.number
+        ) ?? appModel.aiReviewModel
     }
 
     private func aiReviewAssessment(_ assessment: PullRequestAIReview.Assessment) -> some View {

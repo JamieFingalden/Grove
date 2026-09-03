@@ -5,6 +5,7 @@ enum CodexRunner {
         prompt: String,
         schema: String,
         model: AIGenerationModel,
+        timeout: Double = ProcessRunner.networkTimeout,
         in directory: URL
     ) async throws -> Data {
         guard let executable = await ToolLocator.shared.locate("codex") else {
@@ -31,14 +32,14 @@ enum CodexRunner {
                 ),
                 workingDirectory: directory,
                 environment: await ToolLocator.shared.childEnvironment(),
-                timeout: ProcessRunner.networkTimeout,
+                timeout: timeout,
                 standardInput: Data(prompt.utf8)
             )
             try Task.checkCancellation()
         } catch is CancellationError {
             throw CancellationError()
         } catch is CommandTimeout {
-            throw CodexGenerationError.timeout
+            throw CodexGenerationError.timeout(seconds: Int(timeout.rounded()))
         } catch let failure as CommandFailure {
             throw CodexGenerationError.commandFailed(failure.output)
         }
@@ -69,18 +70,23 @@ enum CodexRunner {
 
 enum CodexGenerationError: LocalizedError, Sendable, Equatable {
     case notInstalled
-    case timeout
+    case timeout(seconds: Int)
     case commandFailed(String)
     case invalidOutput
     case emptyOutput
     case baseBranchNotFound(String)
 
+    var isTimeout: Bool {
+        if case .timeout = self { return true }
+        return false
+    }
+
     var errorDescription: String? {
         switch self {
         case .notInstalled:
             "找不到 Codex CLI。请在终端运行 npm install -g @openai/codex，然后运行 codex login。"
-        case .timeout:
-            "模型没在 180 秒内返回。你可以点“重试”再生成一次。"
+        case .timeout(let seconds):
+            "AI 任务在 \(seconds) 秒内没有完成，已停止等待。可能是改动较大、连接中断未返回，或 OpenAI 服务暂时拥堵；请确认网络后重试。"
         case .commandFailed(let detail):
             if detail.localizedCaseInsensitiveContains("auth")
                 || detail.localizedCaseInsensitiveContains("login")
