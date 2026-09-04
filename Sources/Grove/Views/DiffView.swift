@@ -165,16 +165,13 @@ struct DiffContentView: View {
         GeometryReader { geometry in
             ScrollView([.vertical, .horizontal]) {
                 ZStack(alignment: .topLeading) {
-                    // 透明标尺只负责告诉 NSScrollView 完整横向范围，不把每一行都拉成
-                    // 最长行那么宽；后者会让大 diff 为成千上万行分配巨型背景图层。
-                    Color.clear
-                        .frame(
-                            width: max(
-                                geometry.size.width,
-                                DiffContentMetrics.width(for: files, selectable: model != nil)
-                            ),
-                            height: 1
-                        )
+                    // 用真正的 SwiftUI 文本视图量宽，避免 AppKit 字体估值和实际渲染
+                    // 不一致，在最右端凭空多出一大片没有代码的滚动区域。
+                    DiffContentWidthProbe(
+                        files: files,
+                        selectable: model != nil,
+                        showsFileHeaders: showsFileHeaders || files.count > 1
+                    )
 
                     LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
                         ForEach(files) { file in
@@ -204,16 +201,19 @@ struct DiffContentView: View {
                         }
                     }
                     .fixedSize(horizontal: true, vertical: false)
-                    .frame(minWidth: geometry.size.width, alignment: .leading)
                 }
-                // LazyVStack 不会用尚未显示的行参与理想宽度计算，长行位于视口外时
-                // 横向滚动范围会偏短。提前量出所有文本的最大宽度，确保能滚到行尾。
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(minWidth: geometry.size.width, alignment: .leading)
                 .padding(.bottom, 12)
+                .background(DiffHorizontalVisibilityClamp())
             }
             .scrollIndicators(.visible, axes: [.vertical, .horizontal])
             // 内容比视口小的时候，双向滚动的 ScrollView 会把它居中 ——
             // 一个只改了两行的 diff 就会飘在面板正中间。锚到左上角才是代码该有的样子。
             .defaultScrollAnchor(.topLeading)
+            // 文件或提交变化后必须创建新的滚动容器。否则 SwiftUI 会沿用上一个文件的
+            // 横纵偏移，用户点开新文件时可能直接看到右下角甚至一片空白。
+            .id(files.hashValue)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
@@ -221,39 +221,205 @@ struct DiffContentView: View {
 }
 
 @MainActor
-private enum DiffContentMetrics {
+private struct DiffContentWidthProbe: View {
+    let files: [FileDiff]
+    let selectable: Bool
+    let showsFileHeaders: Bool
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if let line = widestLine {
+                DiffLineView(line: line, model: nil)
+            }
+
+            if let hunk = widestHunk {
+                HStack(spacing: 6) {
+                    if selectable {
+                        Image(systemName: "square")
+                            .font(.system(size: 11))
+                    }
+                    Text(hunk.header)
+                        .font(.system(size: 10.5, design: .monospaced))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 3)
+            }
+
+            if showsFileHeaders, let file = widestFile {
+                FileDiffHeader(file: file)
+            }
+        }
+        .fixedSize(horizontal: true, vertical: true)
+        .padding(.trailing, 24)
+        .hidden()
+        .accessibilityHidden(true)
+    }
+
     private static let codeFont = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
     private static let hunkFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular)
     private static let headerFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold)
 
-    /// 行号、标记和右侧呼吸空间。宽度宁可多留一点，也不能让最后几个字符不可达。
-    private static let codeChromeWidth: CGFloat = 16 + 38 + 38 + 6 + 10 + 24
-
-    static func width(for files: [FileDiff], selectable: Bool) -> CGFloat {
-        var maximum: CGFloat = 0
-
-        for file in files {
-            let header = file.displayPath
-                + (file.oldPath.map { " ← \($0)" } ?? "")
-                + "  +\(file.additions)  −\(file.deletions)"
-            maximum = max(maximum, textWidth(header, font: headerFont) + 24)
-
-            for hunk in file.hunks {
-                maximum = max(
-                    maximum,
-                    textWidth(hunk.header, font: hunkFont) + 24 + (selectable ? 22 : 0)
-                )
-                for line in hunk.lines {
-                    maximum = max(maximum, textWidth(line.text.isEmpty ? " " : line.text, font: codeFont) + codeChromeWidth)
-                }
-            }
-        }
-
-        return ceil(maximum)
+    private var widestLine: DiffLine? {
+        files.lazy
+            .flatMap(\.hunks)
+            .flatMap(\.lines)
+            .max { textWidth($0.text, font: Self.codeFont) < textWidth($1.text, font: Self.codeFont) }
     }
 
-    private static func textWidth(_ text: String, font: NSFont) -> CGFloat {
+    private var widestHunk: DiffHunk? {
+        files.lazy
+            .flatMap(\.hunks)
+            .max { textWidth($0.header, font: Self.hunkFont) < textWidth($1.header, font: Self.hunkFont) }
+    }
+
+    private var widestFile: FileDiff? {
+        files.max {
+            textWidth(headerText($0), font: Self.headerFont)
+                < textWidth(headerText($1), font: Self.headerFont)
+        }
+    }
+
+    private func headerText(_ file: FileDiff) -> String {
+        file.displayPath
+            + (file.oldPath.map { " ← \($0)" } ?? "")
+            + "  +\(file.additions)  −\(file.deletions)"
+    }
+
+    private func textWidth(_ text: String, font: NSFont) -> CGFloat {
         (text as NSString).size(withAttributes: [.font: font]).width
+    }
+}
+
+@MainActor
+private struct DiffHorizontalVisibilityClamp: NSViewRepresentable {
+
+    func makeNSView(context: Context) -> NSView {
+        let view = AttachmentView(frame: .zero)
+        view.didEnterWindow = { [weak coordinator = context.coordinator] view in
+            DispatchQueue.main.async {
+                coordinator?.attach(to: view)
+            }
+        }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        // 等本轮 SwiftUI 布局结束后再读取真实文本位置；提前读取会得到旧坐标，
+        // 横向偏移仍可能停在当前可见代码之外，只剩一片空白。
+        DispatchQueue.main.async {
+            context.coordinator.attach(to: view)
+            context.coordinator.clampToVisibleCode()
+        }
+    }
+
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    private final class AttachmentView: NSView {
+        var didEnterWindow: ((NSView) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil {
+                didEnterWindow?(self)
+            }
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        private weak var scrollView: NSScrollView?
+        private weak var clipView: NSClipView?
+        private var boundsObservation: NSKeyValueObservation?
+
+        func attach(to view: NSView) {
+            var windowScrollView: NSScrollView?
+            if let contentView = view.window?.contentView {
+                let scrollViews = descendants(of: contentView)
+                    .compactMap { $0 as? NSScrollView }
+                    .filter(\.hasHorizontalScroller)
+                windowScrollView = scrollViews.min { lhs, rhs in
+                    lhs.frame.width * lhs.frame.height < rhs.frame.width * rhs.frame.height
+                }
+            }
+            guard let newScrollView = view.enclosingScrollView ?? windowScrollView else { return }
+            guard scrollView !== newScrollView else { return }
+            detach()
+            scrollView = newScrollView
+            clipView = newScrollView.contentView
+            newScrollView.contentView.postsBoundsChangedNotifications = true
+            boundsObservation = newScrollView.contentView.observe(\.bounds, options: [.new]) { [weak self] _, _ in
+                Task { @MainActor [weak self] in
+                    self?.scheduleClamp()
+                }
+            }
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(clipViewBoundsDidChange),
+                name: NSView.boundsDidChangeNotification,
+                object: newScrollView.contentView
+            )
+        }
+
+        func detach() {
+            boundsObservation = nil
+            NotificationCenter.default.removeObserver(
+                self,
+                name: NSView.boundsDidChangeNotification,
+                object: clipView
+            )
+            scrollView = nil
+            clipView = nil
+        }
+
+        @objc private func clipViewBoundsDidChange(_ notification: Notification) {
+            guard clipView != nil else { return }
+            scheduleClamp()
+        }
+
+        private func scheduleClamp() {
+            NSObject.cancelPreviousPerformRequests(
+                withTarget: self,
+                selector: #selector(clampToVisibleCode),
+                object: nil
+            )
+            perform(#selector(clampToVisibleCode), with: nil, afterDelay: 0.05)
+        }
+
+        @objc func clampToVisibleCode() {
+            guard let scrollView,
+                  let documentView = scrollView.documentView else { return }
+            let clipView = scrollView.contentView
+            guard clipView.bounds.origin.x > 0.5 else { return }
+            let clipFrame = scrollView.contentView.convert(scrollView.contentView.bounds, to: nil)
+            let visibleFields = descendants(of: documentView)
+                .compactMap { $0 as? NSTextField }
+                .filter { !$0.isHiddenOrHasHiddenAncestor }
+                // SwiftUI 会额外生成一个覆盖整份 diff 的聚合文本节点；它不是屏幕上的
+                // 代码行，拿它量宽会让钳制永远等于整份文件宽度。
+                .filter { $0.bounds.height <= 32 }
+                .filter { !$0.stringValue.contains("\n") }
+                .filter {
+                    let frame = $0.convert($0.bounds, to: nil)
+                    return frame.maxY >= clipFrame.minY && frame.minY <= clipFrame.maxY
+                }
+            let rightEdge = visibleFields
+                .map { $0.convert($0.bounds, to: documentView).maxX }
+                .max() ?? clipView.bounds.width
+            let maximumX = max(0, rightEdge + 24 - clipView.bounds.width)
+            guard clipView.bounds.origin.x > maximumX + 0.5 else { return }
+            clipView.scroll(to: NSPoint(x: maximumX, y: clipView.bounds.origin.y))
+            scrollView.reflectScrolledClipView(clipView)
+        }
+
+        private func descendants(of view: NSView) -> [NSView] {
+            view.subviews + view.subviews.flatMap(descendants)
+        }
     }
 }
 
@@ -288,6 +454,7 @@ private struct FileDiffHeader: View {
         .monospacedDigit()
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
+        .fixedSize(horizontal: true, vertical: false)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.bar)
     }
@@ -370,9 +537,11 @@ private struct HunkView: View {
                 Text(hunk.header)
                     .font(.system(size: 10.5, design: .monospaced))
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 3)
+            .fixedSize(horizontal: true, vertical: false)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.accentColor.opacity(0.07))
 
@@ -438,6 +607,7 @@ private struct DiffLineView: View {
         .font(.system(size: 11.5, design: .monospaced))
         .foregroundStyle(foreground)
         .padding(.vertical, 0.5)
+        .fixedSize(horizontal: true, vertical: false)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(isSelected ? Color.accentColor.opacity(0.22) : background)
         .contentShape(Rectangle())
