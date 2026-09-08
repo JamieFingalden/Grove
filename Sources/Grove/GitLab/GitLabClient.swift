@@ -405,6 +405,16 @@ struct GitLabClient: ForgeClient {
         try await runChecked(arguments, in: directory)
     }
 
+    func close(number: Int, in directory: URL) async throws {
+        // GitLab 关闭 MR 走更新接口；不能用删除接口，否则会丢失评审记录。
+        _ = try await api(
+            "projects/:id/merge_requests/\(number)",
+            in: directory,
+            method: "PUT",
+            fields: ["state_event": "close"]
+        )
+    }
+
     func approve(number: Int, in directory: URL) async throws {
         // `glab mr approve` 完成批准后还会再查一次请求详情；在同时存在
         // GitHub 备份 remote 的仓库里，那次查询可能误走 GitHub GraphQL。

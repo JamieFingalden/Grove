@@ -125,6 +125,8 @@ protocol ForgeClient: Sendable {
 
     func createPullRequest(_ request: NewPullRequest, in directory: URL) async throws -> String
     func merge(number: Int, strategy: MergeStrategy, deleteBranch: Bool, in directory: URL) async throws
+    /// 关闭仍未合并的 PR/MR。已关闭的请求不会出现在默认列表里。
+    func close(number: Int, in directory: URL) async throws
     /// 批准。GitHub 是提交一条 APPROVE 评审，GitLab 是 approve 接口。
     func approve(number: Int, in directory: URL) async throws
     /// 撤销当前用户的批准。GitLab 原生支持；其他平台可以按能力降级。

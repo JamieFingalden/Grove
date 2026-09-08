@@ -5,6 +5,7 @@ enum CodexRunner {
         prompt: String,
         schema: String,
         model: AIGenerationModel,
+        reasoningEffort: AIReviewReasoningEffort? = nil,
         timeout: Double = ProcessRunner.networkTimeout,
         in directory: URL
     ) async throws -> Data {
@@ -26,6 +27,7 @@ enum CodexRunner {
                 executable: executable,
                 arguments: arguments(
                     model: model,
+                    reasoningEffort: reasoningEffort,
                     directory: directory,
                     outputURL: outputURL,
                     schemaURL: schemaURL
@@ -52,12 +54,14 @@ enum CodexRunner {
 
     static func arguments(
         model: AIGenerationModel,
+        reasoningEffort: AIReviewReasoningEffort? = nil,
         directory: URL,
         outputURL: URL,
         schemaURL: URL
     ) -> [String] {
         [
             "exec", "--cd", directory.path,
+        ] + (reasoningEffort.map { ["--config", "model_reasoning_effort=\"\($0.rawValue)\""] } ?? []) + [
             "--model", model.rawValue,
             "--sandbox", "read-only",
             "--ephemeral",

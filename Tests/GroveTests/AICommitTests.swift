@@ -188,9 +188,11 @@ final class AIGenerationSettingsTests: XCTestCase {
 
         settings.setCommitModel(.terra)
         settings.setReviewModel(.sol)
+        settings.setReviewReasoningEffort(.xhigh)
         let reloaded = AIGenerationSettings(defaults: defaults)
         XCTAssertEqual(reloaded.commitModel, .terra)
         XCTAssertEqual(reloaded.reviewModel, .sol)
+        XCTAssertEqual(reloaded.reviewReasoningEffort, .xhigh)
     }
 
     func testPersistsReviewInstructionsPerRepository() {
@@ -245,6 +247,19 @@ final class CodexRunnerArgumentsTests: XCTestCase {
 
         let modelFlag = try XCTUnwrap(arguments.firstIndex(of: "--model"))
         XCTAssertEqual(arguments[modelFlag + 1], "gpt-5.6-luna")
+    }
+
+    func testPassesReviewReasoningEffortToCodexCLI() throws {
+        let arguments = CodexRunner.arguments(
+            model: .terra,
+            reasoningEffort: .high,
+            directory: URL(fileURLWithPath: "/repo"),
+            outputURL: URL(fileURLWithPath: "/tmp/output.json"),
+            schemaURL: URL(fileURLWithPath: "/tmp/schema.json")
+        )
+
+        let configFlag = try XCTUnwrap(arguments.firstIndex(of: "--config"))
+        XCTAssertEqual(arguments[configFlag + 1], "model_reasoning_effort=\"high\"")
     }
 }
 

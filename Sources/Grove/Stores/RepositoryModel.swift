@@ -174,8 +174,8 @@ final class RepositoryModel: Identifiable {
         return pullRequests.first { $0.headRefName == branch }
     }
 
-    /// 托管平台确认合并成功后先更新本地列表，避免等待后续网络刷新时仍显示已合并的请求。
-    func removeMergedPullRequest(number: Int) {
+    /// 托管平台确认请求已结束后先更新本地列表，避免等待后续网络刷新时仍显示旧状态。
+    func removePullRequest(number: Int) {
         pullRequests.removeAll { $0.number == number }
     }
 

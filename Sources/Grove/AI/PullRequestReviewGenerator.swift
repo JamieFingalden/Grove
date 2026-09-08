@@ -290,6 +290,7 @@ struct CodexPullRequestReviewGenerator {
             PullRequestAIReview.Assessment.Area.allCases
         ),
         model: AIGenerationModel,
+        reasoningEffort: AIReviewReasoningEffort,
         in directory: URL
     ) async throws -> PullRequestAIReview {
         let input = PullRequestReviewPromptBuilder.build(.init(
@@ -302,6 +303,7 @@ struct CodexPullRequestReviewGenerator {
             prompt: input.text,
             schema: outputSchema(for: selectedAreas),
             model: model,
+            reasoningEffort: reasoningEffort,
             timeout: reviewTimeout,
             in: directory
         )

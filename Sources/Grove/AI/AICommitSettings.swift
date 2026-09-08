@@ -32,12 +32,54 @@ enum AIGenerationModel: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// AI Review 的思考深度。较高档位会给模型更多推理预算，也会相应增加等待时间和额度消耗。
+enum AIReviewReasoningEffort: String, CaseIterable, Identifiable, Sendable {
+    case low
+    case medium
+    case high
+    case xhigh
+    case max
+    case ultra
+
+    var id: String { rawValue }
+
+    var name: String {
+        switch self {
+        case .low: "低"
+        case .medium: "中"
+        case .high: "高"
+        case .xhigh: "很高"
+        case .max: "最高"
+        case .ultra: "极限"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .low: "速度优先，适合小改动的快速筛查。"
+        case .medium: "速度与判断质量更均衡。"
+        case .high: "默认值，适合常规合并前审查。"
+        case .xhigh: "适合复杂改动，等待时间会更长。"
+        case .max: "适合高风险或跨模块改动。"
+        case .ultra: "仅用于最复杂的审查，耗时和额度消耗最高。"
+        }
+    }
+
+    static func available(for model: AIGenerationModel) -> [Self] {
+        switch model {
+        case .luna: allCases.filter { $0 != .ultra }
+        case .terra, .sol: allCases
+        }
+    }
+}
+
 /// Grove 全局 AI 偏好。是否发送代码和使用哪个模型都属于应用行为，
 /// 不应该散落在每个仓库自己的菜单里。
 struct AIGenerationSettings {
     private let enabledKey = "grove.aiGeneration.enabled.v3"
     private let commitModelKey = "grove.aiGeneration.model.v1"
     private let reviewModelKey = "grove.aiReview.model.v1"
+    private let reviewReasoningEffortKey = "grove.aiReview.reasoningEffort.v1"
     private let reviewInstructionsKey = "grove.aiReview.promptByRepository.v2"
     private let reviewAreasKey = "grove.aiReview.areasByRepository.v1"
     private let legacyReviewInstructionsKey = "grove.aiReview.instructionsByRepository.v1"
@@ -69,6 +111,15 @@ struct AIGenerationSettings {
 
     func setReviewModel(_ model: AIGenerationModel) {
         defaults.set(model.rawValue, forKey: reviewModelKey)
+    }
+
+    var reviewReasoningEffort: AIReviewReasoningEffort {
+        defaults.string(forKey: reviewReasoningEffortKey)
+            .flatMap(AIReviewReasoningEffort.init(rawValue:)) ?? .high
+    }
+
+    func setReviewReasoningEffort(_ effort: AIReviewReasoningEffort) {
+        defaults.set(effort.rawValue, forKey: reviewReasoningEffortKey)
     }
 
     func reviewInstructions(for repository: URL) -> String {

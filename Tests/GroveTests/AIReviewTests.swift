@@ -261,6 +261,7 @@ final class AIReviewCoordinatorTests: XCTestCase {
                 customInstructions: "检查合并风险。",
                 selectedAreas: [.compilation],
                 model: .terra,
+                reasoningEffort: .high,
                 repositoryRoot: repository
             ))
         }

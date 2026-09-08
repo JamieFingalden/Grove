@@ -803,7 +803,7 @@ struct MergePullRequestSheet: View {
             failure = error.localizedDescription
             return
         }
-        repository.removeMergedPullRequest(number: pullRequest.number)
+        repository.removePullRequest(number: pullRequest.number)
         appModel.removeCachedAIReview(
             for: repository.root,
             pullRequestNumber: pullRequest.number
@@ -845,6 +845,17 @@ struct PreferencesView: View {
                 .disabled(!model.isAIGenerationEnabled)
 
                 Text(model.aiReviewModel.reviewSummary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                Picker("AI Review 思考深度", selection: selectedReviewReasoningEffort) {
+                    ForEach(AIReviewReasoningEffort.available(for: model.aiReviewModel)) { option in
+                        Text(option.name).tag(option)
+                    }
+                }
+                .disabled(!model.isAIGenerationEnabled)
+
+                Text(model.aiReviewReasoningEffort.summary)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
 
@@ -940,6 +951,13 @@ struct PreferencesView: View {
         Binding(
             get: { model.aiReviewModel },
             set: { model.setAIReviewModel($0) }
+        )
+    }
+
+    private var selectedReviewReasoningEffort: Binding<AIReviewReasoningEffort> {
+        Binding(
+            get: { model.aiReviewReasoningEffort },
+            set: { model.setAIReviewReasoningEffort($0) }
         )
     }
 

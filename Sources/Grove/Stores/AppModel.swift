@@ -7,6 +7,7 @@ struct AIReviewGenerationRequest: Sendable {
     var customInstructions: String
     var selectedAreas: Set<PullRequestAIReview.Assessment.Area>
     var model: AIGenerationModel
+    var reasoningEffort: AIReviewReasoningEffort
     var repositoryRoot: URL
 }
 
@@ -134,6 +135,7 @@ final class AppModel {
     private(set) var isAIGenerationEnabled: Bool
     private(set) var aiCommitModel: AIGenerationModel
     private(set) var aiReviewModel: AIGenerationModel
+    private(set) var aiReviewReasoningEffort: AIReviewReasoningEffort
     private(set) var aiReviewResultsRevision = 0
     private var aiReviewJobs: [AIReviewJobKey: AIReviewJob] = [:]
 
@@ -160,6 +162,7 @@ final class AppModel {
                 customInstructions: request.customInstructions,
                 selectedAreas: request.selectedAreas,
                 model: request.model,
+                reasoningEffort: request.reasoningEffort,
                 in: request.repositoryRoot
             )
         }
@@ -170,6 +173,7 @@ final class AppModel {
         self.isAIGenerationEnabled = aiGenerationSettings.isEnabled
         self.aiCommitModel = aiGenerationSettings.commitModel
         self.aiReviewModel = aiGenerationSettings.reviewModel
+        self.aiReviewReasoningEffort = aiGenerationSettings.reviewReasoningEffort
     }
 
     func setAIGenerationEnabled(_ enabled: Bool) {
@@ -185,6 +189,15 @@ final class AppModel {
     func setAIReviewModel(_ model: AIGenerationModel) {
         aiGenerationSettings.setReviewModel(model)
         aiReviewModel = model
+        if !AIReviewReasoningEffort.available(for: model).contains(aiReviewReasoningEffort) {
+            setAIReviewReasoningEffort(.high)
+        }
+    }
+
+    func setAIReviewReasoningEffort(_ effort: AIReviewReasoningEffort) {
+        guard AIReviewReasoningEffort.available(for: aiReviewModel).contains(effort) else { return }
+        aiGenerationSettings.setReviewReasoningEffort(effort)
+        aiReviewReasoningEffort = effort
     }
 
     func aiReviewInstructions(for repository: URL) -> String {

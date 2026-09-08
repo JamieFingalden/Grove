@@ -334,6 +334,7 @@ private struct PullRequestDetailView: View {
     @State private var didFailDiff = false
     @State private var commentText = ""
     @State private var isWorking = false
+    @State private var showsCloseConfirmation = false
     @State private var viewerHasApprovedOverride: Bool?
     @State private var aiReview: PullRequestAIReview?
     @State private var aiReviewIsStale = false
@@ -370,6 +371,14 @@ private struct PullRequestDetailView: View {
         }
         .onChange(of: appModel.aiReviewResultsRevision) { _, _ in
             restoreCachedAIReview(for: diffFiles.isEmpty ? nil : diffFiles)
+        }
+        .alert("关闭 \(current.displayNumber)？", isPresented: $showsCloseConfirmation) {
+            Button("取消", role: .cancel) {}
+            Button("关闭", role: .destructive) {
+                Task { await closePullRequest() }
+            }
+        } message: {
+            Text("关闭后不会合并这批改动；如需继续处理，可以在托管平台重新打开该请求。")
         }
     }
 
@@ -680,6 +689,14 @@ private struct PullRequestDetailView: View {
                 }
                 .disabled(current.status == .draft)
                 .help(current.status == .draft ? "草稿状态的 PR 不能合并" : "gh pr merge")
+
+                Button(role: .destructive) {
+                    showsCloseConfirmation = true
+                } label: {
+                    Label("关闭", systemImage: "xmark.circle")
+                }
+                .disabled(isWorking)
+                .help("关闭这个 \(current.forge.shortTerm)，不会合并改动")
             }
 
             Spacer()
@@ -695,6 +712,26 @@ private struct PullRequestDetailView: View {
 
     private var canStartAIReview: Bool {
         appModel.isAIGenerationEnabled && !isLoadingDiff && !diffFiles.isEmpty
+    }
+
+    private func closePullRequest() async {
+        guard let forge = repository.forge else { return }
+        isWorking = true
+        defer { isWorking = false }
+
+        do {
+            try await forge.close(number: current.number, in: repository.root)
+        } catch {
+            appModel.report(title: "关闭请求失败", error: error)
+            return
+        }
+
+        repository.removePullRequest(number: current.number)
+        appModel.removeCachedAIReview(
+            for: repository.root,
+            pullRequestNumber: current.number
+        )
+        await repository.fetch()
     }
 
     private var isReviewingAI: Bool {
@@ -790,6 +827,7 @@ private struct PullRequestDetailView: View {
         let request = current
         let files = diffFiles
         let model = appModel.aiReviewModel
+        let reasoningEffort = appModel.aiReviewReasoningEffort
         let instructions = aiReviewInstructions
         let selectedAreas = aiReviewAreas
         appModel.setAIReviewAreas(selectedAreas, for: repository.root)
@@ -799,6 +837,7 @@ private struct PullRequestDetailView: View {
             customInstructions: instructions,
             selectedAreas: selectedAreas,
             model: model,
+            reasoningEffort: reasoningEffort,
             repositoryRoot: repository.root
         ))
     }

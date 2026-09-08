@@ -287,6 +287,10 @@ final class ForgeTests: XCTestCase {
         if [ "$1" = "mr" ] && [ "$2" = "merge" ] && [ "$3" = "587" ] && [ "$4" = "--yes" ] && [ "$5" = "--squash" ] && [ "$6" = "--remove-source-branch" ] && [ "$7" = "--auto-merge=false" ] && [ "$8" = "--repo" ] && [ "$9" = "cad_pic_llm/cad_llms_group" ] && [ "$GITLAB_HOST" = "192.168.251.253" ]; then
           exit 0
         fi
+        if [ "$1" = "api" ] && [ "$2" = "projects/cad_pic_llm%2Fcad_llms_group/merge_requests/586" ] && [ "$3" = "--method" ] && [ "$4" = "PUT" ] && [ "$5" = "--raw-field" ] && [ "$6" = "state_event=close" ] && [ "$GITLAB_HOST" = "192.168.251.253" ]; then
+          printf '{}\n'
+          exit 0
+        fi
         exit 2
         """
         try Data(script.utf8).write(to: executable)
@@ -315,6 +319,7 @@ final class ForgeTests: XCTestCase {
         XCTAssertEqual(legacyDiff[0].additions, 1)
         XCTAssertEqual(legacyDiff[0].deletions, 1)
         try await client.merge(number: 587, strategy: .squash, deleteBranch: true, in: directory)
+        try await client.close(number: 586, in: directory)
         let createdURL = try await client.createPullRequest(
             NewPullRequest(
                 title: "新功能", body: "说明", base: "main", head: "xf-dev", isDraft: true
