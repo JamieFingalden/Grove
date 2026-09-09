@@ -20,19 +20,37 @@ struct AIAPIConfiguration: Sendable, Equatable {
     var model: String
     var apiKey: String
 
-    var endpoint: URL? {
+    private var rootURL: URL? {
         let value = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard var url = URL(string: value),
               let scheme = url.scheme?.lowercased(),
-              scheme == "https" || scheme == "http",
-              !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              scheme == "https" || scheme == "http" else {
             return nil
         }
-        if !url.path.lowercased().hasSuffix("/chat/completions") {
-            url.append(path: "chat/completions")
+        if url.path.lowercased().hasSuffix("/chat/completions") {
+            url.deleteLastPathComponent()
+            url.deleteLastPathComponent()
         }
+        return url
+    }
+
+    var endpoint: URL? {
+        guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              var url = rootURL else {
+            return nil
+        }
+        url.append(path: "chat/completions")
+        return url
+    }
+
+    var modelsEndpoint: URL? {
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              var url = rootURL else {
+            return nil
+        }
+        url.append(path: "models")
         return url
     }
 }
@@ -79,6 +97,34 @@ enum AIGenerationRunner {
 }
 
 enum OpenAICompatibleRunner {
+    static func listModels(configuration: AIAPIConfiguration) async throws -> [String] {
+        let request = try makeModelsRequest(configuration: configuration)
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { throw AIAPIError.invalidResponse }
+            guard (200..<300).contains(http.statusCode) else {
+                throw AIAPIError.requestFailed(statusCode: http.statusCode, message: errorMessage(from: data))
+            }
+            let catalog = try JSONDecoder().decode(ModelsResponse.self, from: data)
+            return Array(Set(catalog.data.map(\.id).filter { !$0.isEmpty })).sorted()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as AIAPIError {
+            throw error
+        } catch {
+            throw AIAPIError.transport(error.localizedDescription)
+        }
+    }
+
+    static func makeModelsRequest(configuration: AIAPIConfiguration) throws -> URLRequest {
+        guard let url = configuration.modelsEndpoint else { throw AIAPIError.invalidConfiguration }
+        var request = URLRequest(url: url)
+        request.setValue(
+            "Bearer \(configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines))",
+            forHTTPHeaderField: "Authorization"
+        )
+        return request
+    }
     static func run(
         prompt: String,
         schema: String,
@@ -170,6 +216,11 @@ enum OpenAICompatibleRunner {
     private struct ErrorResponse: Decodable {
         struct APIError: Decodable { var message: String? }
         var error: APIError?
+    }
+
+    private struct ModelsResponse: Decodable {
+        struct Model: Decodable { var id: String }
+        var data: [Model]
     }
 
     private static func errorMessage(from data: Data) -> String {

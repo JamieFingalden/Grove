@@ -834,30 +834,68 @@ struct PreferencesView: View {
                 }
 
                 if model.aiProvider == .codex {
-                    Picker("提交与 PR 描述模型", selection: selectedCommitModel) {
-                        ForEach(AIGenerationModel.allCases) { option in
-                            Text(option.name).tag(option)
+                    HStack {
+                        Text("Codex 模型")
+                        Spacer()
+                        if model.isLoadingCodexModels {
+                            ProgressView().controlSize(.mini)
+                        }
+                        Button("获取模型") {
+                            Task { await model.fetchCodexModels() }
+                        }
+                        .disabled(model.isLoadingCodexModels)
+                    }
+
+                    LabeledContent("提交与 PR 描述模型") {
+                        HStack(spacing: 6) {
+                            TextField("模型名", text: codexCommitModel)
+                                .textFieldStyle(.roundedBorder)
+                            Menu {
+                                ForEach(model.codexModels) { option in
+                                    Button(option.displayName) {
+                                        model.setAICommitModel(option.model)
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "chevron.down")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .menuIndicator(.hidden)
                         }
                     }
                     .disabled(!model.isAIGenerationEnabled)
 
-                    Text(model.aiCommitModel.summary)
+                    Text(model.codexModels.first { $0.model == model.aiCommitModel }?.summary
+                         ?? model.aiCommitModel.summary)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
 
-                    Picker("AI Review 模型", selection: selectedReviewModel) {
-                        ForEach(AIGenerationModel.allCases) { option in
-                            Text(option.name).tag(option)
+                    LabeledContent("AI Review 模型") {
+                        HStack(spacing: 6) {
+                            TextField("模型名", text: codexReviewModel)
+                                .textFieldStyle(.roundedBorder)
+                            Menu {
+                                ForEach(model.codexModels) { option in
+                                    Button(option.displayName) {
+                                        model.setAIReviewModel(option.model)
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "chevron.down")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .menuIndicator(.hidden)
                         }
                     }
                     .disabled(!model.isAIGenerationEnabled)
 
-                    Text(model.aiReviewModel.reviewSummary)
+                    Text(model.codexModels.first { $0.model == model.aiReviewModel }?.summary
+                         ?? model.aiReviewModel.reviewSummary)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
 
                     Picker("AI Review 思考深度", selection: selectedReviewReasoningEffort) {
-                        ForEach(AIReviewReasoningEffort.available(for: model.aiReviewModel)) { option in
+                        ForEach(model.availableAIReviewReasoningEfforts) { option in
                             Text(option.name).tag(option)
                         }
                     }
@@ -876,11 +914,41 @@ struct PreferencesView: View {
                 } else {
                     TextField("https://api.openai.com/v1", text: apiBaseURL)
                         .textFieldStyle(.roundedBorder)
-                    TextField("模型名，例如 gpt-4o-mini", text: apiModel)
-                        .textFieldStyle(.roundedBorder)
                     SecureField("API 密钥", text: $apiKey)
                         .textFieldStyle(.roundedBorder)
                         .onChange(of: apiKey) { _, key in saveAPIKey(key) }
+
+                    LabeledContent("模型") {
+                        HStack(spacing: 6) {
+                            TextField("", text: apiModel)
+                                .textFieldStyle(.roundedBorder)
+                            Menu {
+                                ForEach(model.apiModels, id: \.self) { option in
+                                    Button(option) { model.setAIAPIModel(option) }
+                                }
+                            } label: {
+                                Image(systemName: "chevron.down")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .menuIndicator(.hidden)
+                            .disabled(model.apiModels.isEmpty)
+                        }
+                    }
+
+                    HStack {
+                        if model.isLoadingAPIModels {
+                            ProgressView().controlSize(.mini)
+                        }
+                        Button("获取模型") {
+                            Task { await model.fetchAPIModels() }
+                        }
+                        .disabled(!model.hasAIAPIKey || model.isLoadingAPIModels)
+                        if model.apiModels.isEmpty {
+                            Text("填写地址和密钥后获取可用模型")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
 
                     HStack {
                         Label(
@@ -896,7 +964,7 @@ struct PreferencesView: View {
                         }
                     }
 
-                    Text("使用 OpenAI Chat Completions 兼容接口。地址可以是 API 根路径（自动补 /chat/completions），也可以直接填完整接口地址。密钥只保存在 macOS 钥匙串。")
+                    Text("使用 OpenAI Chat Completions 兼容接口。获取模型会调用 /models；地址可以是 API 根路径（自动补 /chat/completions），也可以直接填完整接口地址。仍可直接手动输入模型名，密钥只保存在 macOS 钥匙串。")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -976,10 +1044,23 @@ struct PreferencesView: View {
         )
     }
 
-    private var selectedCommitModel: Binding<AIGenerationModel> {
+    private var codexCommitModel: Binding<String> {
         Binding(
-            get: { model.aiCommitModel },
-            set: { model.setAICommitModel($0) }
+            get: { model.aiCommitModel.rawValue },
+            set: { value in
+                guard let selected = AIGenerationModel(rawValue: value) else { return }
+                model.setAICommitModel(selected)
+            }
+        )
+    }
+
+    private var codexReviewModel: Binding<String> {
+        Binding(
+            get: { model.aiReviewModel.rawValue },
+            set: { value in
+                guard let selected = AIGenerationModel(rawValue: value) else { return }
+                model.setAIReviewModel(selected)
+            }
         )
     }
 
@@ -1014,13 +1095,6 @@ struct PreferencesView: View {
         } catch {
             model.report(title: "移除 AI API 密钥失败", error: error)
         }
-    }
-
-    private var selectedReviewModel: Binding<AIGenerationModel> {
-        Binding(
-            get: { model.aiReviewModel },
-            set: { model.setAIReviewModel($0) }
-        )
     }
 
     private var selectedReviewReasoningEffort: Binding<AIReviewReasoningEffort> {

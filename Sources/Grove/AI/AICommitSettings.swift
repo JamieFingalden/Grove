@@ -1,9 +1,34 @@
 import Foundation
 
-enum AIGenerationModel: String, CaseIterable, Identifiable, Sendable {
-    case luna = "gpt-5.6-luna"
-    case terra = "gpt-5.6-terra"
-    case sol = "gpt-5.6-sol"
+enum AIGenerationModel: Identifiable, Sendable, Hashable {
+    case luna
+    case terra
+    case sol
+    case custom(String)
+
+    static let allCases: [Self] = [.luna, .terra, .sol]
+
+    init?(rawValue: String) {
+        switch rawValue {
+        case "gpt-5.6-luna": self = .luna
+        case "gpt-5.6-terra": self = .terra
+        case "gpt-5.6-sol": self = .sol
+        default:
+            guard !rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            self = .custom(rawValue)
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .luna: "gpt-5.6-luna"
+        case .terra: "gpt-5.6-terra"
+        case .sol: "gpt-5.6-sol"
+        case .custom(let value): value
+        }
+    }
 
     var id: String { rawValue }
 
@@ -12,6 +37,7 @@ enum AIGenerationModel: String, CaseIterable, Identifiable, Sendable {
         case .luna: "GPT-5.6 Luna"
         case .terra: "GPT-5.6 Terra"
         case .sol: "GPT-5.6 Sol"
+        case .custom(let value): value
         }
     }
 
@@ -20,6 +46,7 @@ enum AIGenerationModel: String, CaseIterable, Identifiable, Sendable {
         case .luna: "速度快、开销低，适合生成提交信息和日常 PR 描述。"
         case .terra: "能力与速度更均衡，适合改动较复杂的仓库。"
         case .sol: "能力最强，但通常更慢；适合复杂改动和高要求描述。"
+        case .custom: "从 Codex 获取或手动输入的模型。"
         }
     }
 
@@ -28,6 +55,7 @@ enum AIGenerationModel: String, CaseIterable, Identifiable, Sendable {
         case .luna: "速度最快，但代码审查能力有限，适合很小、风险低的改动。"
         case .terra: "AI Review 默认模型，速度和代码推理能力更均衡。"
         case .sol: "审查能力最强、耗时也更长，适合复杂或高风险改动。"
+        case .custom: "从 Codex 获取或手动输入的模型。"
         }
     }
 }
@@ -69,6 +97,7 @@ enum AIReviewReasoningEffort: String, CaseIterable, Identifiable, Sendable {
         switch model {
         case .luna: allCases.filter { $0 != .ultra }
         case .terra, .sol: allCases
+        case .custom: allCases
         }
     }
 }

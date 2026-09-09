@@ -207,6 +207,14 @@ final class AIGenerationSettingsTests: XCTestCase {
         XCTAssertEqual(reloaded.apiModel, "deepseek-chat")
     }
 
+    func testPreservesManuallyEnteredCodexModel() throws {
+        let settings = AIGenerationSettings(defaults: defaults)
+        let custom = try XCTUnwrap(AIGenerationModel(rawValue: "gpt-5.3-codex"))
+        settings.setCommitModel(custom)
+
+        XCTAssertEqual(AIGenerationSettings(defaults: defaults).commitModel.rawValue, "gpt-5.3-codex")
+    }
+
     func testPersistsReviewInstructionsPerRepository() {
         let first = URL(fileURLWithPath: "/repo/first")
         let second = URL(fileURLWithPath: "/repo/second")
@@ -310,6 +318,32 @@ final class OpenAICompatibleRunnerTests: XCTestCase {
             configuration.endpoint?.absoluteString,
             "https://gateway.example.com/custom/chat/completions"
         )
+    }
+
+    func testBuildsModelsRequestFromExplicitChatEndpoint() throws {
+        let request = try OpenAICompatibleRunner.makeModelsRequest(configuration: .init(
+            baseURL: "https://gateway.example.com/custom/chat/completions",
+            model: "example-model",
+            apiKey: "test-key"
+        ))
+
+        XCTAssertEqual(request.url?.absoluteString, "https://gateway.example.com/custom/models")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-key")
+    }
+}
+
+final class CodexModelCatalogTests: XCTestCase {
+    func testDecodesVisibleModelsAndTheirReasoningEfforts() throws {
+        let data = Data("""
+        {"models":[
+          {"slug":"gpt-5.6-sol","display_name":"GPT-5.6 Sol","description":"旗舰模型","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"ultra"}]},
+          {"slug":"hidden-model","visibility":"hidden","supported_reasoning_levels":[]}
+        ]}
+        """.utf8)
+
+        let models = try CodexModelCatalog.decode(data)
+        XCTAssertEqual(models.map(\.id), ["gpt-5.6-sol"])
+        XCTAssertEqual(models[0].reasoningEfforts, [.low, .ultra])
     }
 }
 

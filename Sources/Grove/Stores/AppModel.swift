@@ -141,6 +141,10 @@ final class AppModel {
     private(set) var aiAPIBaseURL: String
     private(set) var aiAPIModel: String
     private(set) var hasAIAPIKey: Bool
+    private(set) var codexModels = CodexModelCatalog.defaults
+    private(set) var apiModels: [String] = []
+    private(set) var isLoadingCodexModels = false
+    private(set) var isLoadingAPIModels = false
     private(set) var aiReviewResultsRevision = 0
     private var aiReviewJobs: [AIReviewJobKey: AIReviewJob] = [:]
 
@@ -203,6 +207,11 @@ final class AppModel {
         }
     }
 
+    var availableAIReviewReasoningEfforts: [AIReviewReasoningEffort] {
+        codexModels.first { $0.model == aiReviewModel }?.reasoningEfforts
+            ?? AIReviewReasoningEffort.available(for: aiReviewModel)
+    }
+
     var canUseAIGeneration: Bool {
         isAIGenerationEnabled && aiService != nil && aiReviewService != nil
     }
@@ -230,6 +239,44 @@ final class AppModel {
         aiAPIModel = model
     }
 
+    func fetchCodexModels() async {
+        guard !isLoadingCodexModels else { return }
+        isLoadingCodexModels = true
+        defer { isLoadingCodexModels = false }
+        do {
+            codexModels = try await CodexModelCatalog.fetch()
+            if !availableAIReviewReasoningEfforts.contains(aiReviewReasoningEffort),
+               let first = availableAIReviewReasoningEfforts.first {
+                setAIReviewReasoningEffort(first)
+            }
+        } catch is CancellationError {
+            // 用户关闭设置时不显示失败提醒。
+        } catch {
+            report(title: "获取 Codex 模型失败", error: error)
+        }
+    }
+
+    func fetchAPIModels() async {
+        guard !isLoadingAPIModels else { return }
+        guard let key = AIAPIKeychain.read() else {
+            report(title: "获取 API 模型失败", error: AIAPIError.invalidConfiguration)
+            return
+        }
+        isLoadingAPIModels = true
+        defer { isLoadingAPIModels = false }
+        do {
+            apiModels = try await OpenAICompatibleRunner.listModels(configuration: .init(
+                baseURL: aiAPIBaseURL,
+                model: aiAPIModel,
+                apiKey: key
+            ))
+        } catch is CancellationError {
+            // 用户关闭设置时不显示失败提醒。
+        } catch {
+            report(title: "获取 API 模型失败", error: error)
+        }
+    }
+
     func saveAIAPIKey(_ key: String) throws {
         try aiGenerationSettings.saveAPIKey(key)
         hasAIAPIKey = aiGenerationSettings.hasAPIKey
@@ -248,13 +295,14 @@ final class AppModel {
     func setAIReviewModel(_ model: AIGenerationModel) {
         aiGenerationSettings.setReviewModel(model)
         aiReviewModel = model
-        if !AIReviewReasoningEffort.available(for: model).contains(aiReviewReasoningEffort) {
-            setAIReviewReasoningEffort(.high)
+        if !availableAIReviewReasoningEfforts.contains(aiReviewReasoningEffort),
+           let first = availableAIReviewReasoningEfforts.first {
+            setAIReviewReasoningEffort(first)
         }
     }
 
     func setAIReviewReasoningEffort(_ effort: AIReviewReasoningEffort) {
-        guard AIReviewReasoningEffort.available(for: aiReviewModel).contains(effort) else { return }
+        guard availableAIReviewReasoningEfforts.contains(effort) else { return }
         aiGenerationSettings.setReviewReasoningEffort(effort)
         aiReviewReasoningEffort = effort
     }
