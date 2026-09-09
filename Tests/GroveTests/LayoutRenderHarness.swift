@@ -80,6 +80,11 @@ final class LayoutRenderHarness: XCTestCase {
         // 再刷一遍，不等它落定就渲染，拿到的可能是刷新中途的空列表。
         await model.refresh()
         model.selectedCommit = model.commits.first?.oid
+        if let featureTip = model.commits.first(where: { commit in
+            commit.refs.contains { $0.name == "feature/login" }
+        }) {
+            model.focusGraph(on: featureTip.oid)
+        }
         try await Task.sleep(for: .milliseconds(600))
 
         // 「历史」tab 的切换状态是 WorktreeDetailView 内部的 @State，外面设不了。

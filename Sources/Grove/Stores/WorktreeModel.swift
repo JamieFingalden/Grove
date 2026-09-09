@@ -19,6 +19,20 @@ final class WorktreeModel: Identifiable {
     /// 历史筛选条件。改动后由视图调 `reloadHistory()`。
     var logQuery = LogQuery()
     /// 提交图的布局。跟 `commits` 一起算好，视图直接取用。
+    private(set) var graph = CommitGraphLayout.Graph.empty
+
+    /// 筛选后的提交不是完整 DAG，相邻行可能没有真实父子关系，不能连图。
+    var showsGraph: Bool { !logQuery.isActive && !graph.rows.isEmpty }
+    /// 图的选中路径和右侧 diff 选中提交相互独立，清除聚焦不会关闭正在看的 diff。
+    var graphFocus: String?
+    /// nil 表示当前工作树；非 nil 时历史列表只读取这个分支的真实提交范围。
+    var historyBranch: String?
+    var displayGraph: CommitGraphLayout.Graph {
+        graph.projected(maxDynamicLanes: 4, focusOID: graphFocus)
+    }
+    var historyBranches: [Branch] { repository?.branches ?? [] }
+    var historyRemoteBranches: [RemoteBranch] { repository?.remoteBranches ?? [] }
+    var historyBranchLabel: String { historyBranch ?? worktree.branch ?? "当前工作树" }
     /// 这个仓库出现过的提交身份，填筛选下拉框用。
     var knownAuthors: [CommitAuthor] = []
     var isLoadingHistory = false
@@ -177,8 +191,21 @@ final class WorktreeModel: Identifiable {
         isLoadingHistory = true
         defer { isLoadingHistory = false }
         do {
-            commits = try await git.log(in: path, query: logQuery, remotes: repository?.remotes.map(\.name) ?? [])
+            commits = try await git.log(
+                in: path,
+                revision: historyBranch,
+                query: logQuery,
+                remotes: repository?.remotes.map(\.name) ?? []
+            )
+            graph = CommitGraphLayout.build(
+                commits,
+                context: .init(
+                    defaultBranch: repository?.defaultBranch,
+                    currentBranch: historyBranch ?? worktree.branch
+                )
+            )
         } catch {
+            graph = .empty
             // 筛选条件本身不会让 git 报错（空结果就是空结果），
             // 走到这儿基本是仓库还没有任何提交。
             commits = []
@@ -187,6 +214,27 @@ final class WorktreeModel: Identifiable {
         if let selectedCommit, !commits.contains(where: { $0.oid == selectedCommit }) {
             self.selectedCommit = nil
         }
+        if let graphFocus, !commits.contains(where: { $0.oid == graphFocus }) {
+            self.graphFocus = nil
+        }
+    }
+
+    func focusGraph(on oid: String) {
+        guard commits.contains(where: { $0.oid == oid }) else { return }
+        graphFocus = oid
+    }
+
+    func clearGraphFocus() {
+        graphFocus = nil
+    }
+
+    func selectHistoryBranch(_ branch: String?) async {
+        guard historyBranch != branch else { return }
+        historyBranch = branch
+        // `--all` 与指定 revision 同时使用会把筛选退化回全仓库历史。
+        logQuery.allBranches = false
+        graphFocus = nil
+        await reloadHistory()
     }
 
     /// 勾选 / 取消勾选一个提交人。

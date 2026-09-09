@@ -70,6 +70,47 @@ struct HistoryView: View {
                 .fixedSize()
 
                 Menu {
+                    Button {
+                        Task { await model.selectHistoryBranch(nil) }
+                    } label: {
+                        Label("当前工作树", systemImage: model.historyBranch == nil ? "checkmark" : "arrow.triangle.branch")
+                    }
+
+                    if !model.historyBranches.isEmpty {
+                        Divider()
+                        ForEach(model.historyBranches) { branch in
+                            Button {
+                                Task { await model.selectHistoryBranch(branch.name) }
+                            } label: {
+                                Label(
+                                    branch.name,
+                                    systemImage: model.historyBranch == branch.name ? "checkmark" : "arrow.triangle.branch"
+                                )
+                            }
+                        }
+                    }
+
+                    if !model.historyRemoteBranches.isEmpty {
+                        Divider()
+                        ForEach(model.historyRemoteBranches) { branch in
+                            Button {
+                                Task { await model.selectHistoryBranch(branch.name) }
+                            } label: {
+                                Label(
+                                    branch.name,
+                                    systemImage: model.historyBranch == branch.name ? "checkmark" : "cloud"
+                                )
+                            }
+                        }
+                    }
+                } label: {
+                    Label(model.historyBranchLabel, systemImage: "arrow.triangle.branch")
+                        .font(.system(size: 10.5))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+
+                Menu {
                     Toggle("包含所有分支", isOn: $model.logQuery.allBranches)
                         .onChange(of: model.logQuery.allBranches) { _, _ in
                             Task { await model.reloadHistory() }
@@ -111,6 +152,18 @@ struct HistoryView: View {
                     .font(.system(size: 10))
                 }
             }
+
+            if model.graphFocus != nil {
+                HStack(spacing: 6) {
+                    Label("正在聚焦相关提交路径", systemImage: "arrow.triangle.branch")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("取消聚焦") { model.clearGraphFocus() }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 10))
+                }
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -135,21 +188,29 @@ struct HistoryView: View {
                     Text(model.logQuery.isActive ? "换个筛选条件试试。" : "这个分支上还没有历史。")
                 }
             } else {
-                List(selection: Binding(
-                    get: { model.selectedCommit },
-                    set: { model.selectedCommit = $0 }
-                )) {
-                    ForEach(model.commits) { commit in
-                        CommitRow(commit: commit)
-                            .tag(commit.oid)
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                    ForEach(Array(model.commits.enumerated()), id: \.element.oid) { index, commit in
+                        CommitRow(
+                            commit: commit,
+                            graphRow: model.showsGraph && index < model.displayGraph.rows.count
+                                ? model.displayGraph.rows[index] : nil,
+                            laneCount: model.displayGraph.laneCount,
+                            isSelected: model.selectedCommit == commit.oid,
+                            onSelect: {
+                                model.selectedCommit = commit.oid
+                                model.focusGraph(on: commit.oid)
+                            }
+                        )
                             .contextMenu {
                                 Button("复制完整 SHA") { SystemActions.copyToPasteboard(commit.oid) }
                                 Button("复制短 SHA") { SystemActions.copyToPasteboard(commit.shortOID) }
                                 Button("复制标题") { SystemActions.copyToPasteboard(commit.subject) }
                             }
                     }
+                    }
+                    .padding(.horizontal, 10)
                 }
-                .listStyle(.inset)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -253,16 +314,24 @@ struct HistoryView: View {
 
 private struct CommitRow: View {
     let commit: CommitSummary
+    var graphRow: CommitGraphLayout.Row?
+    var laneCount: Int
+    var isSelected: Bool
+    var onSelect: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: commit.isMerge ? "arrow.triangle.merge" : "circle.fill")
-                .font(.system(size: commit.isMerge ? 11 : 6))
-                .foregroundStyle(commit.isMerge ? Color.purple : Color.secondary)
-                .frame(width: 14, height: 14)
+            if let graphRow {
+                CommitGraphCell(row: graphRow, laneCount: laneCount)
+            } else {
+                Image(systemName: commit.isMerge ? "arrow.triangle.merge" : "circle.fill")
+                    .font(.system(size: commit.isMerge ? 11 : 6))
+                    .foregroundStyle(commit.isMerge ? Color.purple : Color.secondary)
+                    .frame(width: 14, height: 14)
+            }
 
             VStack(alignment: .leading, spacing: 2) {
-                if !commit.refs.isEmpty { RefBadges(refs: commit.refs) }
+                if !commit.refs.isEmpty { RefBadges(refs: commit.refs, onFocus: onSelect) }
 
                 Text(commit.subject)
                     .font(.system(size: 12))
@@ -278,8 +347,106 @@ private struct CommitRow: View {
                 .font(.system(size: 9.5))
                 .foregroundStyle(.tertiary)
             }
+            .padding(.vertical, 3)
         }
-        .padding(.vertical, 2)
+        .frame(height: CommitGraphCell.rowHeight)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .background(isSelected ? Color.accentColor.opacity(0.14) : .clear)
+    }
+}
+
+// MARK: - 提交图
+
+/// 每行绘制上下半段，放在零间距滚动栈中后可准确衔接为连续图线。
+private struct CommitGraphCell: View {
+    let row: CommitGraphLayout.Row
+    let laneCount: Int
+    @State private var isHovering = false
+
+    static let rowHeight: CGFloat = 64
+
+    private let laneWidth: CGFloat = 14
+    private let dotRadius: CGFloat = 3.5
+
+    var body: some View {
+        let isHovered = isHovering
+        Canvas { context, size in
+            let midY = size.height / 2
+            func x(_ lane: Int) -> CGFloat { CGFloat(lane) * laneWidth + laneWidth / 2 }
+
+            func stroke(_ link: CommitGraphLayout.Link, fromY: CGFloat, toY: CGFloat) {
+                var path = Path()
+                path.move(to: CGPoint(x: x(link.from), y: fromY))
+                if link.from == link.to {
+                    path.addLine(to: CGPoint(x: x(link.to), y: toY))
+                } else {
+                    path.addCurve(
+                        to: CGPoint(x: x(link.to), y: toY),
+                        control1: CGPoint(x: x(link.from), y: fromY + (toY - fromY) * 0.6),
+                        control2: CGPoint(x: x(link.to), y: fromY + (toY - fromY) * 0.4)
+                    )
+                }
+                let isEmphasized = link.isFocused || isHovered
+                let opacity: Double = row.isFocusMode && !isEmphasized ? 0.2 : 1
+                context.stroke(
+                    path,
+                    with: .color(Self.color(link.color, emphasized: isEmphasized).opacity(opacity)),
+                    lineWidth: isEmphasized ? 2 : 1.4
+                )
+            }
+
+            row.incoming.forEach { stroke($0, fromY: 0, toY: midY) }
+            row.outgoing.forEach { stroke($0, fromY: midY, toY: size.height) }
+
+            if !row.isCollapsed {
+                let center = CGPoint(x: x(row.commitLane), y: midY)
+                let radius = row.isMerge ? dotRadius + 1 : dotRadius
+                let dot = Path(ellipseIn: CGRect(
+                    x: center.x - radius, y: center.y - radius,
+                    width: radius * 2, height: radius * 2
+                ))
+                context.stroke(dot, with: .color(Color(nsColor: .textBackgroundColor)), lineWidth: 3)
+                let opacity: Double = row.isFocusMode && !row.isFocused && !isHovered ? 0.2 : 1
+                context.fill(
+                    dot,
+                    with: .color(Self.color(row.color, emphasized: row.isFocused || isHovered).opacity(opacity))
+                )
+                if row.isMerge {
+                    let inner = radius - 1.6
+                    context.fill(
+                        Path(ellipseIn: CGRect(x: center.x - inner, y: center.y - inner,
+                                               width: inner * 2, height: inner * 2)),
+                        with: .color(Color(nsColor: .textBackgroundColor))
+                    )
+                }
+            }
+            if row.overflowCount > 0 {
+                let badge = context.resolve(
+                    Text("+\(row.overflowCount) branches")
+                        .font(.system(size: 8.5, weight: .medium))
+                        .foregroundColor(.secondary)
+                )
+                context.draw(
+                    badge,
+                    at: CGPoint(x: CGFloat(max(laneCount, 1)) * laneWidth + 29, y: midY)
+                )
+            }
+        }
+        .frame(
+            width: CGFloat(max(laneCount, 1)) * laneWidth + (row.showsOverflowArea ? 58 : 0),
+            height: Self.rowHeight
+        )
+        .onHover { isHovering = $0 }
+    }
+
+    nonisolated private static func color(_ index: Int, emphasized: Bool) -> Color {
+        return switch index {
+        case 0: Color.blue
+        case 1: Color.teal
+        default: emphasized ? Color.purple : Color.secondary.opacity(0.65)
+        }
     }
 }
 
@@ -327,21 +494,25 @@ enum RelativeDate {
 /// 提交上挂着的分支 / 标签。
 private struct RefBadges: View {
     let refs: [CommitRef]
+    let onFocus: () -> Void
 
     var body: some View {
         HStack(spacing: 3) {
             ForEach(refs.prefix(4)) { ref in
-                HStack(spacing: 2) {
-                    Image(systemName: icon(ref.kind))
-                        .font(.system(size: 7, weight: .bold))
-                    Text(ref.name)
-                        .font(.system(size: 9, weight: .medium))
-                        .lineLimit(1)
+                Button(action: onFocus) {
+                    HStack(spacing: 2) {
+                        Image(systemName: icon(ref.kind))
+                            .font(.system(size: 7, weight: .bold))
+                        Text(ref.name)
+                            .font(.system(size: 9, weight: .medium))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(tint(ref.kind))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(tint(ref.kind).opacity(0.14), in: RoundedRectangle(cornerRadius: 3.5))
                 }
-                .foregroundStyle(tint(ref.kind))
-                .padding(.horizontal, 4)
-                .padding(.vertical, 1)
-                .background(tint(ref.kind).opacity(0.14), in: RoundedRectangle(cornerRadius: 3.5))
+                .buttonStyle(.plain)
             }
             if refs.count > 4 {
                 Text("+\(refs.count - 4)")
