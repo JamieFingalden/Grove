@@ -38,13 +38,14 @@ struct CodexCommitGenerator {
     static func generate(
         in directory: URL,
         git: GitClient,
-        model: AIGenerationModel
+        model: AIGenerationModel,
+        service: AIGenerationService? = nil
     ) async throws -> GeneratedMessage {
         let input = try await prepare(in: directory, git: git)
-        let data = try await CodexRunner.run(
+        let data = try await AIGenerationRunner.run(
             prompt: input.prompt,
             schema: outputSchema,
-            model: model,
+            service: service ?? .codex(model: model, reasoningEffort: nil),
             in: directory
         )
         guard let output = try? JSONDecoder().decode(StructuredOutput.self, from: data) else {

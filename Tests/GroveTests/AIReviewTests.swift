@@ -225,6 +225,23 @@ final class AIReviewCacheTests: XCTestCase {
 
 @MainActor
 final class AIReviewCoordinatorTests: XCTestCase {
+    func testCodexReviewKeepsItsOwnModelAndReasoningEffort() throws {
+        let suiteName = "AIReviewServiceTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = AIGenerationSettings(defaults: defaults)
+        settings.setCommitModel(.luna)
+        settings.setReviewModel(.sol)
+        settings.setReviewReasoningEffort(.xhigh)
+
+        let model = AppModel(aiGenerationSettings: settings)
+        guard case let .codex(reviewModel, reasoningEffort)? = model.aiReviewService else {
+            return XCTFail("应使用 Codex Review 服务")
+        }
+        XCTAssertEqual(reviewModel, .sol)
+        XCTAssertEqual(reasoningEffort, .xhigh)
+    }
+
     func testMultipleReviewsRunIndependentlyAndPersistResults() async throws {
         let suiteName = "AIReviewCoordinatorTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -262,6 +279,7 @@ final class AIReviewCoordinatorTests: XCTestCase {
                 selectedAreas: [.compilation],
                 model: .terra,
                 reasoningEffort: .high,
+                service: .codex(model: .terra, reasoningEffort: .high),
                 repositoryRoot: repository
             ))
         }

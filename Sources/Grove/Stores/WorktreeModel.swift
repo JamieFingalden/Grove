@@ -119,7 +119,7 @@ final class WorktreeModel: Identifiable {
     nonisolated var id: URL { identity }
     var path: URL { worktree.path }
     var repositoryRoot: URL { repository?.root ?? worktree.path }
-    var isAICommitEnabled: Bool { app?.isAIGenerationEnabled == true }
+    var isAICommitEnabled: Bool { app?.canUseAIGeneration == true }
 
     init(worktree: Worktree, repository: RepositoryModel?, git: GitClient, app: AppModel?) {
         self.identity = worktree.path
@@ -542,6 +542,7 @@ final class WorktreeModel: Identifiable {
 
     func startCommitMessageGeneration() {
         guard isAICommitEnabled, status.stagedCount > 0, !isGeneratingCommitMessage else { return }
+        guard let service = app?.aiService else { return }
         isGeneratingCommitMessage = true
         canRetryCommitMessageGeneration = false
         generatedFromTruncatedDiff = false
@@ -552,7 +553,8 @@ final class WorktreeModel: Identifiable {
                 let generated = try await CodexCommitGenerator.generate(
                     in: self.path,
                     git: self.git,
-                    model: self.app?.aiCommitModel ?? .luna
+                    model: self.app?.aiCommitModel ?? .luna,
+                    service: service
                 )
                 try Task.checkCancellation()
                 self.commitMessage = generated.text
@@ -561,7 +563,7 @@ final class WorktreeModel: Identifiable {
             } catch is CancellationError {
                 // 用户主动取消不属于失败，静默回到空闲状态。
             } catch {
-                self.canRetryCommitMessageGeneration = (error as? CodexGenerationError)?.isTimeout == true
+                self.canRetryCommitMessageGeneration = AIGenerationFailure.isTimeout(error)
                 self.app?.report(title: "AI 提交信息生成失败", error: error)
             }
             self.isGeneratingCommitMessage = false
@@ -575,11 +577,13 @@ final class WorktreeModel: Identifiable {
 
     func generatePullRequestDescription(base: String) async throws
         -> CodexPullRequestGenerator.GeneratedDescription {
-        try await CodexPullRequestGenerator.generate(
+        guard let service = app?.aiService else { throw AIAPIError.invalidConfiguration }
+        return try await CodexPullRequestGenerator.generate(
             in: path,
             base: base,
             git: git,
-            model: app?.aiCommitModel ?? .luna
+            model: app?.aiCommitModel ?? .luna,
+            service: service
         )
     }
 

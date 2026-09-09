@@ -195,6 +195,18 @@ final class AIGenerationSettingsTests: XCTestCase {
         XCTAssertEqual(reloaded.reviewReasoningEffort, .xhigh)
     }
 
+    func testPersistsAPIProviderConfiguration() {
+        let settings = AIGenerationSettings(defaults: defaults)
+        settings.setProvider(.api)
+        settings.setAPIBaseURL("https://api.deepseek.com/v1")
+        settings.setAPIModel("deepseek-chat")
+
+        let reloaded = AIGenerationSettings(defaults: defaults)
+        XCTAssertEqual(reloaded.provider, .api)
+        XCTAssertEqual(reloaded.apiBaseURL, "https://api.deepseek.com/v1")
+        XCTAssertEqual(reloaded.apiModel, "deepseek-chat")
+    }
+
     func testPersistsReviewInstructionsPerRepository() {
         let first = URL(fileURLWithPath: "/repo/first")
         let second = URL(fileURLWithPath: "/repo/second")
@@ -260,6 +272,44 @@ final class CodexRunnerArgumentsTests: XCTestCase {
 
         let configFlag = try XCTUnwrap(arguments.firstIndex(of: "--config"))
         XCTAssertEqual(arguments[configFlag + 1], "model_reasoning_effort=\"high\"")
+    }
+}
+
+final class OpenAICompatibleRunnerTests: XCTestCase {
+    func testBuildsChatCompletionsRequestFromAPIBaseURL() throws {
+        let configuration = AIAPIConfiguration(
+            baseURL: "https://api.example.com/v1/",
+            model: "example-model",
+            apiKey: "test-key"
+        )
+        let request = try OpenAICompatibleRunner.makeRequest(
+            prompt: "根据 diff 生成提交信息。",
+            schema: "{\"type\":\"object\"}",
+            configuration: configuration,
+            timeout: 180
+        )
+
+        XCTAssertEqual(request.url?.absoluteString, "https://api.example.com/v1/chat/completions")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-key")
+        let body = try XCTUnwrap(request.httpBody)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(object["model"] as? String, "example-model")
+        let messages = try XCTUnwrap(object["messages"] as? [[String: String]])
+        XCTAssertTrue(messages[0]["content"]?.contains("JSON Schema") == true)
+    }
+
+    func testKeepsExplicitChatCompletionsEndpoint() {
+        let configuration = AIAPIConfiguration(
+            baseURL: "https://gateway.example.com/custom/chat/completions",
+            model: "example-model",
+            apiKey: "test-key"
+        )
+
+        XCTAssertEqual(
+            configuration.endpoint?.absoluteString,
+            "https://gateway.example.com/custom/chat/completions"
+        )
     }
 }
 

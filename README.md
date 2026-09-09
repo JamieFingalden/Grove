@@ -15,6 +15,8 @@ The workflow it is built around: see a PR, check it out as a new worktree with o
 - `gh` ([GitHub CLI](https://cli.github.com)) — optional; required for GitHub pull requests
 - `glab` ([GitLab CLI](https://gitlab.com/gitlab-org/cli)) — optional; required for GitLab merge requests
 
+AI generation is optional. In Grove settings, choose either a signed-in Codex CLI or an OpenAI Chat Completions-compatible API. The API option accepts a base URL, model name, and API key, so it can be used with OpenAI or compatible providers without a ChatGPT subscription. Grove stores the API key only in the macOS Keychain.
+
 For a self-hosted GitLab on a non-standard port: `glab auth login --hostname 10.0.0.1 --api-host 10.0.0.1:8929 --api-protocol http`. Grove decides which platform a repository belongs to from `origin` alone, so a repo with an internal GitLab origin and a GitHub backup remote will never show the backup repo's pull requests.
 
 Grove never stores credentials. All GitHub access goes through `gh`, which you authenticate once with `gh auth login`. Without `gh`, everything except the PR features works normally.

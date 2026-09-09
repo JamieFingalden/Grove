@@ -456,7 +456,7 @@ struct CreatePullRequestSheet: View {
             } catch is CancellationError {
                 // 用户取消时保留原有描述，不显示错误。
             } catch {
-                canRetryDescriptionGeneration = (error as? CodexGenerationError)?.isTimeout == true
+                canRetryDescriptionGeneration = AIGenerationFailure.isTimeout(error)
                 app.report(title: "AI PR 描述生成失败", error: error)
             }
             isGeneratingDescription = false
@@ -820,51 +820,87 @@ struct MergePullRequestSheet: View {
 struct PreferencesView: View {
     @Environment(AppModel.self) private var model
     @State private var selectedReviewRepositoryPath = ""
+    @State private var apiKey = ""
 
     var body: some View {
         Form {
             Section("AI 生成") {
                 Toggle("启用提交信息、PR 描述和 AI Review", isOn: aiEnabled)
 
-                Picker("提交与 PR 描述模型", selection: selectedCommitModel) {
-                    ForEach(AIGenerationModel.allCases) { option in
-                        Text(option.name).tag(option)
+                Picker("AI 服务", selection: selectedProvider) {
+                    ForEach(AIGenerationProvider.allCases) { provider in
+                        Text(provider.name).tag(provider)
                     }
                 }
-                .disabled(!model.isAIGenerationEnabled)
 
-                Text(model.aiCommitModel.summary)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-
-                Picker("AI Review 模型", selection: selectedReviewModel) {
-                    ForEach(AIGenerationModel.allCases) { option in
-                        Text(option.name).tag(option)
+                if model.aiProvider == .codex {
+                    Picker("提交与 PR 描述模型", selection: selectedCommitModel) {
+                        ForEach(AIGenerationModel.allCases) { option in
+                            Text(option.name).tag(option)
+                        }
                     }
-                }
-                .disabled(!model.isAIGenerationEnabled)
+                    .disabled(!model.isAIGenerationEnabled)
 
-                Text(model.aiReviewModel.reviewSummary)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    Text(model.aiCommitModel.summary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
 
-                Picker("AI Review 思考深度", selection: selectedReviewReasoningEffort) {
-                    ForEach(AIReviewReasoningEffort.available(for: model.aiReviewModel)) { option in
-                        Text(option.name).tag(option)
+                    Picker("AI Review 模型", selection: selectedReviewModel) {
+                        ForEach(AIGenerationModel.allCases) { option in
+                            Text(option.name).tag(option)
+                        }
                     }
+                    .disabled(!model.isAIGenerationEnabled)
+
+                    Text(model.aiReviewModel.reviewSummary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+
+                    Picker("AI Review 思考深度", selection: selectedReviewReasoningEffort) {
+                        ForEach(AIReviewReasoningEffort.available(for: model.aiReviewModel)) { option in
+                            Text(option.name).tag(option)
+                        }
+                    }
+                    .disabled(!model.isAIGenerationEnabled)
+
+                    Text(model.aiReviewReasoningEffort.summary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+
+                    LabeledContent("Codex CLI") { ToolStatusLabel(tool: "codex") }
+
+                    Text("生成或 Review 时会把已暂存的 diff、相关提交标题，或 PR 的元信息、检查状态和服务端 diff 发送给 Codex；不会发送未暂存改动、未跟踪文件，也不会主动附加仓库地址。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    TextField("https://api.openai.com/v1", text: apiBaseURL)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("模型名，例如 gpt-4o-mini", text: apiModel)
+                        .textFieldStyle(.roundedBorder)
+                    SecureField("API 密钥", text: $apiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: apiKey) { _, key in saveAPIKey(key) }
+
+                    HStack {
+                        Label(
+                            model.hasAIAPIKey ? "API 密钥已保存在 macOS 钥匙串中" : "尚未保存 API 密钥",
+                            systemImage: model.hasAIAPIKey ? "key.fill" : "key.slash"
+                        )
+                        .font(.system(size: 11))
+                        .foregroundStyle(model.hasAIAPIKey ? Color.secondary : Color.orange)
+                        Spacer()
+                        if model.hasAIAPIKey {
+                            Button("移除密钥") { removeAPIKey() }
+                                .font(.system(size: 11))
+                        }
+                    }
+
+                    Text("使用 OpenAI Chat Completions 兼容接口。地址可以是 API 根路径（自动补 /chat/completions），也可以直接填完整接口地址。密钥只保存在 macOS 钥匙串。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .disabled(!model.isAIGenerationEnabled)
-
-                Text(model.aiReviewReasoningEffort.summary)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-
-                LabeledContent("Codex CLI") { ToolStatusLabel(tool: "codex") }
-
-                Text("生成或 Review 时会把已暂存的 diff、相关提交标题，或 PR 的元信息、检查状态和服务端 diff 发送给 Codex；不会发送未暂存改动、未跟踪文件，也不会主动附加仓库地址。")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Section("AI Review 默认提示词") {
@@ -945,6 +981,39 @@ struct PreferencesView: View {
             get: { model.aiCommitModel },
             set: { model.setAICommitModel($0) }
         )
+    }
+
+    private var selectedProvider: Binding<AIGenerationProvider> {
+        Binding(
+            get: { model.aiProvider },
+            set: { model.setAIProvider($0) }
+        )
+    }
+
+    private var apiBaseURL: Binding<String> {
+        Binding(get: { model.aiAPIBaseURL }, set: { model.setAIAPIBaseURL($0) })
+    }
+
+    private var apiModel: Binding<String> {
+        Binding(get: { model.aiAPIModel }, set: { model.setAIAPIModel($0) })
+    }
+
+    private func saveAPIKey(_ key: String) {
+        guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        do {
+            try model.saveAIAPIKey(key)
+        } catch {
+            model.report(title: "保存 AI API 密钥失败", error: error)
+        }
+    }
+
+    private func removeAPIKey() {
+        do {
+            try model.removeAIAPIKey()
+            apiKey = ""
+        } catch {
+            model.report(title: "移除 AI API 密钥失败", error: error)
+        }
     }
 
     private var selectedReviewModel: Binding<AIGenerationModel> {

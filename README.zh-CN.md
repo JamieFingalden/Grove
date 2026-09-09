@@ -15,6 +15,8 @@ Grove 是一个原生 macOS 应用，把 git 工作树（worktree）和代码评
 - `gh`（[GitHub CLI](https://cli.github.com)）—— 可选，GitHub 的 PR 功能需要
 - `glab`（[GitLab CLI](https://gitlab.com/gitlab-org/cli)）—— 可选，GitLab 的 MR 功能需要
 
+AI 生成功能是可选的。在 Grove 设置中可选择已登录的 Codex CLI，或填写 OpenAI Chat Completions 兼容 API 的地址、模型名和密钥。后者可接入 OpenAI 或其他兼容服务，不需要开通 ChatGPT 订阅；API 密钥只保存在 macOS 钥匙串中。
+
 Grove 不保存任何凭据。所有托管商访问都走对应的 CLI，你只需要认证一次。缺了它们的话，除评审之外的功能完全正常。
 
 自建 / 内网 GitLab（含非标准端口和 http）：

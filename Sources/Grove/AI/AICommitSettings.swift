@@ -77,9 +77,12 @@ enum AIReviewReasoningEffort: String, CaseIterable, Identifiable, Sendable {
 /// 不应该散落在每个仓库自己的菜单里。
 struct AIGenerationSettings {
     private let enabledKey = "grove.aiGeneration.enabled.v3"
+    private let providerKey = "grove.aiGeneration.provider.v1"
     private let commitModelKey = "grove.aiGeneration.model.v1"
     private let reviewModelKey = "grove.aiReview.model.v1"
     private let reviewReasoningEffortKey = "grove.aiReview.reasoningEffort.v1"
+    private let apiBaseURLKey = "grove.aiGeneration.api.baseURL.v1"
+    private let apiModelKey = "grove.aiGeneration.api.model.v1"
     private let reviewInstructionsKey = "grove.aiReview.promptByRepository.v2"
     private let reviewAreasKey = "grove.aiReview.areasByRepository.v1"
     private let legacyReviewInstructionsKey = "grove.aiReview.instructionsByRepository.v1"
@@ -95,6 +98,58 @@ struct AIGenerationSettings {
 
     func setEnabled(_ enabled: Bool) {
         defaults.set(enabled, forKey: enabledKey)
+    }
+
+    var provider: AIGenerationProvider {
+        defaults.string(forKey: providerKey)
+            .flatMap(AIGenerationProvider.init(rawValue:)) ?? .codex
+    }
+
+    func setProvider(_ provider: AIGenerationProvider) {
+        defaults.set(provider.rawValue, forKey: providerKey)
+    }
+
+    var apiBaseURL: String {
+        defaults.string(forKey: apiBaseURLKey) ?? "https://api.openai.com/v1"
+    }
+
+    func setAPIBaseURL(_ url: String) {
+        defaults.set(url, forKey: apiBaseURLKey)
+    }
+
+    var apiModel: String {
+        defaults.string(forKey: apiModelKey) ?? "gpt-4o-mini"
+    }
+
+    func setAPIModel(_ model: String) {
+        defaults.set(model, forKey: apiModelKey)
+    }
+
+    var hasAPIKey: Bool {
+        AIAPIKeychain.read()?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    func saveAPIKey(_ key: String) throws {
+        try AIAPIKeychain.save(key.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    func removeAPIKey() throws {
+        try AIAPIKeychain.remove()
+    }
+
+    var service: AIGenerationService? {
+        switch provider {
+        case .codex:
+            return .codex(model: commitModel, reasoningEffort: nil)
+        case .api:
+            guard let key = AIAPIKeychain.read() else { return nil }
+            let configuration = AIAPIConfiguration(
+                baseURL: apiBaseURL,
+                model: apiModel,
+                apiKey: key
+            )
+            return configuration.endpoint == nil ? nil : .api(configuration)
+        }
     }
 
     var commitModel: AIGenerationModel {

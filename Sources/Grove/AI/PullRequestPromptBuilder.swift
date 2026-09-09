@@ -82,16 +82,17 @@ struct CodexPullRequestGenerator {
         in directory: URL,
         base: String,
         git: GitClient,
-        model: AIGenerationModel
+        model: AIGenerationModel,
+        service: AIGenerationService? = nil
     ) async throws -> GeneratedDescription {
         let input = try await prepare(in: directory, base: base, git: git)
         let schema = """
         {"type":"object","properties":{"body":{"type":"string"}},"required":["body"],"additionalProperties":false}
         """
-        let data = try await CodexRunner.run(
+        let data = try await AIGenerationRunner.run(
             prompt: input.prompt,
             schema: schema,
-            model: model,
+            service: service ?? .codex(model: model, reasoningEffort: nil),
             in: directory
         )
         guard let output = try? JSONDecoder().decode(StructuredOutput.self, from: data) else {

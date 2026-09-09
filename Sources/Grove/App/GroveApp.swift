@@ -26,7 +26,19 @@ struct GroveApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        guard !flag, let window = sender.windows.first(where: { $0.canBecomeKey }) else {
+            return true
+        }
+        window.makeKeyAndOrderFront(nil)
+        sender.activate(ignoringOtherApps: true)
+        return true
     }
 }
 

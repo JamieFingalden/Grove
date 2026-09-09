@@ -291,6 +291,7 @@ struct CodexPullRequestReviewGenerator {
         ),
         model: AIGenerationModel,
         reasoningEffort: AIReviewReasoningEffort,
+        service: AIGenerationService? = nil,
         in directory: URL
     ) async throws -> PullRequestAIReview {
         let input = PullRequestReviewPromptBuilder.build(.init(
@@ -299,11 +300,10 @@ struct CodexPullRequestReviewGenerator {
             customInstructions: customInstructions,
             selectedAreas: selectedAreas
         ))
-        let data = try await CodexRunner.run(
+        let data = try await AIGenerationRunner.run(
             prompt: input.text,
             schema: outputSchema(for: selectedAreas),
-            model: model,
-            reasoningEffort: reasoningEffort,
+            service: service ?? .codex(model: model, reasoningEffort: reasoningEffort),
             timeout: reviewTimeout,
             in: directory
         )

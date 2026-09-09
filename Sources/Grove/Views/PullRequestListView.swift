@@ -711,7 +711,7 @@ private struct PullRequestDetailView: View {
     }
 
     private var canStartAIReview: Bool {
-        appModel.isAIGenerationEnabled && !isLoadingDiff && !diffFiles.isEmpty
+        appModel.canUseAIGeneration && !isLoadingDiff && !diffFiles.isEmpty
     }
 
     private func closePullRequest() async {
@@ -745,9 +745,10 @@ private struct PullRequestDetailView: View {
         if !appModel.isAIGenerationEnabled {
             return "AI 生成功能已关闭，请先在 Grove 设置中开启。"
         }
+        if !appModel.canUseAIGeneration { return appModel.aiGenerationUnavailableMessage }
         if isLoadingDiff { return "代码改动加载完成后才能 Review。" }
         if diffFiles.isEmpty { return "这个请求没有可供 Review 的代码改动。" }
-        return "使用 \(appModel.aiReviewModel.name) 检查所选的 \(aiReviewAreas.count) 项合并风险"
+        return "使用 \(appModel.aiReviewService?.displayName ?? appModel.aiReviewModel.name) 检查所选的 \(aiReviewAreas.count) 项合并风险"
     }
 
     private var aiReviewOptions: some View {
@@ -828,6 +829,7 @@ private struct PullRequestDetailView: View {
         let files = diffFiles
         let model = appModel.aiReviewModel
         let reasoningEffort = appModel.aiReviewReasoningEffort
+        guard let service = appModel.aiReviewService else { return }
         let instructions = aiReviewInstructions
         let selectedAreas = aiReviewAreas
         appModel.setAIReviewAreas(selectedAreas, for: repository.root)
@@ -838,6 +840,7 @@ private struct PullRequestDetailView: View {
             selectedAreas: selectedAreas,
             model: model,
             reasoningEffort: reasoningEffort,
+            service: service,
             repositoryRoot: repository.root
         ))
     }
@@ -992,7 +995,7 @@ private struct PullRequestDetailView: View {
                     .font(.system(size: 12, weight: .semibold))
                 if isReviewingAI {
                     ProgressView().controlSize(.mini)
-                    Text("正在用 \(activeAIReviewModel.name) 检查代码…")
+                    Text("正在用 \(activeAIReviewModel) 检查代码…")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                 } else if let aiReview {
@@ -1043,11 +1046,11 @@ private struct PullRequestDetailView: View {
         .overlay { RoundedRectangle(cornerRadius: 9).stroke(.separator, lineWidth: 0.5) }
     }
 
-    private var activeAIReviewModel: AIGenerationModel {
+    private var activeAIReviewModel: String {
         appModel.aiReviewingModel(
             for: repository.root,
             pullRequestNumber: pullRequest.number
-        ) ?? appModel.aiReviewModel
+        ) ?? appModel.aiReviewService?.displayName ?? appModel.aiReviewModel.name
     }
 
     private func aiReviewAssessment(_ assessment: PullRequestAIReview.Assessment) -> some View {

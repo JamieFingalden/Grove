@@ -8,6 +8,7 @@ struct AIReviewGenerationRequest: Sendable {
     var selectedAreas: Set<PullRequestAIReview.Assessment.Area>
     var model: AIGenerationModel
     var reasoningEffort: AIReviewReasoningEffort
+    var service: AIGenerationService
     var repositoryRoot: URL
 }
 
@@ -113,7 +114,7 @@ final class AppModel {
 
     private struct AIReviewJob {
         var id: UUID
-        var model: AIGenerationModel
+        var serviceName: String
     }
 
     private(set) var git: GitClient?
@@ -133,9 +134,13 @@ final class AppModel {
     var selection: Selection?
     var failures: [GroveFailure] = []
     private(set) var isAIGenerationEnabled: Bool
+    private(set) var aiProvider: AIGenerationProvider
     private(set) var aiCommitModel: AIGenerationModel
     private(set) var aiReviewModel: AIGenerationModel
     private(set) var aiReviewReasoningEffort: AIReviewReasoningEffort
+    private(set) var aiAPIBaseURL: String
+    private(set) var aiAPIModel: String
+    private(set) var hasAIAPIKey: Bool
     private(set) var aiReviewResultsRevision = 0
     private var aiReviewJobs: [AIReviewJobKey: AIReviewJob] = [:]
 
@@ -163,6 +168,7 @@ final class AppModel {
                 selectedAreas: request.selectedAreas,
                 model: request.model,
                 reasoningEffort: request.reasoningEffort,
+                service: request.service,
                 in: request.repositoryRoot
             )
         }
@@ -171,14 +177,67 @@ final class AppModel {
         self.aiReviewCache = aiReviewCache
         self.aiReviewGenerator = aiReviewGenerator
         self.isAIGenerationEnabled = aiGenerationSettings.isEnabled
+        self.aiProvider = aiGenerationSettings.provider
         self.aiCommitModel = aiGenerationSettings.commitModel
         self.aiReviewModel = aiGenerationSettings.reviewModel
         self.aiReviewReasoningEffort = aiGenerationSettings.reviewReasoningEffort
+        self.aiAPIBaseURL = aiGenerationSettings.apiBaseURL
+        self.aiAPIModel = aiGenerationSettings.apiModel
+        self.hasAIAPIKey = aiGenerationSettings.hasAPIKey
     }
 
     func setAIGenerationEnabled(_ enabled: Bool) {
         aiGenerationSettings.setEnabled(enabled)
         isAIGenerationEnabled = enabled
+    }
+
+    /// 提交信息与 PR 描述沿用提交模型；Codex 的 Review 则必须保留单独的模型和思考深度。
+    var aiService: AIGenerationService? { aiGenerationSettings.service }
+
+    var aiReviewService: AIGenerationService? {
+        switch aiProvider {
+        case .codex:
+            return .codex(model: aiReviewModel, reasoningEffort: aiReviewReasoningEffort)
+        case .api:
+            return aiGenerationSettings.service
+        }
+    }
+
+    var canUseAIGeneration: Bool {
+        isAIGenerationEnabled && aiService != nil && aiReviewService != nil
+    }
+
+    var aiGenerationUnavailableMessage: String {
+        guard isAIGenerationEnabled else { return "AI 生成功能已关闭。" }
+        if aiProvider == .api {
+            return "请在设置中填写 API 地址、模型和密钥。"
+        }
+        return "AI 服务尚未就绪。"
+    }
+
+    func setAIProvider(_ provider: AIGenerationProvider) {
+        aiGenerationSettings.setProvider(provider)
+        aiProvider = provider
+    }
+
+    func setAIAPIBaseURL(_ url: String) {
+        aiGenerationSettings.setAPIBaseURL(url)
+        aiAPIBaseURL = url
+    }
+
+    func setAIAPIModel(_ model: String) {
+        aiGenerationSettings.setAPIModel(model)
+        aiAPIModel = model
+    }
+
+    func saveAIAPIKey(_ key: String) throws {
+        try aiGenerationSettings.saveAPIKey(key)
+        hasAIAPIKey = aiGenerationSettings.hasAPIKey
+    }
+
+    func removeAIAPIKey() throws {
+        try aiGenerationSettings.removeAPIKey()
+        hasAIAPIKey = aiGenerationSettings.hasAPIKey
     }
 
     func setAICommitModel(_ model: AIGenerationModel) {
@@ -255,11 +314,11 @@ final class AppModel {
         )] != nil
     }
 
-    func aiReviewingModel(for repository: URL, pullRequestNumber: Int) -> AIGenerationModel? {
+    func aiReviewingModel(for repository: URL, pullRequestNumber: Int) -> String? {
         aiReviewJobs[AIReviewJobKey(
             repository: repository,
             pullRequestNumber: pullRequestNumber
-        )]?.model
+        )]?.serviceName
     }
 
     var activeAIReviewCount: Int { aiReviewJobs.count }
@@ -272,7 +331,7 @@ final class AppModel {
         cancelAIReview(for: request.repositoryRoot, pullRequestNumber: request.pullRequest.number)
 
         let jobID = UUID()
-        aiReviewJobs[key] = AIReviewJob(id: jobID, model: request.model)
+        aiReviewJobs[key] = AIReviewJob(id: jobID, serviceName: request.service.displayName)
         aiReviewTasks[key] = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
