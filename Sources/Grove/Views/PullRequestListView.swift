@@ -269,6 +269,9 @@ private struct PullRequestRow: View {
         }
         .padding(.vertical, 3)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // `List` 包着 plain Button 时会按压缩后的 label 高度创建 NSTableCellView；
+        // 有 Review 徽标的行会因此被下一行盖住。
+        .fixedSize(horizontal: false, vertical: true)
         .contentShape(Rectangle())
     }
 
