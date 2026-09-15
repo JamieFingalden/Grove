@@ -160,52 +160,55 @@ struct DiffContentView: View {
     var model: WorktreeModel?
     /// 历史页一次只展示一个选中文件，仍要保留文件标题，避免代码失去归属感。
     var showsFileHeaders = false
+    @State private var rowBounds: [CGRect] = []
+    @State private var verticalOffset: CGFloat = 0
 
     var body: some View {
         GeometryReader { geometry in
+            let visibleContentWidth = rowBounds.lazy
+                .filter { $0.maxY > verticalOffset && $0.minY < verticalOffset + geometry.size.height }
+                .map(\.width)
+                .max() ?? 0
             ScrollView([.vertical, .horizontal]) {
-                ZStack(alignment: .topLeading) {
-                    // 用真正的 SwiftUI 文本视图量宽，避免 AppKit 字体估值和实际渲染
-                    // 不一致，在最右端凭空多出一大片没有代码的滚动区域。
-                    DiffContentWidthProbe(
-                        files: files,
-                        selectable: model != nil,
-                        showsFileHeaders: showsFileHeaders || files.count > 1
-                    )
-
-                    LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
-                        ForEach(files) { file in
-                            Section {
-                                if file.isBinary {
-                                    DiffNotice(
-                                        text: "二进制文件，无法按行比较。",
-                                        systemImage: "doc.badge.gearshape"
-                                    )
-                                } else if file.isModeChangeOnly {
-                                    DiffNotice(
-                                        text: "只有文件权限变了：\(file.oldMode ?? "?") → \(file.newMode ?? "?")",
-                                        systemImage: "lock.rotation"
-                                    )
-                                } else if file.hunks.isEmpty {
-                                    DiffNotice(text: "内容没有变化。", systemImage: "equal.circle")
-                                } else {
-                                    ForEach(file.hunks) { hunk in
-                                        HunkView(hunk: hunk, model: model)
-                                    }
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
+                    ForEach(files) { file in
+                        Section {
+                            if file.isBinary {
+                                DiffNotice(
+                                    text: "二进制文件，无法按行比较。",
+                                    systemImage: "doc.badge.gearshape"
+                                )
+                            } else if file.isModeChangeOnly {
+                                DiffNotice(
+                                    text: "只有文件权限变了：\(file.oldMode ?? "?") → \(file.newMode ?? "?")",
+                                    systemImage: "lock.rotation"
+                                )
+                            } else if file.hunks.isEmpty {
+                                DiffNotice(text: "内容没有变化。", systemImage: "equal.circle")
+                            } else {
+                                ForEach(file.hunks) { hunk in
+                                    HunkView(hunk: hunk, model: model)
                                 }
-                            } header: {
-                                if showsFileHeaders || files.count > 1 {
-                                    FileDiffHeader(file: file)
-                                }
+                            }
+                        } header: {
+                            if showsFileHeaders || files.count > 1 {
+                                FileDiffHeader(file: file)
                             }
                         }
                     }
-                    .fixedSize(horizontal: true, vertical: false)
                 }
                 .fixedSize(horizontal: true, vertical: false)
-                .frame(minWidth: geometry.size.width, alignment: .leading)
+                // 文档只占当前可见行需要的宽度，横向边界由原生滚动容器处理。
+                // 离屏长行仍保留原始布局，进入视口后再扩展滚动范围。
+                .frame(width: max(geometry.size.width, visibleContentWidth + 24), alignment: .leading)
                 .padding(.bottom, 12)
-                .background(DiffHorizontalVisibilityClamp())
+                .coordinateSpace(name: "diffContent")
+                .background(DiffVerticalOffsetReader(offset: $verticalOffset))
+            }
+            .onPreferenceChange(DiffRowBoundsKey.self) { rows in
+                DispatchQueue.main.async {
+                    rowBounds = rows
+                }
             }
             .scrollIndicators(.visible, axes: [.vertical, .horizontal])
             // 内容比视口小的时候，双向滚动的 ScrollView 会把它居中 ——
@@ -220,205 +223,89 @@ struct DiffContentView: View {
     }
 }
 
-@MainActor
-private struct DiffContentWidthProbe: View {
-    let files: [FileDiff]
-    let selectable: Bool
-    let showsFileHeaders: Bool
+private struct DiffRowBoundsKey: PreferenceKey {
+    static var defaultValue: [CGRect] { [] }
 
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            if let line = widestLine {
-                DiffLineView(line: line, model: nil)
-            }
-
-            if let hunk = widestHunk {
-                HStack(spacing: 6) {
-                    if selectable {
-                        Image(systemName: "square")
-                            .font(.system(size: 11))
-                    }
-                    Text(hunk.header)
-                        .font(.system(size: 10.5, design: .monospaced))
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 3)
-            }
-
-            if showsFileHeaders, let file = widestFile {
-                FileDiffHeader(file: file)
-            }
-        }
-        .fixedSize(horizontal: true, vertical: true)
-        .padding(.trailing, 24)
-        .hidden()
-        .accessibilityHidden(true)
-    }
-
-    private static let codeFont = NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular)
-    private static let hunkFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular)
-    private static let headerFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold)
-
-    private var widestLine: DiffLine? {
-        files.lazy
-            .flatMap(\.hunks)
-            .flatMap(\.lines)
-            .max { textWidth($0.text, font: Self.codeFont) < textWidth($1.text, font: Self.codeFont) }
-    }
-
-    private var widestHunk: DiffHunk? {
-        files.lazy
-            .flatMap(\.hunks)
-            .max { textWidth($0.header, font: Self.hunkFont) < textWidth($1.header, font: Self.hunkFont) }
-    }
-
-    private var widestFile: FileDiff? {
-        files.max {
-            textWidth(headerText($0), font: Self.headerFont)
-                < textWidth(headerText($1), font: Self.headerFont)
-        }
-    }
-
-    private func headerText(_ file: FileDiff) -> String {
-        file.displayPath
-            + (file.oldPath.map { " ← \($0)" } ?? "")
-            + "  +\(file.additions)  −\(file.deletions)"
-    }
-
-    private func textWidth(_ text: String, font: NSFont) -> CGFloat {
-        (text as NSString).size(withAttributes: [.font: font]).width
+    static func reduce(value: inout [CGRect], nextValue: () -> [CGRect]) {
+        value.append(contentsOf: nextValue())
     }
 }
 
-@MainActor
-private struct DiffHorizontalVisibilityClamp: NSViewRepresentable {
+private struct DiffRowBounds: View {
+    var body: some View {
+        GeometryReader { geometry in
+            let frame = geometry.frame(in: .named("diffContent"))
+            // 横向偏移不参与量宽，避免左右滚动本身触发文档重新布局。
+            Color.clear.preference(
+                key: DiffRowBoundsKey.self,
+                value: [CGRect(x: 0, y: frame.minY, width: frame.width, height: frame.height)]
+            )
+        }
+    }
+}
 
-    func makeNSView(context: Context) -> NSView {
-        let view = AttachmentView(frame: .zero)
+private struct DiffVerticalOffsetReader: NSViewRepresentable {
+    @Binding var offset: CGFloat
+
+    func makeCoordinator() -> Coordinator { Coordinator(offset: $offset) }
+
+    func makeNSView(context: Context) -> AttachmentView {
+        let view = AttachmentView()
         view.didEnterWindow = { [weak coordinator = context.coordinator] view in
-            DispatchQueue.main.async {
-                coordinator?.attach(to: view)
-            }
+            DispatchQueue.main.async { coordinator?.attach(to: view) }
         }
         return view
     }
 
-    func updateNSView(_ view: NSView, context: Context) {
-        // 等本轮 SwiftUI 布局结束后再读取真实文本位置；提前读取会得到旧坐标，
-        // 横向偏移仍可能停在当前可见代码之外，只剩一片空白。
-        DispatchQueue.main.async {
-            context.coordinator.attach(to: view)
-            context.coordinator.clampToVisibleCode()
-        }
+    func updateNSView(_ view: AttachmentView, context: Context) {
+        DispatchQueue.main.async { context.coordinator.attach(to: view) }
     }
 
-    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
+    static func dismantleNSView(_ view: AttachmentView, coordinator: Coordinator) {
         coordinator.detach()
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
-    private final class AttachmentView: NSView {
+    final class AttachmentView: NSView {
         var didEnterWindow: ((NSView) -> Void)?
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            if window != nil {
-                didEnterWindow?(self)
-            }
+            if window != nil { didEnterWindow?(self) }
         }
     }
 
     @MainActor
     final class Coordinator: NSObject {
-        private weak var scrollView: NSScrollView?
+        private let offset: Binding<CGFloat>
         private weak var clipView: NSClipView?
-        private var boundsObservation: NSKeyValueObservation?
+
+        init(offset: Binding<CGFloat>) { self.offset = offset }
 
         func attach(to view: NSView) {
-            var windowScrollView: NSScrollView?
-            if let contentView = view.window?.contentView {
-                let scrollViews = descendants(of: contentView)
-                    .compactMap { $0 as? NSScrollView }
-                    .filter(\.hasHorizontalScroller)
-                windowScrollView = scrollViews.min { lhs, rhs in
-                    lhs.frame.width * lhs.frame.height < rhs.frame.width * rhs.frame.height
-                }
-            }
-            guard let newScrollView = view.enclosingScrollView ?? windowScrollView else { return }
-            guard scrollView !== newScrollView else { return }
+            guard let clipView = view.enclosingScrollView?.contentView else { return }
+            guard self.clipView !== clipView else { return }
             detach()
-            scrollView = newScrollView
-            clipView = newScrollView.contentView
-            newScrollView.contentView.postsBoundsChangedNotifications = true
-            boundsObservation = newScrollView.contentView.observe(\.bounds, options: [.new]) { [weak self] _, _ in
-                Task { @MainActor [weak self] in
-                    self?.scheduleClamp()
-                }
-            }
+            self.clipView = clipView
+            clipView.postsBoundsChangedNotifications = true
             NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(clipViewBoundsDidChange),
-                name: NSView.boundsDidChangeNotification,
-                object: newScrollView.contentView
+                self, selector: #selector(boundsDidChange),
+                name: NSView.boundsDidChangeNotification, object: clipView
             )
+            boundsDidChange()
         }
 
         func detach() {
-            boundsObservation = nil
-            NotificationCenter.default.removeObserver(
-                self,
-                name: NSView.boundsDidChangeNotification,
-                object: clipView
-            )
-            scrollView = nil
+            NotificationCenter.default.removeObserver(self)
             clipView = nil
         }
 
-        @objc private func clipViewBoundsDidChange(_ notification: Notification) {
-            guard clipView != nil else { return }
-            scheduleClamp()
-        }
-
-        private func scheduleClamp() {
-            NSObject.cancelPreviousPerformRequests(
-                withTarget: self,
-                selector: #selector(clampToVisibleCode),
-                object: nil
-            )
-            perform(#selector(clampToVisibleCode), with: nil, afterDelay: 0.05)
-        }
-
-        @objc func clampToVisibleCode() {
-            guard let scrollView,
-                  let documentView = scrollView.documentView else { return }
-            let clipView = scrollView.contentView
-            guard clipView.bounds.origin.x > 0.5 else { return }
-            let clipFrame = scrollView.contentView.convert(scrollView.contentView.bounds, to: nil)
-            let visibleFields = descendants(of: documentView)
-                .compactMap { $0 as? NSTextField }
-                .filter { !$0.isHiddenOrHasHiddenAncestor }
-                // SwiftUI 会额外生成一个覆盖整份 diff 的聚合文本节点；它不是屏幕上的
-                // 代码行，拿它量宽会让钳制永远等于整份文件宽度。
-                .filter { $0.bounds.height <= 32 }
-                .filter { !$0.stringValue.contains("\n") }
-                .filter {
-                    let frame = $0.convert($0.bounds, to: nil)
-                    return frame.maxY >= clipFrame.minY && frame.minY <= clipFrame.maxY
-                }
-            let rightEdge = visibleFields
-                .map { $0.convert($0.bounds, to: documentView).maxX }
-                .max() ?? clipView.bounds.width
-            let maximumX = max(0, rightEdge + 24 - clipView.bounds.width)
-            guard clipView.bounds.origin.x > maximumX + 0.5 else { return }
-            clipView.scroll(to: NSPoint(x: maximumX, y: clipView.bounds.origin.y))
-            scrollView.reflectScrolledClipView(clipView)
-        }
-
-        private func descendants(of view: NSView) -> [NSView] {
-            view.subviews + view.subviews.flatMap(descendants)
+        @objc private func boundsDidChange() {
+            guard let y = clipView?.bounds.minY, abs(offset.wrappedValue - y) > 0.5 else { return }
+            // 等原生滚动状态同步后再更新宽度，避免 SwiftUI 恢复上一帧的滚动位置。
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let y = clipView?.bounds.minY else { return }
+                offset.wrappedValue = y
+            }
         }
     }
 }
@@ -455,6 +342,7 @@ private struct FileDiffHeader: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
         .fixedSize(horizontal: true, vertical: false)
+        .background(DiffRowBounds())
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.bar)
     }
@@ -542,6 +430,7 @@ private struct HunkView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 3)
             .fixedSize(horizontal: true, vertical: false)
+            .background(DiffRowBounds())
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.accentColor.opacity(0.07))
 
@@ -608,6 +497,7 @@ private struct DiffLineView: View {
         .foregroundStyle(foreground)
         .padding(.vertical, 0.5)
         .fixedSize(horizontal: true, vertical: false)
+        .background(DiffRowBounds())
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(isSelected ? Color.accentColor.opacity(0.22) : background)
         .contentShape(Rectangle())
