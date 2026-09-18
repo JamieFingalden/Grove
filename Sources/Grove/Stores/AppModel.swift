@@ -51,6 +51,12 @@ struct GroveFailure: Identifiable, Sendable {
     private static func friendlyGitMessage(_ output: String) -> String {
         let message = output.lowercased()
 
+        if message.contains("unmerged files")
+            || message.contains("needs merge")
+            || message.contains("resolve your current index first")
+            || message.contains("unresolved conflict") {
+            return "还有文件处于冲突状态。先在「冲突」区把每个文件解决并标记为已解决，再继续。"
+        }
         if message.contains("diverging branches") || message.contains("not possible to fast-forward") {
             return "本地和远端都有新的提交，无法直接拉取。请先点「变基」，把本地提交接到远端最新提交之后，再重新拉取。"
         }
@@ -140,6 +146,7 @@ final class AppModel {
     private(set) var aiReviewReasoningEffort: AIReviewReasoningEffort
     private(set) var aiAPIBaseURL: String
     private(set) var aiAPIModel: String
+    private(set) var aiAPIThinking: AIAPIThinkingMode
     private(set) var hasAIAPIKey: Bool
     private(set) var codexModels = CodexModelCatalog.defaults
     private(set) var apiModels: [String] = []
@@ -187,6 +194,7 @@ final class AppModel {
         self.aiReviewReasoningEffort = aiGenerationSettings.reviewReasoningEffort
         self.aiAPIBaseURL = aiGenerationSettings.apiBaseURL
         self.aiAPIModel = aiGenerationSettings.apiModel
+        self.aiAPIThinking = aiGenerationSettings.apiThinking
         self.hasAIAPIKey = aiGenerationSettings.hasAPIKey
     }
 
@@ -237,6 +245,11 @@ final class AppModel {
     func setAIAPIModel(_ model: String) {
         aiGenerationSettings.setAPIModel(model)
         aiAPIModel = model
+    }
+
+    func setAIAPIThinking(_ mode: AIAPIThinkingMode) {
+        aiGenerationSettings.setAPIThinking(mode)
+        aiAPIThinking = mode
     }
 
     func fetchCodexModels() async {
@@ -437,6 +450,12 @@ final class AppModel {
         // 这一步即使网络慢，仓库和工作树也早已可以使用。
         for repository in repositories {
             await repository.refreshForgeMetadata()
+        }
+
+        // 上面的循环结束前，PR 列表视图可能已经带着空 slug 试过一次加载（被跳过）。
+        // 托管商标识就位后补一次，选中项恢复成「合并请求」时打开 app 就有数据。
+        if case .pullRequests(let root) = selection, let repository = repository(for: root) {
+            await repository.refreshPullRequests()
         }
     }
 

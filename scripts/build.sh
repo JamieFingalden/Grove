@@ -12,6 +12,15 @@ ASSET_CATALOG_DIR="${PROJECT_DIR}/.build/GroveAssets.xcassets"
 ASSET_ICONSET_DIR="${ASSET_CATALOG_DIR}/AppIcon.appiconset"
 ASSET_OUTPUT_DIR="${PROJECT_DIR}/.build/GroveAssetOutput"
 ASSET_INFO_PATH="${PROJECT_DIR}/.build/GroveAssetInfo.plist"
+SDK_VERSION="$(xcrun --sdk macosx --show-sdk-platform-version)"
+BUILD_ARGUMENTS=(
+    --package-path "${PROJECT_DIR}"
+    -c release
+    -Xlinker -platform_version
+    -Xlinker macos
+    -Xlinker 14.0
+    -Xlinker "${SDK_VERSION}"
+)
 
 echo "正在构建 Grove Release 版本…"
 
@@ -40,8 +49,10 @@ xcrun actool "${ASSET_CATALOG_DIR}" \
     --warnings \
     --notices > /dev/null
 
-swift build --package-path "${PROJECT_DIR}" -c release
-BIN_DIR="$(swift build --package-path "${PROJECT_DIR}" -c release --show-bin-path)"
+# SwiftPM 命令行构建会把最低系统版本同时写进 SDK 标记，导致 macOS 26+
+# 把系统控件当作旧版兼容应用渲染。明确写入实际 SDK，最低兼容版本仍为 14.0。
+swift build "${BUILD_ARGUMENTS[@]}"
+BIN_DIR="$(swift build "${BUILD_ARGUMENTS[@]}" --show-bin-path)"
 
 rm -rf "${APP_DIR}"
 mkdir -p "${CONTENTS_DIR}/MacOS" "${CONTENTS_DIR}/Resources"

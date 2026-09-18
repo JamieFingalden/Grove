@@ -122,6 +122,49 @@ final class WorktreeModel: Identifiable {
     }
     private(set) var commitDiff: [FileDiff]?
 
+    // MARK: 冲突状态
+
+    /// 选中的冲突文件在工作区里是什么样。
+    enum ConflictContent {
+        /// 文本文件，标记已解析出来，可以逐块选。
+        case editor(ConflictEditor)
+        /// 二进制，没有「块」可言，只能整个文件选一边。
+        case binary
+        /// 不是合法 UTF-8。改写会把内容写坏，所以只允许整文件选边或去外部编辑器。
+        case undecodable
+        /// 工作区里没有这个文件（一侧删除的形态）。
+        case missing
+    }
+
+    /// 一个冲突文件的逐块解决进度。
+    struct ConflictEditor {
+        var change: FileChange
+        var document: ConflictDocument
+        var resolutions: [Int: ConflictResolution] = [:]
+        /// 上次读盘或写盘时的全文。写盘前先跟磁盘比对：不一样说明用户在外部编辑器里
+        /// 改过，这时候按我们手里的版本覆盖回去会把那些改动吃掉。
+        var lastKnownText: String
+
+        var unresolvedBlocks: [ConflictBlock] {
+            document.blocks.filter { resolutions[$0.id] == nil }
+        }
+        var remainingCount: Int { unresolvedBlocks.count }
+        var isFullyResolved: Bool { remainingCount == 0 }
+    }
+
+    private(set) var conflictContent: ConflictContent?
+    /// 冲突两侧各是谁。有冲突或有进行中的操作时才去查。
+    private(set) var conflictContext: ConflictContext?
+
+    enum ConflictViewMode: String, CaseIterable, Identifiable {
+        case resolve = "解决冲突"
+        case diff = "合并 diff"
+        var id: String { rawValue }
+    }
+
+    /// 冲突文件的右侧面板看哪个：逐块解决，还是 git 的 combined diff。
+    var conflictViewMode: ConflictViewMode = .resolve
+
     nonisolated var id: URL { identity }
     var path: URL { worktree.path }
     var repositoryRoot: URL { repository?.root ?? worktree.path }
@@ -143,6 +186,10 @@ final class WorktreeModel: Identifiable {
     func refreshStatus() async {
         do {
             status = try await git.status(in: path)
+        } catch is CancellationError {
+            // 刷新任务被取消（比如用户切走了）：留着上一次的状态，
+            // 不能把一份好好的状态清成「干净」。
+            return
         } catch {
             // 侧边栏的角标读不出来不值得打断用户 —— 大概率是这个工作树的目录
             // 被手工删了，它本来就会被标成「可清理」。
@@ -155,6 +202,7 @@ final class WorktreeModel: Identifiable {
         defer { isLoading = false }
 
         await refreshStatus()
+        await refreshConflictContext()
 
         await reloadHistory()
 
@@ -176,7 +224,8 @@ final class WorktreeModel: Identifiable {
                 diffTask?.cancel()
                 diffTask = Task { await loadDiff() }
             }
-        } else if let first = status.changes.first {
+        } else if let first = status.conflictedChanges.first ?? status.changes.first {
+            // 有冲突时先落到第一个冲突文件上：它是此刻唯一要处理的东西。
             diffSide = Self.validDiffSide(for: first, preferred: .worktree)
             self.selectedPath = first.path
         } else {
@@ -295,11 +344,20 @@ final class WorktreeModel: Identifiable {
         selectedLines.removeAll()
         guard let selectedPath else {
             diff = nil
+            conflictContent = nil
             return
         }
         guard let change = status.changes.first(where: { $0.path == selectedPath }) else {
             diff = nil
+            conflictContent = nil
             return
+        }
+
+        if change.isConflicted {
+            await loadConflictContent(for: change)
+            guard !Task.isCancelled else { return }
+        } else {
+            conflictContent = nil
         }
 
         // 未跟踪文件 git 不认，得自己造 diff。
@@ -350,8 +408,18 @@ final class WorktreeModel: Identifiable {
     }
 
     func stageAll() async {
+        // 有冲突时不能 `add --all`：它会把还带着 `<<<<<<<` 标记的文件一起标成已解决。
+        // 只加那些真正的未暂存改动，冲突文件走「标记为已解决」那条路。
+        let unresolved = status.changes.filter { $0.unstaged != nil && !$0.isConflicted }.map(\.path)
+        if status.hasConflicts {
+            guard !unresolved.isEmpty else { return }
+        }
         await mutate("全部暂存") {
-            try await self.git.stageAll(in: self.path)
+            if self.status.hasConflicts {
+                try await self.git.stage(paths: unresolved, in: self.path)
+            } else {
+                try await self.git.stageAll(in: self.path)
+            }
         }
     }
 
@@ -423,9 +491,9 @@ final class WorktreeModel: Identifiable {
 
     var selectedLineCount: Int { selectedLines.count }
 
-    /// 选中的行能不能做分行操作。二进制文件和未跟踪文件没有可裁的补丁。
+    /// 选中的行能不能做分行操作。二进制文件和未跟踪文件没有可裁的补丁，冲突文件的 combined diff 也不行。
     var canApplySelectedLines: Bool {
-        guard !selectedLines.isEmpty, activity == nil else { return false }
+        guard !selectedLines.isEmpty, activity == nil, selectedChange?.isConflicted != true else { return false }
         guard let diff, diff.contains(where: { !$0.isBinary && !$0.hunks.isEmpty }) else { return false }
         return selectedChange?.unstaged != .untracked
     }
@@ -506,7 +574,7 @@ final class WorktreeModel: Identifiable {
             if status.operation == .rebase {
                 app?.report(
                     title: "变基遇到冲突",
-                    detail: "解决冲突后在上方点「继续变基」；不想继续就点「中止」，仓库会回到变基前的样子。"
+                    detail: "在「冲突」区把每个文件解决并标记为已解决，再点上方的「继续」；不想继续就点「中止」，仓库会回到变基前的样子。"
                 )
             } else {
                 app?.report(title: "变基失败", error: error)
@@ -517,24 +585,26 @@ final class WorktreeModel: Identifiable {
         await repository?.refresh()
     }
 
-    func rebaseStep(_ step: GitClient.RebaseStep) async {
+    /// 多步操作（合并 / 变基 / 拣选 / 回退）中途的继续、跳过、中止。
+    func operationStep(_ step: GitClient.OperationStep) async {
+        guard let operation = steppableOperation else { return }
         let label: String
         switch step {
-        case .cont: label = "继续变基"
+        case .cont: label = "继续\(operation.verb)"
         case .skip: label = "跳过这个提交"
-        case .abort: label = "中止变基"
+        case .abort: label = "中止\(operation.verb)"
         }
         activity = "正在\(label)…"
         defer { activity = nil }
         do {
-            try await git.rebaseStep(step, in: path)
+            try await git.operationStep(step, of: operation, in: path)
         } catch {
             await refresh()
             // `--continue` 在还有未解决冲突时会拒绝，这是提醒不是故障。
-            if status.operation == .rebase, step == .cont {
+            if status.operation == operation, step == .cont, status.hasConflicts {
                 app?.report(
                     title: "还有冲突没解决",
-                    detail: "把冲突文件改好并暂存之后，再点「继续变基」。"
+                    detail: "把「冲突」区里的每个文件解决并标记为已解决之后，再点「继续」。"
                 )
             } else {
                 app?.report(title: "\(label)失败", error: error)
@@ -545,8 +615,191 @@ final class WorktreeModel: Identifiable {
         await repository?.refresh()
     }
 
-    /// 正处在变基中途。界面据此显示「继续 / 跳过 / 中止」那一条。
+    func rebaseStep(_ step: GitClient.RebaseStep) async {
+        await operationStep(step)
+    }
+
+    /// 正处在变基中途。
     var isRebasing: Bool { status.operation == .rebase }
+
+    /// 正处在某个能从 Grove 里「继续 / 中止」的多步操作中途。界面据此显示顶部那条横幅。
+    var steppableOperation: RepositoryOperation? {
+        guard let operation = status.operation, operation.isSteppable else { return nil }
+        return operation
+    }
+
+    // MARK: - 冲突
+
+    private func refreshConflictContext() async {
+        guard status.hasConflicts || status.operation != nil else {
+            conflictContext = nil
+            return
+        }
+        let context = await git.conflictContext(
+            operation: status.operation,
+            branch: status.branch,
+            in: path
+        )
+        // 被取消的刷新里 git 调用全部失败，算出来的是「MERGE_HEAD」这种兜底标签；
+        // 别让它盖掉之前查到的真实分支名。
+        guard !Task.isCancelled else { return }
+        conflictContext = context
+    }
+
+    /// 整个文件采用一侧。
+    func resolveConflict(_ change: FileChange, taking side: GitClient.ConflictSide) async {
+        guard let kind = change.conflict else { return }
+        await mutate("\(side.actionLabel)：\(change.displayName)") {
+            try await self.git.resolveConflict(path: change.path, taking: side, kind: kind, in: self.path)
+        }
+    }
+
+    /// 所有冲突文件都采用同一侧。调用方必须先确认过 —— 这是一口气把所有文件定下来。
+    func resolveAllConflicts(taking side: GitClient.ConflictSide) async {
+        let conflicted = status.conflictedChanges
+        guard !conflicted.isEmpty else { return }
+        await mutate("全部\(side.actionLabel)") {
+            for change in conflicted {
+                guard let kind = change.conflict else { continue }
+                try await self.git.resolveConflict(path: change.path, taking: side, kind: kind, in: self.path)
+            }
+        }
+    }
+
+    /// 把工作区里现在的内容当作解决结果（`git add` / `git rm`）。
+    func markConflictResolved(_ change: FileChange) async {
+        await mutate("标记 \(change.displayName) 为已解决") {
+            try await self.git.markConflictResolved(path: change.path, in: self.path)
+        }
+    }
+
+    /// 文件里现在还剩几个冲突块。标记为已解决之前用它拦一下 ——
+    /// 带着 `<<<<<<<` 提交出去是冲突解决里最常见的事故。
+    func unresolvedMarkerCount(in change: FileChange) -> Int {
+        guard case .text(let text, _) = Self.readConflictSource(at: path.appendingPathComponent(change.path)) else {
+            return 0
+        }
+        return ConflictParser.parse(text).blocks.count
+    }
+
+    /// 把文件恢复成 git 刚合并完、带冲突标记的样子。会丢掉用户在这个文件里做的所有改动。
+    func restoreConflictMarkers(_ change: FileChange) async {
+        await mutate("恢复 \(change.displayName) 的冲突标记") {
+            try await self.git.restoreConflictMarkers(path: change.path, in: self.path)
+        }
+    }
+
+    /// 给一个冲突块定结果（nil = 撤销之前的选择），然后把整份文件重写到磁盘。
+    func resolveBlock(_ block: ConflictBlock, with resolution: ConflictResolution?) {
+        guard case .editor(let editor) = conflictContent else { return }
+        var resolutions = editor.resolutions
+        if let resolution {
+            resolutions[block.id] = resolution
+        } else {
+            resolutions.removeValue(forKey: block.id)
+        }
+        writeConflictEditor(editor, resolutions: resolutions)
+    }
+
+    /// 剩下的块全部按同一个选择解决。已经选过的块不动。
+    func resolveRemainingBlocks(with resolution: ConflictResolution) {
+        guard case .editor(let editor) = conflictContent else { return }
+        var resolutions = editor.resolutions
+        for block in editor.unresolvedBlocks { resolutions[block.id] = resolution }
+        writeConflictEditor(editor, resolutions: resolutions)
+    }
+
+    /// 重新从磁盘读一遍。用户在外部编辑器里改完回来时点它。
+    func reloadConflictContent() async {
+        guard let change = selectedChange, change.isConflicted else { return }
+        await loadConflictContent(for: change)
+    }
+
+    private func writeConflictEditor(_ editor: ConflictEditor, resolutions: [Int: ConflictResolution]) {
+        let url = path.appendingPathComponent(editor.change.path)
+
+        // 写之前确认磁盘上还是我们上次见到的内容。
+        if case .text(let onDisk, _) = Self.readConflictSource(at: url), onDisk != editor.lastKnownText {
+            app?.report(
+                title: "文件已在外部被修改",
+                detail: "「\(editor.change.displayName)」跟 Grove 上次读到的不一样，已重新读取。这次的选择没有写入，请重新选。"
+            )
+            Task { await reloadConflictContent() }
+            return
+        }
+
+        var editor = editor
+        editor.resolutions = resolutions
+        let text = editor.document.rendered(with: resolutions)
+        var data = Data(text.utf8)
+        if editor.document.hasByteOrderMark {
+            data.insert(contentsOf: [0xEF, 0xBB, 0xBF], at: 0)
+        }
+        do {
+            // 不用 atomic：原地写才能保住文件的权限位和 inode
+            // （可执行脚本、正被别的程序打开着的文件）。
+            try data.write(to: url)
+            editor.lastKnownText = text
+            conflictContent = .editor(editor)
+        } catch {
+            app?.report(title: "写入 \(editor.change.displayName) 失败", error: error)
+        }
+    }
+
+    private func loadConflictContent(for change: FileChange) async {
+        let url = path.appendingPathComponent(change.path)
+        let source = await Task.detached(priority: .userInitiated) {
+            Self.readConflictSource(at: url)
+        }.value
+        guard !Task.isCancelled else { return }
+
+        switch source {
+        case .missing:
+            conflictContent = .missing
+        case .binary:
+            conflictContent = .binary
+        case .undecodable:
+            conflictContent = .undecodable
+        case .text(let text, let hasByteOrderMark):
+            // 磁盘内容还是我们上次写的那份：保留已做的选择，以及撤销它们的能力。
+            // 每次刷新都重新解析的话，选过的块会变成普通文本，「撤销」就没了。
+            if case .editor(var existing) = conflictContent,
+               existing.change.path == change.path,
+               existing.lastKnownText == text {
+                existing.change = change
+                conflictContent = .editor(existing)
+                return
+            }
+            var document = ConflictParser.parse(text)
+            document.hasByteOrderMark = hasByteOrderMark
+            conflictContent = .editor(ConflictEditor(change: change, document: document, lastKnownText: text))
+        }
+    }
+
+    enum ConflictSource {
+        case text(String, hasByteOrderMark: Bool)
+        case binary
+        case undecodable
+        case missing
+    }
+
+    /// 读一个冲突文件。解码必须是**严格**的 UTF-8：宽松解码会把非法字节换成 U+FFFD，
+    /// 写回去文件就坏了 —— 所以解不出来的一律归为「不可改写」。
+    nonisolated static func readConflictSource(at url: URL) -> ConflictSource {
+        guard (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil else { return .missing }
+        guard var data = try? Data(contentsOf: url) else { return .missing }
+
+        // 判定二进制：前 8000 字节里出现 NUL。这也是 git 自己的启发式。
+        if data.prefix(8000).contains(0) { return .binary }
+
+        var hasByteOrderMark = false
+        if data.starts(with: [0xEF, 0xBB, 0xBF]) {
+            hasByteOrderMark = true
+            data.removeFirst(3)
+        }
+        guard let text = String(data: data, encoding: .utf8) else { return .undecodable }
+        return .text(text, hasByteOrderMark: hasByteOrderMark)
+    }
 
     // MARK: - 提交与同步
 

@@ -51,6 +51,9 @@ struct FileDiff: Identifiable, Hashable, Sendable {
     /// 完全一致（index 行的 blob 哈希、模式位、重命名标记都在里面）。
     /// 自己按字段重新拼一遍迟早会漏掉某种情况 —— 直接把原文抄过去最稳。
     var headerLines: [String] = []
+    /// 服务端（老版 GitLab）把超大文件的 diff 折叠成了空，且本地也没能补算。
+    /// 用来区分「真的没有内容变化」和「有变化但拿不到内容」。
+    var isDiffMissing: Bool = false
 
     var id: String { newPath ?? oldPath ?? "unknown" }
     var displayPath: String { newPath ?? oldPath ?? "未知文件" }

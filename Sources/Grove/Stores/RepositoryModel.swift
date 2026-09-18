@@ -19,7 +19,13 @@ final class RepositoryModel: Identifiable {
     var worktrees: [Worktree] = []
     var branches: [Branch] = []
     var remoteBranches: [RemoteBranch] = []
+    /// 开放的 PR/MR。侧边栏数量角标和工作树的 PR 关联都靠它，
+    /// 不随列表视图的状态筛选变化 —— 否则翻历史时角标会突然消失。
     var pullRequests: [PullRequest] = []
+    /// PR 列表视图当前显示的内容，按 `listState` 过滤。
+    var listPullRequests: [PullRequest] = []
+    /// PR 列表视图选中的状态筛选。
+    var listState: PullRequestListState = .open
     /// `owner/repo`。nil 表示不是 GitHub 仓库（或者 `gh` 不可用）。
     var slug: String?
     /// 解析过的 `origin` 地址。判断托管商只看它，不看别的 remote。
@@ -152,20 +158,44 @@ final class RepositoryModel: Identifiable {
         if previousKind != forge?.kind {
             slug = nil
             pullRequests = []
+            listPullRequests = []
+            listState = .open
         }
         guard slug == nil, let forge else { return }
         slug = await forge.repositorySlug(in: root)
     }
 
     func refreshPullRequests() async {
+        // 启动恢复是并发的：PR 列表可能出现时，托管商归属和 slug 还没解析完。
+        // 这里自己补一次解析，保证打开 app 就能加载列表，不用手动点刷新。
+        if forge == nil || slug == nil {
+            await refreshForgeMetadata()
+        }
         guard let forge, slug != nil else { return }
         isRefreshingPullRequests = true
         defer { isRefreshingPullRequests = false }
         do {
-            pullRequests = try await forge.pullRequests(in: root, limit: 50, includeClosed: false)
+            // 筛选到非开放状态时，开放列表（角标、工作树关联）和历史列表各取各的，
+            // 两个请求并发；留在「开放」时共享同一份数据，不多发请求。
+            if listState == .open {
+                pullRequests = try await forge.pullRequests(in: root, limit: 50, state: .open)
+                listPullRequests = pullRequests
+            } else {
+                async let open = try await forge.pullRequests(in: root, limit: 50, state: .open)
+                async let filtered = try await forge.pullRequests(in: root, limit: 50, state: listState)
+                pullRequests = try await open
+                listPullRequests = try await filtered
+            }
         } catch {
             app?.report(title: "读取 PR 列表失败", error: error)
         }
+    }
+
+    /// 切换列表的状态筛选并重新加载。
+    func setPullRequestListState(_ state: PullRequestListState) async {
+        guard state != listState else { return }
+        listState = state
+        await refreshPullRequests()
     }
 
     /// 某个分支对应的 PR。工作树列表和详情头部靠它显示 PR 角标。
@@ -177,6 +207,7 @@ final class RepositoryModel: Identifiable {
     /// 托管平台确认请求已结束后先更新本地列表，避免等待后续网络刷新时仍显示旧状态。
     func removePullRequest(number: Int) {
         pullRequests.removeAll { $0.number == number }
+        listPullRequests.removeAll { $0.number == number }
     }
 
     // MARK: - 同步操作

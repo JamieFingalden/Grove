@@ -121,7 +121,7 @@ private struct WorktreeHeader: View {
                 actions
             }
 
-            if model.isRebasing { rebaseBanner }
+            if let operation = model.steppableOperation { operationBanner(operation) }
 
             if let pullRequest = model.linkedPullRequest {
                 PullRequestSummaryCard(pullRequest: pullRequest)
@@ -139,35 +139,40 @@ private struct WorktreeHeader: View {
         .padding(.bottom, 12)
     }
 
-    /// 变基中途停下来时的出路条。
+    /// 合并 / 变基 / 拣选 / 回退中途停下来时的出路条。
     ///
     /// 没有它的话，一遇冲突用户就被卡在半截状态里只能回终端 ——
     /// 那等于这个功能只做了一半。
-    private var rebaseBanner: some View {
+    private func operationBanner(_ operation: RepositoryOperation) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: "arrow.triangle.branch")
+            Image(systemName: operation.systemImage)
                 .foregroundStyle(.orange)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("变基进行中")
+                Text(operation.rawValue)
                     .font(.system(size: 12, weight: .semibold))
                 Text(model.status.hasConflicts
-                     ? "有 \(model.status.conflictCount) 个文件冲突。改好之后暂存它们，再点「继续」。"
-                     : "冲突已解决。点「继续」把剩下的提交接着重放。")
+                     ? "有 \(model.status.conflictCount) 个文件冲突。在下方「冲突」区逐个解决（或整体采用一侧）并标记为已解决，再点「继续」。"
+                     : "冲突已解决。点「继续」完成\(operation.verb)。")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer(minLength: 8)
 
-            Button("中止") { Task { await model.rebaseStep(.abort) } }
-                .help("回到变基前的样子，什么都不改")
-            Button("跳过") { Task { await model.rebaseStep(.skip) } }
-                .help("丢掉当前这个提交，继续重放后面的")
-            Button("继续") { Task { await model.rebaseStep(.cont) } }
+            Button("中止") { Task { await model.operationStep(.abort) } }
+                .help("回到\(operation.verb)前的样子，什么都不改")
+            if operation.supportsSkip {
+                Button("跳过") { Task { await model.operationStep(.skip) } }
+                    .help("丢掉当前这个提交，继续处理后面的")
+            }
+            Button("继续") { Task { await model.operationStep(.cont) } }
                 .buttonStyle(.borderedProminent)
                 .disabled(model.status.hasConflicts)
+                .help(operation == .merge ? "用 git 准备好的合并信息创建合并提交" : "接着处理剩下的提交")
         }
+        .disabled(model.activity != nil)
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
         .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
@@ -268,13 +273,13 @@ private struct WorktreeHeader: View {
         } label: {
             Label("变基", systemImage: "arrow.triangle.branch")
         }
-        .disabled(model.worktree.branch == nil || model.isRebasing || model.activity != nil)
+        .disabled(model.worktree.branch == nil || model.status.operation != nil || model.activity != nil)
         .help(rebaseHelp)
     }
 
     private var rebaseHelp: String {
         if model.worktree.branch == nil { return "游离 HEAD 上没有分支可以变基" }
-        if model.isRebasing { return "已经在变基中了，先处理上面那条横幅" }
+        if let operation = model.status.operation { return "正在\(operation.verb)中，先处理上面那条横幅" }
         if let target = model.suggestedRebaseTarget {
             return "把当前分支重放到 \(target) 上（可以改目标）"
         }

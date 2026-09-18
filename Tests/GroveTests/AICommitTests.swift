@@ -305,6 +305,48 @@ final class OpenAICompatibleRunnerTests: XCTestCase {
         XCTAssertEqual(object["model"] as? String, "example-model")
         let messages = try XCTUnwrap(object["messages"] as? [[String: String]])
         XCTAssertTrue(messages[0]["content"]?.contains("JSON Schema") == true)
+        // 默认不发送思考参数，避免不支持的网关拒绝请求。
+        XCTAssertNil(object["thinking"])
+    }
+
+    func testDisabledThinkingIsSentInRequestBody() throws {
+        let configuration = AIAPIConfiguration(
+            baseURL: "https://api.example.com/v1",
+            model: "example-model",
+            apiKey: "test-key",
+            thinking: .disabled
+        )
+        let request = try OpenAICompatibleRunner.makeRequest(
+            prompt: "审查这次改动。",
+            schema: "{\"type\":\"object\"}",
+            configuration: configuration,
+            timeout: 300
+        )
+
+        let body = try XCTUnwrap(request.httpBody)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let thinking = try XCTUnwrap(object["thinking"] as? [String: String])
+        XCTAssertEqual(thinking["type"], "disabled")
+    }
+
+    func testEnabledThinkingIsSentInRequestBody() throws {
+        let configuration = AIAPIConfiguration(
+            baseURL: "https://api.example.com/v1",
+            model: "example-model",
+            apiKey: "test-key",
+            thinking: .enabled
+        )
+        let request = try OpenAICompatibleRunner.makeRequest(
+            prompt: "审查这次改动。",
+            schema: "{\"type\":\"object\"}",
+            configuration: configuration,
+            timeout: 300
+        )
+
+        let body = try XCTUnwrap(request.httpBody)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let thinking = try XCTUnwrap(object["thinking"] as? [String: String])
+        XCTAssertEqual(thinking["type"], "enabled")
     }
 
     func testKeepsExplicitChatCompletionsEndpoint() {

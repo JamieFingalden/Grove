@@ -131,10 +131,10 @@ struct GitHubClient: ForgeClient {
 
     // MARK: - 查询
 
-    func pullRequests(in directory: URL, limit: Int = 50, includeClosed: Bool = false) async throws -> [PullRequest] {
+    func pullRequests(in directory: URL, limit: Int = 50, state: PullRequestListState = .open) async throws -> [PullRequest] {
         var arguments = ["pr", "list", "--limit", String(limit), "--json", Self.listFields]
         // 默认只看开放的。已合并 / 已关闭的 PR 数量能到几千，全拉一遍又慢又没用。
-        arguments.append(contentsOf: ["--state", includeClosed ? "all" : "open"])
+        arguments.append(contentsOf: ["--state", state.rawValue])
 
         let result = try await ghChecked(arguments, in: directory)
         return try Self.decoder.decode([PullRequest].self, from: result.standardOutput)

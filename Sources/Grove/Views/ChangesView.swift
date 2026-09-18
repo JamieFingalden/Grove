@@ -49,6 +49,17 @@ struct ChangesView: View {
                 .frame(maxHeight: .infinity)
             } else {
                 List(selection: selectedChange) {
+                    if !conflictedChanges.isEmpty {
+                        Section {
+                            ForEach(conflictedChanges) { change in
+                                ConflictRow(change: change, model: model)
+                                    .tag(ChangeSelection(path: change.path, side: .worktree))
+                            }
+                        } header: {
+                            conflictHeader
+                        }
+                    }
+
                     if !stagedChanges.isEmpty {
                         Section {
                             ForEach(stagedChanges) { change in
@@ -112,6 +123,45 @@ struct ChangesView: View {
         .padding(.vertical, 7)
     }
 
+    /// 冲突文件单独一区，放在最上面：它们挡着提交和「继续」，是此刻唯一要做的事。
+    private var conflictedChanges: [FileChange] {
+        model.status.conflictedChanges
+    }
+
+    /// 冲突区的表头。「全部采用一侧」是一口气把所有文件定下来的操作，先确认。
+    private var conflictHeader: some View {
+        HStack(spacing: 6) {
+            Text("冲突")
+                .foregroundStyle(.red)
+            Text("\(conflictedChanges.count)")
+                .monospacedDigit()
+                .foregroundStyle(.tertiary)
+            Spacer()
+            Menu("全部采用…") {
+                Button("当前更改") { Task { await confirmResolveAll(taking: .ours) } }
+                Button("传入的更改") { Task { await confirmResolveAll(taking: .theirs) } }
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .font(.system(size: 10))
+            .disabled(model.activity != nil)
+        }
+    }
+
+    @MainActor
+    private func confirmResolveAll(taking side: GitClient.ConflictSide) async {
+        let context = model.conflictContext ?? .unknown
+        let source = side == .ours ? context.oursLabel : context.theirsLabel
+        let alert = NSAlert()
+        alert.messageText = "所有 \(conflictedChanges.count) 个冲突文件都\(side.actionLabel)？"
+        alert.informativeText = "每个文件都会整个换成 \(source) 的版本（那一侧删掉的文件会被删除），然后标记为已解决。已经手工改过的内容会被覆盖。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: side.actionLabel)
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        await model.resolveAllConflicts(taking: side)
+    }
+
     /// 「已暂存」区里显示所有有暂存内容的文件；部分暂存的文件会同时出现在两个区里，
     /// 那是刻意的 —— 它确实两边都有内容，藏起任何一边都会让人误判。
     private var stagedChanges: [FileChange] {
@@ -119,7 +169,7 @@ struct ChangesView: View {
     }
 
     private var unstagedChanges: [FileChange] {
-        model.status.changes.filter { $0.unstaged != nil }
+        model.status.changes.filter { $0.unstaged != nil && !$0.isConflicted }
     }
 
     /// 同一个文件可能同时出现在「已暂存」和「未暂存」两区，路径本身不足以表示选择。
@@ -272,6 +322,100 @@ private struct ChangeRow: View {
     }
 }
 
+// MARK: - 冲突文件行
+
+private struct ConflictRow: View {
+    let change: FileChange
+    let model: WorktreeModel
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Text(ChangeKind.unmerged.badge)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(.red)
+                .frame(width: 14, height: 14)
+                .background(Color.red.opacity(0.15), in: RoundedRectangle(cornerRadius: 3))
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text(change.displayName)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                HStack(spacing: 4) {
+                    Text(change.conflict?.label ?? "冲突")
+                        .foregroundStyle(.red)
+                    if change.directory != "." {
+                        Text("·")
+                        Text(change.directory)
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                    }
+                }
+                .font(.system(size: 9.5))
+                .foregroundStyle(.tertiary)
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                Task { await confirmMarkResolved() }
+            } label: {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 9, weight: .bold))
+            }
+            .buttonStyle(.borderless)
+            .help("标记为已解决：把工作区里现在的内容当作结果")
+        }
+        .padding(.vertical, 1)
+        .contextMenu {
+            Button("采用当前更改") { Task { await model.resolveConflict(change, taking: .ours) } }
+            Button("采用传入的更改") { Task { await model.resolveConflict(change, taking: .theirs) } }
+            Button("标记为已解决") { Task { await confirmMarkResolved() } }
+            Divider()
+            Button("打开文件") {
+                SystemActions.openFile(in: model.path, path: change.path)
+            }
+            Button("在 Finder 显示") {
+                SystemActions.revealInFinder(model.path.appendingPathComponent(change.path))
+            }
+            Button("复制路径") { SystemActions.copyToPasteboard(change.path) }
+            if change.conflict?.hasTextualMarkers == true {
+                Divider()
+                Button("恢复冲突标记…") { Task { await confirmRestore() } }
+            }
+        }
+    }
+
+    /// 带着 `<<<<<<<` 提交出去是冲突解决里最常见的事故，标记前先数一遍。
+    @MainActor
+    private func confirmMarkResolved() async {
+        let remaining = model.unresolvedMarkerCount(in: change)
+        if remaining > 0 {
+            let alert = NSAlert()
+            alert.messageText = "文件里还有 \(remaining) 处冲突标记"
+            alert.informativeText = "「\(change.displayName)」里仍然有 <<<<<<< 这样的标记。现在标记为已解决，这些标记会原样进入提交。"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "仍然标记为已解决")
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        await model.markConflictResolved(change)
+    }
+
+    @MainActor
+    private func confirmRestore() async {
+        let alert = NSAlert()
+        alert.messageText = "恢复「\(change.displayName)」的冲突标记？"
+        alert.informativeText = "文件会回到 git 刚合并完的样子，在这个文件里做的所有选择和手工修改都会丢失。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "恢复")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        await model.restoreConflictMarkers(change)
+    }
+}
+
 // MARK: - 提交框
 
 private struct CommitBox: View {
@@ -348,14 +492,14 @@ private struct CommitBox: View {
                         Text("提交")
                     }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.bordered)
                 .disabled(!model.canCommit)
                 .keyboardShortcut(.return, modifiers: .command)
                 .help("⌘↩")
             }
 
             if model.status.hasConflicts {
-                Label("先解决冲突再提交", systemImage: "exclamationmark.triangle.fill")
+                Label("先把上面「冲突」区的文件都标记为已解决，才能提交", systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.orange)
             } else if model.status.stagedCount == 0 && !model.amendLastCommit {

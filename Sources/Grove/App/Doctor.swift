@@ -188,7 +188,7 @@ enum Doctor {
         }
         line("仓库", slug)
         do {
-            let pullRequests = try await forge.pullRequests(in: root, limit: 10, includeClosed: false)
+            let pullRequests = try await forge.pullRequests(in: root, limit: 10, state: .open)
             print("开放的\(forge.kind.termLong)：\(pullRequests.count) 个")
             for pullRequest in pullRequests {
                 var parts = [pullRequest.displayNumber, pullRequest.title]

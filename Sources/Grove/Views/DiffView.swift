@@ -71,7 +71,7 @@ struct DiffPane: View {
             if let change = model.selectedChange {
                 Image(systemName: change.primaryKind.systemImage)
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(change.isConflicted ? AnyShapeStyle(Color.red) : AnyShapeStyle(.secondary))
                 Text(change.path)
                     .font(.system(size: 11.5, design: .monospaced))
                     .lineLimit(1)
@@ -85,6 +85,15 @@ struct DiffPane: View {
                         .lineLimit(1)
                         .truncationMode(.head)
                 }
+
+                if let kind = change.conflict {
+                    Text(kind.label)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.red)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.red.opacity(0.12), in: Capsule())
+                }
             } else {
                 Text("未选择文件")
                     .font(.system(size: 11))
@@ -93,7 +102,18 @@ struct DiffPane: View {
 
             Spacer(minLength: 8)
 
-            if let change = model.selectedChange, change.isPartiallyStaged {
+            if let change = model.selectedChange, change.conflict?.hasTextualMarkers == true {
+                // 逐块解决是主路径；combined diff 留给想看「git 眼里两边各改了什么」的人。
+                Picker("", selection: $model.conflictViewMode) {
+                    ForEach(WorktreeModel.ConflictViewMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .controlSize(.small)
+            } else if let change = model.selectedChange, change.isPartiallyStaged {
                 // 只有「两边都有内容」时这个切换才有意义。文件只在一侧有改动时
                 // 显示切换只会诱导用户点到一个空面板。
                 Picker("", selection: $model.diffSide) {
@@ -120,17 +140,28 @@ struct DiffPane: View {
                 } description: {
                     Text("从左侧列表挑一个文件查看它的改动。")
                 }
+            } else if let change = model.selectedChange, showsConflictPane(for: change) {
+                ConflictPane(model: model, change: change)
             } else if let diff = model.diff {
                 if diff.isEmpty {
                     emptyDiffExplanation
                 } else {
-                    DiffContentView(files: diff, model: model)
+                    // 冲突文件的 combined diff 只读：从三方 diff 里裁出来的补丁没法 `git apply`，
+                    // 勾行暂存只会报一堆看不懂的错。
+                    DiffContentView(files: diff, model: model.selectedChange?.isConflicted == true ? nil : model)
                 }
             } else {
                 ProgressView()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// 冲突文件默认进解决面板。没有标记可解析的形态（一侧删除、双方删除）
+    /// 只有解决面板一种看法 —— 那种文件的 combined diff 是空的。
+    private func showsConflictPane(for change: FileChange) -> Bool {
+        guard let kind = change.conflict else { return false }
+        return !kind.hasTextualMarkers || model.conflictViewMode == .resolve
     }
 
     /// diff 为空有好几种正当原因。直接显示空白会让人以为程序坏了，
@@ -184,7 +215,14 @@ struct DiffContentView: View {
                                     systemImage: "lock.rotation"
                                 )
                             } else if file.hunks.isEmpty {
-                                DiffNotice(text: "内容没有变化。", systemImage: "equal.circle")
+                                if file.isDiffMissing {
+                                    DiffNotice(
+                                        text: "文件过大，服务端未返回 diff 内容，本地也没有可补算的提交；请在浏览器中查看。",
+                                        systemImage: "exclamationmark.triangle"
+                                    )
+                                } else {
+                                    DiffNotice(text: "内容没有变化。", systemImage: "equal.circle")
+                                }
                             } else {
                                 ForEach(file.hunks) { hunk in
                                     HunkView(hunk: hunk, model: model)

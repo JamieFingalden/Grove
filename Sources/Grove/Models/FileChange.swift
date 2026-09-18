@@ -39,6 +39,71 @@ enum ChangeKind: String, Sendable, Hashable {
     }
 }
 
+/// 冲突的具体形态，来自 `git status` 未合并条目的 XY 两列。
+///
+/// X 说的是「当前侧」（HEAD，索引第 2 阶段），Y 是「传入侧」（第 3 阶段）。
+/// 这个信息决定了「采用一侧」该跑哪条命令：那一侧被删掉的文件没有内容可检出，
+/// 只能 `git rm`；不分清楚就会对着不存在的版本 `checkout --ours`，然后报错。
+enum ConflictKind: String, Sendable, Hashable, CaseIterable {
+    case bothModified = "UU"
+    case bothAdded = "AA"
+    /// 当前侧改了、传入侧删了。工作区里留着的是当前侧的版本。
+    case deletedByThem = "UD"
+    /// 当前侧删了、传入侧改了。工作区里留着的是传入侧的版本。
+    case deletedByUs = "DU"
+    case addedByUs = "AU"
+    case addedByThem = "UA"
+    /// 双方都删了。只会出现在重命名冲突里，解决办法只有一个：确认删除。
+    case bothDeleted = "DD"
+
+    var label: String {
+        switch self {
+        case .bothModified: "双方修改"
+        case .bothAdded: "双方新增"
+        case .deletedByThem: "传入侧已删除"
+        case .deletedByUs: "当前侧已删除"
+        case .addedByUs: "仅当前侧新增"
+        case .addedByThem: "仅传入侧新增"
+        case .bothDeleted: "双方删除"
+        }
+    }
+
+    /// 界面上的一句话解释，说清两侧各做了什么。
+    var explanation: String {
+        switch self {
+        case .bothModified: "两侧都改了这个文件，而且改到了同一片区域。"
+        case .bothAdded: "两侧各自新增了同名文件，内容不同。"
+        case .deletedByThem: "当前侧修改了这个文件，传入侧把它删了。"
+        case .deletedByUs: "当前侧删除了这个文件，传入侧又修改了它。"
+        case .addedByUs: "只有当前侧有这个文件（通常来自重命名冲突）。"
+        case .addedByThem: "只有传入侧有这个文件（通常来自重命名冲突）。"
+        case .bothDeleted: "两侧都删掉了这个文件。"
+        }
+    }
+
+    /// 当前侧（索引第 2 阶段）有没有内容。
+    var oursExists: Bool {
+        switch self {
+        case .bothModified, .bothAdded, .deletedByThem, .addedByUs: true
+        case .deletedByUs, .addedByThem, .bothDeleted: false
+        }
+    }
+
+    /// 传入侧（索引第 3 阶段）有没有内容。
+    var theirsExists: Bool {
+        switch self {
+        case .bothModified, .bothAdded, .deletedByUs, .addedByThem: true
+        case .deletedByThem, .addedByUs, .bothDeleted: false
+        }
+    }
+
+    /// git 只在两侧都有内容时才往工作区文件里写 `<<<<<<<` 标记。其余形态没有
+    /// 「逐块选」可言，整个文件就是「留下还是删掉」两个选项。
+    var hasTextualMarkers: Bool {
+        self == .bothModified || self == .bothAdded
+    }
+}
+
 /// 工作区里的一个变更条目。
 ///
 /// git 的状态是二维的：同一个文件可以「暂存区里是新增、工作区里又被改了」。
@@ -50,10 +115,12 @@ struct FileChange: Identifiable, Hashable, Sendable {
     var originalPath: String?
     var staged: ChangeKind?
     var unstaged: ChangeKind?
-    /// 冲突中。此时 staged/unstaged 都是 `.unmerged`。
-    var isConflicted: Bool
+    /// 处于冲突中时的具体形态。非 nil 即为冲突文件，此时 `unstaged` 是 `.unmerged`、
+    /// `staged` 为 nil —— 索引里躺着的是三个阶段的半成品，不是能提交的内容，不算「已暂存」。
+    var conflict: ConflictKind?
 
     var id: String { path }
+    var isConflicted: Bool { conflict != nil }
 
     var isStaged: Bool { staged != nil }
     var isFullyStaged: Bool { staged != nil && unstaged == nil }
@@ -94,7 +161,8 @@ struct WorktreeStatus: Sendable, Hashable {
     var isClean: Bool { changes.isEmpty }
     var stagedCount: Int { changes.filter(\.isStaged).count }
     var unstagedCount: Int { changes.filter { $0.unstaged != nil }.count }
-    var conflictCount: Int { changes.filter(\.isConflicted).count }
+    var conflictedChanges: [FileChange] { changes.filter(\.isConflicted) }
+    var conflictCount: Int { conflictedChanges.count }
     var hasConflicts: Bool { conflictCount > 0 }
 }
 
@@ -113,6 +181,40 @@ enum RepositoryOperation: String, Sendable, Hashable {
         case .cherryPick: "hand.point.up.left"
         case .revert: "arrow.uturn.backward"
         case .bisect: "magnifyingglass"
+        }
+    }
+
+    /// 动作本身的名字，拼进「继续合并」「中止变基」这类文案。
+    var verb: String {
+        switch self {
+        case .merge: "合并"
+        case .rebase: "变基"
+        case .cherryPick: "拣选"
+        case .revert: "回退"
+        case .bisect: "二分查找"
+        }
+    }
+
+    /// 对应的 git 子命令，`--continue / --skip / --abort` 都挂在它下面。
+    /// 二分查找没有这一套（它用 `bisect reset`），交给终端。
+    var commandName: String? {
+        switch self {
+        case .merge: "merge"
+        case .rebase: "rebase"
+        case .cherryPick: "cherry-pick"
+        case .revert: "revert"
+        case .bisect: nil
+        }
+    }
+
+    /// 能不能从 Grove 里「继续 / 中止」。
+    var isSteppable: Bool { commandName != nil }
+
+    /// `--skip` 只对逐个重放提交的操作有意义；合并只有一个结果可言，没得跳。
+    var supportsSkip: Bool {
+        switch self {
+        case .rebase, .cherryPick, .revert: true
+        case .merge, .bisect: false
         }
     }
 }

@@ -65,13 +65,19 @@ struct PullRequestListView: View {
                 } description: {
                     Text(message)
                 }
-            } else if repository.pullRequests.isEmpty {
+                // 不撑满的话 VStack 会缩成「头部 + 空态」那么高然后整体居中，
+                // 头部就跑到列中间去了。
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if repository.listPullRequests.isEmpty {
                 ContentUnavailableView {
-                    Label(repository.isRefreshingPullRequests ? "正在加载…" : "没有开放的 PR",
-                          systemImage: "arrow.triangle.pull")
+                    Label(repository.isRefreshingPullRequests ? "正在加载…" : repository.listState.emptyTitle,
+                          systemImage: repository.listState == .merged ? "arrow.triangle.merge"
+                          : repository.listState == .closed ? "xmark.circle"
+                          : "arrow.triangle.pull")
                 } description: {
                     Text(repository.slug.map { "仓库：\($0)" } ?? "")
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
                     ForEach(filtered) { pullRequest in
@@ -111,6 +117,17 @@ struct PullRequestListView: View {
 
             Spacer()
 
+            Picker("状态筛选", selection: listStateBinding) {
+                ForEach(PullRequestListState.allCases) { state in
+                    Text(state.label).tag(state)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .controlSize(.small)
+            .fixedSize()
+            .help("按状态筛选：开放、已合并、已关闭或全部")
+
             if repository.isRefreshingPullRequests {
                 ProgressView().controlSize(.mini)
             } else {
@@ -130,8 +147,8 @@ struct PullRequestListView: View {
 
     private var filtered: [PullRequest] {
         let query = searchText.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !query.isEmpty else { return repository.pullRequests }
-        return repository.pullRequests.filter { pullRequest in
+        guard !query.isEmpty else { return repository.listPullRequests }
+        return repository.listPullRequests.filter { pullRequest in
             pullRequest.title.lowercased().contains(query)
                 || pullRequest.headRefName.lowercased().contains(query)
                 || (pullRequest.author?.login.lowercased().contains(query) ?? false)
@@ -162,7 +179,7 @@ struct PullRequestListView: View {
     @ViewBuilder
     private var detail: some View {
         Group {
-            if let selection, let pullRequest = repository.pullRequests.first(where: { $0.number == selection }) {
+            if let selection, let pullRequest = repository.listPullRequests.first(where: { $0.number == selection }) {
                 PullRequestDetailView(
                     repository: repository,
                     pullRequest: pullRequest,
@@ -201,6 +218,19 @@ struct PullRequestListView: View {
     private func checkout(_ pullRequest: PullRequest) async {
         guard let worktree = await repository.createWorktree(forPullRequest: pullRequest) else { return }
         appModel.selection = .worktree(repository: repository.root, worktree: worktree.path)
+    }
+
+    /// 切状态筛选时清掉选中项：旧选中大概率不在新列表里，
+    /// 留着只会让详情区显示一个莫名的「选择一个 PR」。
+    private var listStateBinding: Binding<PullRequestListState> {
+        Binding(
+            get: { repository.listState },
+            set: { newState in
+                guard newState != repository.listState else { return }
+                selection = nil
+                Task { await repository.setPullRequestListState(newState) }
+            }
+        )
     }
 }
 

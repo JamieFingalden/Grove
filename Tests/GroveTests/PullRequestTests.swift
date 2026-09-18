@@ -120,6 +120,26 @@ final class PullRequestDecodingTests: XCTestCase {
     }
 }
 
+final class PullRequestListStateTests: XCTestCase {
+    /// 枚举的 rawValue 会直接拼进 `gh pr list --state` 和 GitLab 的 `state=`
+    /// 查询参数，两边都必须认识这些值；改名字等于同时改坏两个平台。
+    func testRawValuesMatchBothForges() {
+        XCTAssertEqual(
+            Set(PullRequestListState.allCases.map(\.rawValue)),
+            ["open", "merged", "closed", "all"]
+        )
+    }
+
+    func testLabelsAndEmptyTitles() {
+        XCTAssertEqual(PullRequestListState.open.label, "开放")
+        XCTAssertEqual(PullRequestListState.merged.label, "已合并")
+        XCTAssertEqual(PullRequestListState.closed.label, "已关闭")
+        XCTAssertEqual(PullRequestListState.all.label, "全部")
+        XCTAssertEqual(PullRequestListState.open.emptyTitle, "没有开放的请求")
+        XCTAssertEqual(PullRequestListState.merged.emptyTitle, "还没有已合并的请求")
+    }
+}
+
 final class CheckRollupTests: XCTestCase {
     fileprivate func check(status: String? = "COMPLETED", conclusion: String?) -> StatusCheck {
         StatusCheck(

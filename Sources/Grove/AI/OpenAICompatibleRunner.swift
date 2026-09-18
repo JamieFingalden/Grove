@@ -15,10 +15,50 @@ enum AIGenerationProvider: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// API 路径的思考强度。GLM 系列的 OpenAI 兼容接口用 `thinking.type`
+/// （enabled/disabled）开关深度思考；不带该字段时由服务端决定，
+/// 而默认开启思考的模型（含 GLM Flash 系列）生成会明显变慢。
+enum AIAPIThinkingMode: String, CaseIterable, Identifiable, Sendable {
+    case `default`
+    case enabled
+    case disabled
+
+    var id: String { rawValue }
+
+    var name: String {
+        switch self {
+        case .default: "跟随服务默认"
+        case .enabled: "开启深度思考"
+        case .disabled: "关闭思考"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .default:
+            "不发送思考参数，由服务端决定；默认开启思考的模型（如 GLM Flash）速度较慢。"
+        case .enabled:
+            "强制开启深度思考，质量优先，耗时和额度消耗更高。"
+        case .disabled:
+            "请求关闭思考，速度优先；适合用 GLM Flash 这类模型快速评审。"
+        }
+    }
+
+    /// 发送到 `thinking.type` 的值；默认模式返回 nil 表示不带该字段。
+    var requestThinkingType: String? {
+        switch self {
+        case .default: nil
+        case .enabled: "enabled"
+        case .disabled: "disabled"
+        }
+    }
+}
+
 struct AIAPIConfiguration: Sendable, Equatable {
     var baseURL: String
     var model: String
     var apiKey: String
+    var thinking: AIAPIThinkingMode = .default
 
     private var rootURL: URL? {
         let value = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -180,7 +220,8 @@ enum OpenAICompatibleRunner {
         """
         let body = RequestBody(
             model: configuration.model.trimmingCharacters(in: .whitespacesAndNewlines),
-            messages: [.init(role: "user", content: instructions)]
+            messages: [.init(role: "user", content: instructions)],
+            thinking: configuration.thinking.requestThinkingType.map { .init(type: $0) }
         )
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -200,8 +241,14 @@ enum OpenAICompatibleRunner {
             var content: String
         }
 
+        struct Thinking: Encodable {
+            var type: String
+        }
+
         var model: String
         var messages: [Message]
+        /// nil 时合成编码器会直接省略字段，不影响不支持该参数的服务。
+        var thinking: Thinking?
     }
 
     private struct Response: Decodable {

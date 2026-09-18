@@ -273,3 +273,90 @@ final class LivePullRequestRenderHarness: XCTestCase {
         print("已渲染：\(path)")
     }
 }
+
+/// 渲染冲突解决面板：一个双方修改、一个传入侧删除，外加变基/合并横幅。
+///
+/// ```sh
+/// GROVE_RENDER=1 swift test --filter ConflictRenderHarness
+/// ```
+@MainActor
+final class ConflictRenderHarness: XCTestCase {
+    func testRenderConflictResolution() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["GROVE_RENDER"] == "1", "设置 GROVE_RENDER=1 才会渲染")
+
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("grove-render-conflict-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let git = try await GitClient.resolve()
+        func write(_ text: String, to name: String) throws {
+            try text.write(to: root.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        try await git.run(["init", "-q", "-b", "main"], in: root)
+        try await git.run(["config", "user.email", "t@example.com"], in: root)
+        try await git.run(["config", "user.name", "测试"], in: root)
+        try write((1...40).map { "line \($0)" }.joined(separator: "\n") + "\n", to: "src/app.swift".replacingOccurrences(of: "src/", with: ""))
+        try write("keep\n", to: "delme.txt")
+        try await git.run(["add", "-A"], in: root); try await git.run(["commit", "-qm", "初始"], in: root)
+        try await git.run(["checkout", "-q", "-b", "feature/login"], in: root)
+        var lines = (1...40).map { "line \($0)" }
+        lines[4] = "func login() { /* feature */ }"
+        lines[30] = "let retries = 5"
+        try write(lines.joined(separator: "\n") + "\n", to: "app.swift")
+        try FileManager.default.removeItem(at: root.appendingPathComponent("delme.txt"))
+        try await git.run(["add", "-A"], in: root); try await git.run(["commit", "-qm", "feat: 登录"], in: root)
+        try await git.run(["checkout", "-q", "main"], in: root)
+        lines = (1...40).map { "line \($0)" }
+        lines[4] = "func login() { /* main */ }"
+        lines[30] = "let retries = 3"
+        try write(lines.joined(separator: "\n") + "\n", to: "app.swift")
+        try write("keep\nmain-change\n", to: "delme.txt")
+        try await git.run(["add", "-A"], in: root); try await git.run(["commit", "-qm", "chore: 主干"], in: root)
+        _ = try? await git.run(["merge", "feature/login"], in: root)
+
+        let app = AppModel()
+        await app.bootstrap()
+        guard let repository = await app.openRepository(at: root, persist: false, select: false) else {
+            XCTFail("打不开临时仓库"); return
+        }
+        guard let worktreePath = repository.worktrees.first?.path,
+              let model = repository.worktreeModel(for: worktreePath) else {
+            XCTFail("没有工作树"); return
+        }
+        await model.refresh()
+        app.selection = .worktree(repository: repository.root, worktree: worktreePath)
+        model.selectedPath = "app.swift"
+        try await Task.sleep(for: .milliseconds(800))
+        if case .editor(let editor) = model.conflictContent, let first = editor.document.blocks.first {
+            model.resolveBlock(first, with: .both)
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        try render(RootView().environment(app), size: CGSize(width: 1280, height: 860), to: "/tmp/grove-render-conflict.png")
+
+        model.selectedPath = "delme.txt"
+        try await Task.sleep(for: .milliseconds(800))
+        try render(RootView().environment(app), size: CGSize(width: 1280, height: 860), to: "/tmp/grove-render-conflict-deleted.png")
+    }
+
+    private func render(_ view: some View, size: CGSize, to path: String) throws {
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = CGRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: hosting.frame, styleMask: [.titled, .resizable],
+                              backing: .buffered, defer: false)
+        window.contentView = hosting
+        window.layoutIfNeeded()
+        hosting.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(1.5))
+        hosting.layoutSubtreeIfNeeded()
+        guard let representation = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+            XCTFail("无法创建位图"); return
+        }
+        hosting.cacheDisplay(in: hosting.bounds, to: representation)
+        guard let data = representation.representation(using: .png, properties: [:]) else {
+            XCTFail("无法编码 PNG"); return
+        }
+        try data.write(to: URL(fileURLWithPath: path))
+        print("已渲染：\(path)")
+    }
+}

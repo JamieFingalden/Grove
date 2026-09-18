@@ -8,7 +8,7 @@ final class DiffSideSelectionTests: XCTestCase {
             originalPath: nil,
             staged: .modified,
             unstaged: nil,
-            isConflicted: false
+            conflict: nil
         )
 
         XCTAssertEqual(WorktreeModel.validDiffSide(for: change, preferred: .worktree), .staged)
@@ -20,7 +20,7 @@ final class DiffSideSelectionTests: XCTestCase {
             originalPath: nil,
             staged: nil,
             unstaged: .modified,
-            isConflicted: false
+            conflict: nil
         )
 
         XCTAssertEqual(WorktreeModel.validDiffSide(for: change, preferred: .staged), .worktree)
@@ -32,7 +32,7 @@ final class DiffSideSelectionTests: XCTestCase {
             originalPath: nil,
             staged: .modified,
             unstaged: .modified,
-            isConflicted: false
+            conflict: nil
         )
 
         XCTAssertEqual(WorktreeModel.validDiffSide(for: change, preferred: .staged), .staged)

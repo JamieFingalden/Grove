@@ -355,12 +355,7 @@ struct GitClient: Sendable {
     /// 没有别的命令能直接问出来。注意工作树的 git 目录是 `<repo>/.git/worktrees/<name>`，
     /// 不是主仓库的 `.git`，所以必须现问一次。
     func currentOperation(in directory: URL) async -> RepositoryOperation? {
-        guard let gitDirPath = try? await run(
-            ["rev-parse", "--path-format=absolute", "--git-dir"], in: directory
-        ).trimmingCharacters(in: .whitespacesAndNewlines), !gitDirPath.isEmpty else {
-            return nil
-        }
-        let gitDir = URL(fileURLWithPath: gitDirPath)
+        guard let gitDir = await gitDirectory(in: directory) else { return nil }
         let fileManager = FileManager.default
 
         func exists(_ name: String) -> Bool {
@@ -376,6 +371,17 @@ struct GitClient: Sendable {
         if exists("MERGE_HEAD") { return .merge }
         if exists("BISECT_LOG") { return .bisect }
         return nil
+    }
+
+    /// 这个工作树自己的 git 目录。主工作树是 `<repo>/.git`，
+    /// 其他工作树是 `<repo>/.git/worktrees/<name>` —— 操作状态文件都在这里。
+    func gitDirectory(in directory: URL) async -> URL? {
+        guard let path = try? await run(
+            ["rev-parse", "--path-format=absolute", "--git-dir"], in: directory
+        ).trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: path)
     }
 
     /// 仓库配置的所有远端。多远端的仓库推送时要让用户选推到哪个。
@@ -560,16 +566,27 @@ struct GitClient: Sendable {
         try await run(arguments, in: directory, timeout: ProcessRunner.networkTimeout)
     }
 
-    enum RebaseStep: String, Sendable {
+    enum OperationStep: String, Sendable {
         case cont = "--continue"
         case skip = "--skip"
         case abort = "--abort"
     }
 
-    /// 变基中途的三种出路。没有它们的话，一旦冲突用户就被卡在半截状态里，
-    /// 只能回终端 —— 那等于这个功能没做完。
+    typealias RebaseStep = OperationStep
+
+    /// 多步操作中途的出路：继续 / 跳过 / 中止。合并、变基、拣选、回退共用一套。
+    /// 没有它们的话，一旦冲突用户就被卡在半截状态里，只能回终端 —— 那等于功能没做完。
+    ///
+    /// `--continue` 需要提交信息时会去起编辑器；环境里 `GIT_EDITOR=true` 让它直接接受默认信息。
+    func operationStep(_ step: OperationStep, of operation: RepositoryOperation, in directory: URL) async throws {
+        guard let command = operation.commandName else {
+            throw GroveError.operationNotSteppable(operation)
+        }
+        try await run([command, step.rawValue], in: directory, timeout: ProcessRunner.networkTimeout)
+    }
+
     func rebaseStep(_ step: RebaseStep, in directory: URL) async throws {
-        try await run(["rebase", step.rawValue], in: directory, timeout: ProcessRunner.networkTimeout)
+        try await operationStep(step, of: .rebase, in: directory)
     }
 
     /// 变基会重放多少个提交。变基前拿它给用户一个「将要发生什么」的预览。
@@ -583,6 +600,171 @@ struct GitClient: Sendable {
     /// 这个引用存不存在。变基目标可能是用户手敲的，先验一下比让 git 报错友好。
     func refExists(_ ref: String, in directory: URL) async -> Bool {
         await succeeds(["rev-parse", "--verify", "--quiet", "\(ref)^{commit}"], in: directory)
+    }
+
+    // MARK: - 冲突
+
+    enum ConflictSide: String, Sendable {
+        /// 当前侧：HEAD，索引第 2 阶段。合并时是当前分支；**变基时是变基目标**，因为 HEAD 停在那儿。
+        case ours
+        /// 传入侧：索引第 3 阶段。合并时是被合入的分支；变基时是正在重放的提交。
+        case theirs
+
+        var checkoutFlag: String {
+            switch self {
+            case .ours: "--ours"
+            case .theirs: "--theirs"
+            }
+        }
+
+        var actionLabel: String {
+            switch self {
+            case .ours: "采用当前更改"
+            case .theirs: "采用传入的更改"
+            }
+        }
+    }
+
+    /// 整个文件采用一侧。
+    ///
+    /// 那一侧有内容就检出再 add；那一侧是「删除」就 rm。两种都以「索引里不再有
+    /// 未合并条目」结束，也就是 git 眼里的已解决。一侧不存在时 `checkout --ours`
+    /// 会报 "does not have our version"，所以必须先看 `kind` 再决定走哪条。
+    func resolveConflict(
+        path: String,
+        taking side: ConflictSide,
+        kind: ConflictKind,
+        in directory: URL
+    ) async throws {
+        let sideHasContent = side == .ours ? kind.oursExists : kind.theirsExists
+        if sideHasContent {
+            try await run(["checkout", side.checkoutFlag, "--", path], in: directory)
+            try await run(["add", "--", path], in: directory)
+        } else {
+            try await run(["rm", "--quiet", "--", path], in: directory)
+        }
+    }
+
+    /// 把工作区里现在的内容当作解决结果。文件还在就 add，被用户删了就 rm。
+    func markConflictResolved(path: String, in directory: URL) async throws {
+        let url = directory.appendingPathComponent(path)
+        // 用 attributesOfItem 而不是 fileExists：后者会顺着符号链接走，
+        // 一个指向已删目标的链接会被误判成「文件没了」然后被 rm 掉。
+        if (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil {
+            try await run(["add", "--", path], in: directory)
+        } else {
+            try await run(["rm", "--quiet", "--", path], in: directory)
+        }
+    }
+
+    /// 把文件恢复成 git 刚合并完、带冲突标记的样子。用户改乱了想重来时用。
+    /// 只对索引里仍未合并的路径有效 —— 一旦 add 过，三个阶段就没了，重来只能中止整个操作。
+    /// 注意重建出来的标记标签是固定的 `ours` / `theirs`，不再是分支名。
+    func restoreConflictMarkers(path: String, in directory: URL) async throws {
+        try await run(["checkout", "--merge", "--", path], in: directory)
+    }
+
+    /// 冲突两侧各是谁。
+    ///
+    /// 每种操作把「传入侧」记在不同地方：合并是 `MERGE_HEAD`，变基是 `REBASE_HEAD`
+    /// 加 `rebase-merge/` 目录里的 `head-name` / `onto`，拣选和回退各有自己的 `*_HEAD`。
+    /// 这里把它们统一翻译成两句人话，供两个按钮旁边显示。
+    func conflictContext(
+        operation: RepositoryOperation?,
+        branch: String?,
+        in directory: URL
+    ) async -> ConflictContext {
+        let current = branch ?? "HEAD"
+
+        switch operation {
+        case .merge:
+            var incoming = await refName(pointingAt: "MERGE_HEAD", in: directory)
+            if incoming == nil { incoming = await commitSummary("MERGE_HEAD", in: directory) }
+            return ConflictContext(
+                operation: operation,
+                oursLabel: "\(current)（当前分支）",
+                theirsLabel: "\(incoming ?? "MERGE_HEAD")（正在合入）"
+            )
+
+        case .rebase:
+            let gitDir = await gitDirectory(in: directory)
+            func stateFile(_ name: String) -> String? {
+                guard let gitDir else { return nil }
+                for stateDirectory in ["rebase-merge", "rebase-apply"] {
+                    let url = gitDir.appendingPathComponent(stateDirectory).appendingPathComponent(name)
+                    if let text = try? String(contentsOf: url, encoding: .utf8) {
+                        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+                return nil
+            }
+            let rebasedBranch = stateFile("head-name").map { name in
+                name.hasPrefix("refs/heads/") ? String(name.dropFirst("refs/heads/".count)) : name
+            }
+            let onto = stateFile("onto")
+            var ontoName = "变基目标"
+            if let onto {
+                ontoName = await refName(pointingAt: onto, in: directory) ?? String(onto.prefix(7))
+            }
+            var incoming = "正在重放的提交"
+            if let summary = await commitSummary("REBASE_HEAD", in: directory) {
+                incoming += " \(summary)"
+            }
+            if let rebasedBranch { incoming += "（来自 \(rebasedBranch)）" }
+            return ConflictContext(
+                operation: operation,
+                oursLabel: "\(ontoName)（变基目标，HEAD 停在这里）",
+                theirsLabel: incoming
+            )
+
+        case .cherryPick:
+            let summary = await commitSummary("CHERRY_PICK_HEAD", in: directory) ?? ""
+            return ConflictContext(
+                operation: operation,
+                oursLabel: "\(current)（当前分支）",
+                theirsLabel: "拣选的提交 \(summary)".trimmingCharacters(in: .whitespaces)
+            )
+
+        case .revert:
+            let summary = await commitSummary("REVERT_HEAD", in: directory) ?? ""
+            return ConflictContext(
+                operation: operation,
+                oursLabel: "\(current)（当前分支）",
+                theirsLabel: "回退 \(summary) 产生的改动".replacingOccurrences(of: "  ", with: " ")
+            )
+
+        case .bisect, nil:
+            // 没有操作却有冲突：`git stash pop`、`git checkout -m`、`git apply -3` 之类。
+            return ConflictContext(
+                operation: operation,
+                oursLabel: "\(current)（当前分支）",
+                theirsLabel: "正在应用的改动（stash 或补丁）"
+            )
+        }
+    }
+
+    /// 指向某个提交的第一个分支名（本地优先，其次远端）。没有就 nil。
+    func refName(pointingAt object: String, in directory: URL) async -> String? {
+        guard let result = try? await runRaw(
+            ["for-each-ref", "--points-at", object, "--format=%(refname:short)", "refs/heads", "refs/remotes"],
+            in: directory
+        ), result.isSuccess else { return nil }
+        return result.stdout
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty }
+    }
+
+    /// `abc1234「提交标题」`。标题太长就截断 —— 这是放在按钮旁边的说明，不是提交详情。
+    func commitSummary(_ ref: String, in directory: URL) async -> String? {
+        guard let result = try? await runRaw(
+            ["log", "-1", "--format=%h%x1f%s", ref], in: directory
+        ), result.isSuccess else { return nil }
+        let parts = result.trimmedStdout.components(separatedBy: "\u{1F}")
+        guard let hash = parts.first, !hash.isEmpty else { return nil }
+        var subject = parts.count > 1 ? parts[1] : ""
+        if subject.count > 40 { subject = String(subject.prefix(40)) + "…" }
+        return subject.isEmpty ? hash : "\(hash)「\(subject)」"
     }
 
     // MARK: - 工作树管理
@@ -661,6 +843,7 @@ enum GroveError: LocalizedError, Sendable {
     case noGitHubRemote
     case worktreePathExists(URL)
     case branchAlreadyCheckedOut(branch: String, worktree: URL)
+    case operationNotSteppable(RepositoryOperation)
 
     var errorDescription: String? {
         switch self {
@@ -678,6 +861,8 @@ enum GroveError: LocalizedError, Sendable {
             "目录已存在：\(url.path)"
         case .branchAlreadyCheckedOut(let branch, let worktree):
             "分支 \(branch) 已经在工作树「\(worktree.lastPathComponent)」里检出了。git 不允许同一分支同时存在于两个工作树。"
+        case .operationNotSteppable(let operation):
+            "\(operation.rawValue)的状态无法从 Grove 里继续或中止，请在终端处理。"
         }
     }
 }

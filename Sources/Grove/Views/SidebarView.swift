@@ -33,21 +33,18 @@ struct SidebarView: View {
                         }
                     }
 
-                    // 只要有远端就把入口留着。以前是 slug 拿到了才显示 ——
-                    // 于是 GitLab 没登录、或者 gh 还没认出仓库时，整行直接消失，
-                    // 用户根本不知道有这个功能，更不知道差哪一步。
-                    if repository.hasRemote {
-                        let selection = AppModel.Selection.pullRequests(repository: repository.root)
-                        let isSelected = model.selection == selection
+                    // 入口始终保留：远端状态的读取失败不该让评审功能凭空消失；
+                    // 点进去会说明是无远端、平台未识别，还是 CLI 未登录。
+                    let selection = AppModel.Selection.pullRequests(repository: repository.root)
+                    let isSelected = model.selection == selection
 
-                        Button {
-                            model.selection = selection
-                        } label: {
-                            PullRequestsRow(repository: repository, isSelected: isSelected)
-                        }
-                        .buttonStyle(.plain)
-                        .listRowBackground(selectionBackground(isSelected))
+                    Button {
+                        model.selection = selection
+                    } label: {
+                        PullRequestsRow(repository: repository, isSelected: isSelected)
                     }
+                    .buttonStyle(.plain)
+                    .listRowBackground(selectionBackground(isSelected))
                 } header: {
                     RepositoryHeader(repository: repository, sheet: $sheet)
                 }

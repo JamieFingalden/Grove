@@ -99,9 +99,52 @@ final class StatusParserTests: XCTestCase {
 
         XCTAssertEqual(status.changes.count, 1)
         XCTAssertTrue(status.changes[0].isConflicted)
+        XCTAssertEqual(status.changes[0].conflict, .bothModified)
         XCTAssertEqual(status.changes[0].path, "conflicted.swift")
         XCTAssertTrue(status.hasConflicts)
         XCTAssertEqual(status.conflictCount, 1)
+        // 冲突文件不算已暂存：索引里是三个阶段的半成品，提交按钮不该把它数进去。
+        XCTAssertEqual(status.stagedCount, 0)
+        XCTAssertEqual(status.changes[0].unstaged, .unmerged)
+    }
+
+    func testUnmergedKindsFollowTheXYColumns() {
+        let data = makeData([
+            "u AA N... 000000 100644 100644 100644 h0 h2 h3 added.txt",
+            "u UD N... 100644 100644 000000 100644 h1 h2 h0 deleted-by-them.txt",
+            "u DU N... 100644 000000 100644 100644 h1 h0 h3 deleted-by-us.txt",
+            "u AU N... 000000 100644 000000 100644 h0 h2 h0 added-by-us.txt",
+            "u UA N... 000000 000000 100644 100644 h0 h0 h3 added-by-them.txt",
+            "u DD N... 100644 000000 000000 000000 h1 h0 h0 both-deleted.txt"
+        ])
+
+        let status = StatusParser.parse(data)
+        let byPath = Dictionary(uniqueKeysWithValues: status.changes.map { ($0.path, $0) })
+
+        // 「采用一侧」要靠这个形态决定是检出还是删除，认错了会对着不存在的版本 checkout。
+        XCTAssertEqual(byPath["added.txt"]?.conflict, .bothAdded)
+        XCTAssertEqual(byPath["deleted-by-them.txt"]?.conflict, .deletedByThem)
+        XCTAssertEqual(byPath["deleted-by-us.txt"]?.conflict, .deletedByUs)
+        XCTAssertEqual(byPath["added-by-us.txt"]?.conflict, .addedByUs)
+        XCTAssertEqual(byPath["added-by-them.txt"]?.conflict, .addedByThem)
+        XCTAssertEqual(byPath["both-deleted.txt"]?.conflict, .bothDeleted)
+        XCTAssertEqual(status.conflictCount, 6)
+
+        XCTAssertTrue(ConflictKind.deletedByThem.oursExists)
+        XCTAssertFalse(ConflictKind.deletedByThem.theirsExists)
+        XCTAssertFalse(ConflictKind.deletedByUs.oursExists)
+        XCTAssertTrue(ConflictKind.deletedByUs.theirsExists)
+        XCTAssertFalse(ConflictKind.bothDeleted.oursExists)
+        XCTAssertFalse(ConflictKind.bothDeleted.theirsExists)
+        XCTAssertTrue(ConflictKind.bothAdded.hasTextualMarkers)
+        XCTAssertFalse(ConflictKind.deletedByUs.hasTextualMarkers)
+    }
+
+    func testUnknownUnmergedCodeStillCountsAsConflict() {
+        // 未来 git 新增的组合也不能让文件从列表里消失。
+        let data = makeData(["u XX N... 100644 100644 100644 100644 h1 h2 h3 odd.txt"])
+        let status = StatusParser.parse(data)
+        XCTAssertTrue(status.changes[0].isConflicted)
     }
 
     func testUntrackedAndIgnored() {

@@ -38,7 +38,7 @@ enum StatusParser {
             case "?":
                 let path = String(field.dropFirst(2))
                 if !path.isEmpty {
-                    changes.append(FileChange(path: path, originalPath: nil, staged: nil, unstaged: .untracked, isConflicted: false))
+                    changes.append(FileChange(path: path, originalPath: nil, staged: nil, unstaged: .untracked, conflict: nil))
                 }
             case "!":
                 break   // 被忽略的文件不进变更列表
@@ -87,7 +87,7 @@ enum StatusParser {
         let parts = field.split(separator: " ", maxSplits: 8, omittingEmptySubsequences: false).map(String.init)
         guard parts.count == 9 else { return nil }
         let (staged, unstaged) = decodeXY(parts[1])
-        return FileChange(path: parts[8], originalPath: nil, staged: staged, unstaged: unstaged, isConflicted: false)
+        return FileChange(path: parts[8], originalPath: nil, staged: staged, unstaged: unstaged, conflict: nil)
     }
 
     /// `2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>`，来源路径在下一段。
@@ -95,14 +95,18 @@ enum StatusParser {
         let parts = field.split(separator: " ", maxSplits: 9, omittingEmptySubsequences: false).map(String.init)
         guard parts.count == 10 else { return nil }
         let (staged, unstaged) = decodeXY(parts[1])
-        return FileChange(path: parts[9], originalPath: originalPath, staged: staged, unstaged: unstaged, isConflicted: false)
+        return FileChange(path: parts[9], originalPath: originalPath, staged: staged, unstaged: unstaged, conflict: nil)
     }
 
     /// `u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>`
     private static func parseUnmerged(_ field: String) -> FileChange? {
         let parts = field.split(separator: " ", maxSplits: 10, omittingEmptySubsequences: false).map(String.init)
         guard parts.count == 11 else { return nil }
-        return FileChange(path: parts[10], originalPath: nil, staged: .unmerged, unstaged: .unmerged, isConflicted: true)
+        // 不认识的 XY 组合也别丢掉这条记录 —— 文件确实在冲突中，宁可少一点细节。
+        let kind = ConflictKind(rawValue: parts[1]) ?? .bothModified
+        // 冲突文件只放在「未暂存」一侧、不算已暂存：算进去的话提交按钮会显示
+        // 「提交 N 项」，点下去再被 git 以 "unmerged files" 拒掉。
+        return FileChange(path: parts[10], originalPath: nil, staged: nil, unstaged: .unmerged, conflict: kind)
     }
 
     /// XY 两个字符分别是暂存区、工作区的状态，`.` 表示这一侧没变化。

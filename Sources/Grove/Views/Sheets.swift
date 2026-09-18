@@ -950,6 +950,18 @@ struct PreferencesView: View {
                         }
                     }
 
+                    Picker("思考模式", selection: apiThinking) {
+                        ForEach(AIAPIThinkingMode.allCases) { mode in
+                            Text(mode.name).tag(mode)
+                        }
+                    }
+                    .disabled(!model.isAIGenerationEnabled)
+
+                    Text(model.aiAPIThinking.summary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
                     HStack {
                         Label(
                             model.hasAIAPIKey ? "API 密钥已保存在 macOS 钥匙串中" : "尚未保存 API 密钥",
@@ -1077,6 +1089,10 @@ struct PreferencesView: View {
 
     private var apiModel: Binding<String> {
         Binding(get: { model.aiAPIModel }, set: { model.setAIAPIModel($0) })
+    }
+
+    private var apiThinking: Binding<AIAPIThinkingMode> {
+        Binding(get: { model.aiAPIThinking }, set: { model.setAIAPIThinking($0) })
     }
 
     private func saveAPIKey(_ key: String) {

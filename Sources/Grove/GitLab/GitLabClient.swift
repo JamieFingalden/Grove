@@ -284,10 +284,11 @@ struct GitLabClient: ForgeClient {
 
     // MARK: - 查询
 
-    func pullRequests(in directory: URL, limit: Int, includeClosed: Bool) async throws -> [PullRequest] {
+    func pullRequests(in directory: URL, limit: Int, state: PullRequestListState) async throws -> [PullRequest] {
         var query = "projects/:id/merge_requests?per_page=\(limit)&order_by=updated_at"
         query += "&with_labels_details=true"
-        query += includeClosed ? "&state=all" : "&state=opened"
+        // GitLab 的「开放」拼 opened，其余状态两个平台的叫法一致。
+        query += state == .open ? "&state=opened" : "&state=\(state.rawValue)"
 
         let data = try await api(query, in: directory)
         let merges = try Self.decoder.decode([GitLabMergeRequest].self, from: data)
@@ -319,7 +320,7 @@ struct GitLabClient: ForgeClient {
             )
             return DiffParser.parse(CommandResult.decode(data))
         } catch let error as CommandFailure where error.output.contains("HTTP 404") {
-            // 较老的自建 GitLab 没有 raw_diffs，只能走已废弃但仍可用的 changes 接口。
+            // 较老的自建 GitLab（13.15 之前）没有 raw_diffs，只能走已废弃但仍可用的 changes 接口。
             // access_raw_diffs 绕过数据库的单文件大小限制，否则较大的文件会返回空 diff。
             // changes 里的 diff 从 @@ 开始，先补齐文件头再交给同一个解析器。
             let data = try await api(
@@ -327,7 +328,58 @@ struct GitLabClient: ForgeClient {
                 in: directory
             )
             let response = try Self.decoder.decode(GitLabMergeRequestChanges.self, from: data)
-            return DiffParser.parse(response.unifiedDiff)
+            var files = DiffParser.parse(response.unifiedDiff)
+            await Self.restoreMissingDiffs(response: response, files: &files, in: directory)
+            return files
+        }
+    }
+
+    /// 老版 GitLab 对单个文件的 diff 有大小上限，超限的文件在 `changes` 响应里
+    /// 只剩文件路径，`diff` 内容是空的 —— 界面上会误显示成「+0 −0 没有变化」。
+    /// 本地仓库通常有这些提交（MR 分支就在 origin），直接用 git 按同样的
+    /// 合并基重新算一遍；本地也算不出来时，把文件标记成「服务端未返回」，
+    /// 让界面给出真实的提示而不是误导性的「内容没有变化」。
+    private static func restoreMissingDiffs(
+        response: GitLabMergeRequestChanges,
+        files: inout [FileDiff],
+        in directory: URL
+    ) async {
+        let missing = response.changes.filter(\.isContentMissing)
+        guard !missing.isEmpty else { return }
+
+        guard let base = response.diffRefs?.baseSha,
+              let head = response.diffRefs?.headSha,
+              let git = try? await GitClient.resolve() else {
+            markMissing(missing, files: &files)
+            return
+        }
+
+        for change in missing {
+            // 三个点跟 GitLab 的语义一致：从合并基开始算。SHA 被本地 GC 掉时会抛错，
+            // 那就只标记不硬撑。
+            let text = try? await git.run(
+                ["diff", "--no-color", "--no-ext-diff", "--find-renames",
+                 "\(base)...\(head)", "--", change.oldPath, change.newPath],
+                in: directory
+            )
+            guard let text, !text.isEmpty, let restored = DiffParser.parse(text).first else {
+                markMissing([change], files: &files)
+                continue
+            }
+            if let index = files.firstIndex(where: { $0.id == restored.id }) {
+                files[index] = restored
+            }
+        }
+    }
+
+    private static func markMissing(
+        _ changes: [GitLabMergeRequestChanges.Change],
+        files: inout [FileDiff]
+    ) {
+        for change in changes {
+            if let index = files.firstIndex(where: { $0.id == change.newPath || $0.id == change.oldPath }) {
+                files[index].isDiffMissing = true
+            }
         }
     }
 
@@ -454,16 +506,33 @@ struct GitLabClient: ForgeClient {
 
     private struct GitLabMergeRequestChanges: Decodable {
         var changes: [Change]
+        /// 重新计算缺失 diff 要用的两个端点。
+        var diffRefs: DiffRefs?
+
+        struct DiffRefs: Decodable {
+            var baseSha: String
+            var headSha: String
+        }
 
         struct Change: Decodable {
             var oldPath: String
             var newPath: String
-            var diff: String
+            /// 超过单文件 diff 上限时这里是空串（老版本甚至不带这个字段），必须可选。
+            var diff: String?
             var newFile: Bool
             var deletedFile: Bool
             var renamedFile: Bool
             var aMode: String?
             var bMode: String?
+
+            /// 文本内容被服务端折叠掉了：不是新增/删除/纯重命名，模式位也没变，
+            /// 却没有任何 diff 内容。真正没有文本变化的情况（空新增、纯重命名、
+            /// 纯权限变更）都被排除在外。
+            var isContentMissing: Bool {
+                (diff ?? "").isEmpty
+                    && !newFile && !deletedFile && !renamedFile
+                    && aMode == bMode
+            }
 
             var unifiedDiff: String {
                 var lines = ["diff --git a/\(oldPath) b/\(newPath)"]
@@ -483,7 +552,7 @@ struct GitLabClient: ForgeClient {
 
                 lines.append(newFile ? "--- /dev/null" : "--- a/\(oldPath)")
                 lines.append(deletedFile ? "+++ /dev/null" : "+++ b/\(newPath)")
-                if !diff.isEmpty { lines.append(diff) }
+                if let diff, !diff.isEmpty { lines.append(diff) }
                 return lines.joined(separator: "\n")
             }
         }

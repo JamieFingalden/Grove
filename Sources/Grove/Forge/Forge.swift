@@ -93,6 +93,36 @@ struct ReviewThread: Identifiable, Hashable, Sendable {
     var isSystemOnly: Bool { notes.allSatisfy(\.isSystem) }
 }
 
+/// PR/MR 列表的状态过滤。GitHub（`gh pr list --state`）和 GitLab
+/// （`state=` 查询参数）都原生支持这四档，界面上的筛选直接透传。
+enum PullRequestListState: String, CaseIterable, Identifiable, Sendable {
+    case open
+    case merged
+    case closed
+    case all
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .open: "开放"
+        case .merged: "已合并"
+        case .closed: "已关闭"
+        case .all: "全部"
+        }
+    }
+
+    /// 列表为空时的提示语。
+    var emptyTitle: String {
+        switch self {
+        case .open: "没有开放的请求"
+        case .merged: "还没有已合并的请求"
+        case .closed: "没有已关闭的请求"
+        case .all: "没有任何请求"
+        }
+    }
+}
+
 /// Grove 跟代码托管商打交道的统一入口。
 ///
 /// GitHub 走 `gh`、GitLab 走 `glab`，两边的子命令、JSON 字段、概念名称都不一样，
@@ -113,7 +143,7 @@ protocol ForgeClient: Sendable {
     /// 首次推送仍由 GitClient 完成，两种平台保持完全一致的 Git 行为。
     func createRepository(_ request: NewRemoteRepository, in directory: URL) async throws
 
-    func pullRequests(in directory: URL, limit: Int, includeClosed: Bool) async throws -> [PullRequest]
+    func pullRequests(in directory: URL, limit: Int, state: PullRequestListState) async throws -> [PullRequest]
     func pullRequest(number: Int, in directory: URL) async throws -> PullRequest
     /// 某个分支对应的 PR/MR。找不到返回 nil（不是错误）。
     func pullRequest(forBranch branch: String, in directory: URL) async throws -> PullRequest?

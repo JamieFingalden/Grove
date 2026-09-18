@@ -112,6 +112,7 @@ struct AIGenerationSettings {
     private let reviewReasoningEffortKey = "grove.aiReview.reasoningEffort.v1"
     private let apiBaseURLKey = "grove.aiGeneration.api.baseURL.v1"
     private let apiModelKey = "grove.aiGeneration.api.model.v1"
+    private let apiThinkingKey = "grove.aiGeneration.api.thinking.v1"
     private let reviewInstructionsKey = "grove.aiReview.promptByRepository.v2"
     private let reviewAreasKey = "grove.aiReview.areasByRepository.v1"
     private let legacyReviewInstructionsKey = "grove.aiReview.instructionsByRepository.v1"
@@ -154,6 +155,15 @@ struct AIGenerationSettings {
         defaults.set(model, forKey: apiModelKey)
     }
 
+    var apiThinking: AIAPIThinkingMode {
+        defaults.string(forKey: apiThinkingKey)
+            .flatMap(AIAPIThinkingMode.init(rawValue:)) ?? .default
+    }
+
+    func setAPIThinking(_ mode: AIAPIThinkingMode) {
+        defaults.set(mode.rawValue, forKey: apiThinkingKey)
+    }
+
     var hasAPIKey: Bool {
         AIAPIKeychain.read()?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
@@ -175,7 +185,8 @@ struct AIGenerationSettings {
             let configuration = AIAPIConfiguration(
                 baseURL: apiBaseURL,
                 model: apiModel,
-                apiKey: key
+                apiKey: key,
+                thinking: apiThinking
             )
             return configuration.endpoint == nil ? nil : .api(configuration)
         }
