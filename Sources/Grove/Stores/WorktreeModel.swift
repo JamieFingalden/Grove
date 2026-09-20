@@ -65,16 +65,22 @@ final class WorktreeModel: Identifiable {
     var selectedPath: String? {
         didSet {
             guard selectedPath != oldValue else { return }
+            // 行 id 是解析顺序号，换文件后旧的选中集合指向的就是别的行了。
+            selectedLines.removeAll()
+            selectionAnchorLineID = nil
             diff = nil
             diffTask?.cancel()
             diffTask = Task { await loadDiff() }
         }
     }
 
-    /// 看的是工作区改动还是暂存区改动。
+    /// 看的是工作区改动还是暂存区改动。同一个文件两侧是两个不同的版本，
+    /// 切侧 = 换内容，行选择同样作废。
     var diffSide: DiffSide = .worktree {
         didSet {
             guard diffSide != oldValue else { return }
+            selectedLines.removeAll()
+            selectionAnchorLineID = nil
             diffTask?.cancel()
             diffTask = Task { await loadDiff() }
         }
@@ -100,6 +106,8 @@ final class WorktreeModel: Identifiable {
     /// 行 id 是每次解析 diff 时重新编号的，所以 diff 一重载就必须清空 ——
     /// 留着旧 id 会让勾选落到完全不相干的行上，那是会丢代码的。
     var selectedLines: Set<Int> = []
+    /// Shift 范围选择的锚点：最近一次单独点击的行 id。
+    var selectionAnchorLineID: Int?
 
     /// 提交信息输入框的内容。存在模型里而不是视图里，这样切走再切回来草稿不丢 ——
     /// 写了半屏的提交信息因为点了下别的工作树就没了，是最让人火大的那种 bug。
@@ -342,14 +350,13 @@ final class WorktreeModel: Identifiable {
     }
 
     private func loadDiff() async {
-        selectedLines.removeAll()
         guard let selectedPath else {
-            diff = nil
+            setDiff(nil)
             conflictContent = nil
             return
         }
         guard let change = status.changes.first(where: { $0.path == selectedPath }) else {
-            diff = nil
+            setDiff(nil)
             conflictContent = nil
             return
         }
@@ -365,7 +372,7 @@ final class WorktreeModel: Identifiable {
         if change.unstaged == .untracked {
             let synthetic = await git.untrackedFileDiff(in: path, path: selectedPath)
             guard !Task.isCancelled else { return }
-            diff = synthetic.map { [$0] } ?? []
+            setDiff(synthetic.map { [$0] } ?? [])
             return
         }
 
@@ -375,12 +382,26 @@ final class WorktreeModel: Identifiable {
             if let originalPath = change.originalPath { paths.append(originalPath) }
             let result = try await git.diff(in: path, paths: paths, staged: diffSide == .staged)
             guard !Task.isCancelled else { return }
-            diff = result
+            setDiff(result)
         } catch {
             guard !Task.isCancelled else { return }
-            diff = []
+            setDiff([])
             app?.report(title: "读取 diff 失败", error: error)
         }
+    }
+
+    /// 更新 diff，并只在**内容真的变了**时才清空分行选中。
+    ///
+    /// 旧行为是每次重载都无条件清空 —— 而刷新在窗口焦点变化等时机会自动跑，
+    /// 用户辛苦选好的十几行随手就没了。行 id 是解析顺序号：git 状态没变时
+    /// 重新解析出来的 id 完全一致（FileDiff 相等），可以放心保留；
+    /// 内容一变 id 就会漂移，旧行号指向的就是别的行了，必须清空。
+    private func setDiff(_ newDiff: [FileDiff]?) {
+        if (newDiff ?? []) != (diff ?? []) {
+            selectedLines.removeAll()
+            selectionAnchorLineID = nil
+        }
+        diff = newDiff
     }
 
     private func loadCommitDiff(_ oid: String) async {
@@ -453,8 +474,15 @@ final class WorktreeModel: Identifiable {
 
     // MARK: - 分行暂存
 
-    func toggleLine(_ line: DiffLine) {
+    func toggleLine(_ line: DiffLine, extendingSelection: Bool = false) {
         guard line.kind == .addition || line.kind == .deletion else { return }
+        // Shift 点击：从锚点选到这一行（中间的增删行全部选中，上下文行跳过）。
+        // 连续十几行改动一行行点是最累的交互，这里是体验的大头。
+        if extendingSelection, let anchor = selectionAnchorLineID, anchor != line.id {
+            selectedLines.formUnion(Self.changedLineIDs(in: diff, between: anchor, and: line.id))
+            return
+        }
+        selectionAnchorLineID = line.id
         if selectedLines.contains(line.id) {
             selectedLines.remove(line.id)
         } else {
@@ -462,15 +490,46 @@ final class WorktreeModel: Identifiable {
         }
     }
 
+    /// 两个行 id 之间（同一文件内）的所有增删行。id 是解析顺序号，
+    /// 天然按文档顺序递增；限定同文件避免跨文件误伤。
+    static func changedLineIDs(in diff: [FileDiff]?, between a: Int, and b: Int) -> [Int] {
+        let lo = min(a, b), hi = max(a, b)
+        guard let diff else { return [] }
+        for file in diff {
+            let lines = file.hunks.flatMap(\.lines)
+            guard let first = lines.first, let last = lines.last,
+                  lo >= first.id, hi <= last.id else { continue }
+            return lines
+                .filter { ($0.kind == .addition || $0.kind == .deletion) && $0.id >= lo && $0.id <= hi }
+                .map(\.id)
+        }
+        return []
+    }
+
     /// 整块勾上 / 取消。逐行点在大 hunk 上太累，而「这一块整个要」是最常见的意图。
     func toggleHunk(_ hunk: DiffHunk) {
         let changed = hunk.lines.filter { $0.kind == .addition || $0.kind == .deletion }.map(\.id)
         guard !changed.isEmpty else { return }
+        selectionAnchorLineID = changed.first
         if changed.allSatisfy(selectedLines.contains) {
             selectedLines.subtract(changed)
         } else {
             selectedLines.formUnion(changed)
         }
+    }
+
+    /// 一键选中当前文件的全部改动行。有的文件几十个分散的小改动，
+    /// 「除了某几行全要」的快捷路径是先全选再取消那几行。
+    func selectAllChangesInCurrentFile() {
+        guard let diff else { return }
+        let ids = diff.flatMap { file in
+            file.hunks.flatMap(\.lines)
+                .filter { $0.kind == .addition || $0.kind == .deletion }
+                .map(\.id)
+        }
+        guard !ids.isEmpty else { return }
+        selectedLines.formUnion(ids)
+        selectionAnchorLineID = ids.first
     }
 
     func hunkSelectionState(_ hunk: DiffHunk) -> HunkSelection {

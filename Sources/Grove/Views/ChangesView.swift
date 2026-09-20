@@ -51,9 +51,9 @@ struct ChangesView: View {
                 List(selection: selectedChange) {
                     if !conflictedChanges.isEmpty {
                         Section {
-                            ForEach(conflictedChanges) { change in
-                                ConflictRow(change: change, model: model)
-                                    .tag(ChangeSelection(path: change.path, side: .worktree))
+                            ForEach(conflictedChanges.map { ChangeRowKey(change: $0, side: .worktree) }) { key in
+                                ConflictRow(change: key.change, model: model)
+                                    .tag(ChangeSelection(path: key.change.path, side: .worktree))
                             }
                         } header: {
                             conflictHeader
@@ -62,9 +62,9 @@ struct ChangesView: View {
 
                     if !stagedChanges.isEmpty {
                         Section {
-                            ForEach(stagedChanges) { change in
-                                ChangeRow(change: change, isStaged: true, model: model)
-                                    .tag(ChangeSelection(path: change.path, side: .staged))
+                            ForEach(stagedChanges.map { ChangeRowKey(change: $0, side: .staged) }) { key in
+                                ChangeRow(change: key.change, isStaged: true, model: model)
+                                    .tag(ChangeSelection(path: key.change.path, side: .staged))
                             }
                         } header: {
                             SectionHeader(
@@ -78,9 +78,9 @@ struct ChangesView: View {
 
                     if !unstagedChanges.isEmpty {
                         Section {
-                            ForEach(unstagedChanges) { change in
-                                ChangeRow(change: change, isStaged: false, model: model)
-                                    .tag(ChangeSelection(path: change.path, side: .worktree))
+                            ForEach(unstagedChanges.map { ChangeRowKey(change: $0, side: .worktree) }) { key in
+                                ChangeRow(change: key.change, isStaged: false, model: model)
+                                    .tag(ChangeSelection(path: key.change.path, side: .worktree))
                             }
                         } header: {
                             SectionHeader(
@@ -164,12 +164,24 @@ struct ChangesView: View {
 
     /// 「已暂存」区里显示所有有暂存内容的文件；部分暂存的文件会同时出现在两个区里，
     /// 那是刻意的 —— 它确实两边都有内容，藏起任何一边都会让人误判。
+    /// 冲突文件例外：它们已经有专属区域，再出现在这里会和冲突区同 id 双高亮。
     private var stagedChanges: [FileChange] {
-        model.status.changes.filter(\.isStaged)
+        model.status.changes.filter { $0.isStaged && !$0.isConflicted }
     }
 
     private var unstagedChanges: [FileChange] {
         model.status.changes.filter { $0.unstaged != nil && !$0.isConflicted }
+    }
+
+    /// 列表行的身份。不能直接用 FileChange（id = 路径）：部分暂存的文件
+    /// 会同时出现在「已暂存」「未暂存」两区，两行同 id 会让底层的 NSTableView
+    /// 行标识冲突 —— 点一行、两行一起亮，看起来就像两个区是同一个东西。
+    /// 把所在侧拼进 id，两行就是两个独立条目（也确实是两个版本）。
+    private struct ChangeRowKey: Identifiable {
+        let change: FileChange
+        let side: WorktreeModel.DiffSide
+
+        var id: String { "\(side.rawValue)|\(change.path)" }
     }
 
     /// 同一个文件可能同时出现在「已暂存」和「未暂存」两区，路径本身不足以表示选择。

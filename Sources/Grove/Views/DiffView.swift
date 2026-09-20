@@ -30,7 +30,17 @@ struct DiffPane: View {
 
             Spacer()
 
-            Button("取消选择") { model.selectedLines.removeAll() }
+            Button("选中整个文件") {
+                model.selectAllChangesInCurrentFile()
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 11))
+            .help("选中这个文件的全部改动行，再取消不要的那几行，适合分散小改动多的文件")
+
+            Button("取消选择") { 
+                model.selectedLines.removeAll() 
+                model.selectionAnchorLineID = nil
+            }
                 .buttonStyle(.borderless)
                 .font(.system(size: 11))
 
@@ -448,6 +458,7 @@ private struct HunkView: View {
 private struct DiffLineView: View {
     let line: DiffLine
     var model: WorktreeModel?
+    @State private var isGutterHovered = false
 
     private var isSelectable: Bool {
         model != nil && (line.kind == .addition || line.kind == .deletion)
@@ -463,22 +474,10 @@ private struct DiffLineView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            // 勾选标记占一列固定宽度，不管能不能选都占着 ——
-            // 否则同一个文件里可选行和上下文行的正文会左右错开。
-            Group {
-                if isSelectable {
-                    Image(systemName: isSelected ? "checkmark.square.fill" : "square")
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary.opacity(0.5))
-                }
-            }
-            .frame(width: 16)
-
-            Text(line.oldNumber.map(String.init) ?? "")
-                .frame(width: Self.gutterWidth, alignment: .trailing)
-            Text(line.newNumber.map(String.init) ?? "")
-                .frame(width: Self.gutterWidth, alignment: .trailing)
-                .padding(.trailing, 6)
+            // 勾选标记 + 两列行号是唯一的点击热区。之前整行都能点，
+            // 双击选词、三击选段会连带触发勾选（点两次 = 勾上又取消，闪烁），
+            // 正文区域必须留给文本选择/复制。
+            gutter
 
             Text(marker)
                 .frame(width: 10, alignment: .leading)
@@ -495,10 +494,55 @@ private struct DiffLineView: View {
         .fixedSize(horizontal: true, vertical: false)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(isSelected ? Color.accentColor.opacity(0.22) : background)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            guard isSelectable, let model else { return }
-            model.toggleLine(line)
+    }
+
+    /// 勾选列 + 双侧行号列。可选行包成一个 Button；
+    /// 上下文行不可选，保持纯展示（宽度一致，正文不错位）。
+    @ViewBuilder
+    private var gutter: some View {
+        if isSelectable, let model {
+            Button {
+                // Shift + 点击 = 从上次点击的行选到这里，
+                // 连续十几行改动不用一行行点。
+                model.toggleLine(
+                    line,
+                    extendingSelection: NSEvent.modifierFlags.contains(.shift)
+                )
+            } label: {
+                HStack(spacing: 0) {
+                    Image(systemName: isSelected ? "checkmark.square.fill" : "square")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary.opacity(0.5))
+                        .frame(width: 16)
+
+                    Text(line.oldNumber.map(String.init) ?? "")
+                        .frame(width: Self.gutterWidth, alignment: .trailing)
+                    Text(line.newNumber.map(String.init) ?? "")
+                        .frame(width: Self.gutterWidth, alignment: .trailing)
+                        .padding(.trailing, 6)
+                }
+                .contentShape(Rectangle())
+                .background(isGutterHovered ? Color.primary.opacity(0.06) : Color.clear)
+            }
+            .buttonStyle(.borderless)
+            .onHover { hovering in
+                isGutterHovered = hovering
+                if hovering {
+                    NSCursor.pointingHand.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
+            .help("点击选中此行；Shift + 点击从上次选的行选到这里")
+        } else {
+            HStack(spacing: 0) {
+                Color.clear.frame(width: 16)
+                Text(line.oldNumber.map(String.init) ?? "")
+                    .frame(width: Self.gutterWidth, alignment: .trailing)
+                Text(line.newNumber.map(String.init) ?? "")
+                    .frame(width: Self.gutterWidth, alignment: .trailing)
+                    .padding(.trailing, 6)
+            }
         }
     }
 

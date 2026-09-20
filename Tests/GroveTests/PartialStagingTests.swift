@@ -289,3 +289,74 @@ final class PartialStagingTests: XCTestCase {
         XCTAssertNil(PatchBuilder.patch(for: file, selecting: [], direction: .forward))
     }
 }
+
+/// Shift 范围选择的纯逻辑测试。
+@MainActor
+final class LineSelectionRangeTests: XCTestCase {
+    private let sample = """
+        diff --git a/a.txt b/a.txt
+        --- a/a.txt
+        +++ b/a.txt
+        @@ -1,5 +1,5 @@
+         一
+        -二
+        +二改
+         三
+        -四
+        +四改
+         五
+        diff --git b/b.txt b/b.txt
+        --- a/b.txt
+        +++ b/b.txt
+        @@ -1,3 +1,3 @@
+         甲
+        -乙
+        +乙改
+         丙
+        """
+
+    private func changedLines(in files: [FileDiff], file: Int = 0) -> [DiffLine] {
+        files[file].hunks.flatMap(\.lines).filter { $0.kind == .addition || $0.kind == .deletion }
+    }
+
+    /// 从「二改」扩到「四改」：中间的增删行全选，上下文行（三）跳过。
+    func testRangeSelectsOnlyChangedLinesBetweenAnchors() {
+        let files = DiffParser.parse(sample)
+        let changed = changedLines(in: files)
+        let start = changed.first { $0.text == "二改" }!.id
+        let end = changed.first { $0.text == "四改" }!.id
+
+        let ids = WorktreeModel.changedLineIDs(in: files, between: start, and: end)
+
+        // 从「二改」到「四改」：包含两端的增删行 + 中间的「四」，不含范围外的「二」。
+        XCTAssertEqual(Set(ids), Set([
+            changed.first { $0.text == "二改" }!.id,
+            changed.first { $0.text == "四" }!.id,
+            changed.first { $0.text == "四改" }!.id
+        ]))
+        XCTAssertFalse(ids.contains(changed.first { $0.text == "二" }!.id))      // 锚点之前的「二」
+        XCTAssertFalse(ids.contains(files[0].hunks[0].lines[0].id))  // 上下文「一」
+    }
+
+    /// 反向拖选（先点下面再 Shift 点上面）结果一样。
+    func testRangeIsOrderIndependent() {
+        let files = DiffParser.parse(sample)
+        let changed = changedLines(in: files)
+        let start = changed.first { $0.text == "二改" }!.id
+        let end = changed.first { $0.text == "四改" }!.id
+
+        XCTAssertEqual(
+            Set(WorktreeModel.changedLineIDs(in: files, between: end, and: start)),
+            Set(WorktreeModel.changedLineIDs(in: files, between: start, and: end))
+        )
+    }
+
+    /// 跨文件不误伤：锚点和目标行不在同一个文件里时不选中任何东西。
+    func testRangeIsClampedToSameFile() {
+        let files = DiffParser.parse(sample)
+        let start = changedLines(in: files)[0].id          // a.txt 里的「二」
+        let end = changedLines(in: files, file: 1)[0].id   // b.txt 里的「乙」
+
+        XCTAssertTrue(WorktreeModel.changedLineIDs(in: files, between: start, and: end).isEmpty)
+    }
+}
