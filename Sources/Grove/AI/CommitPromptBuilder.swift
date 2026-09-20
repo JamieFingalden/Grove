@@ -1,7 +1,10 @@
 import Foundation
 
 enum CommitPromptBuilder {
-    static let defaultMaxDiffBytes = 32 * 1024
+    /// 256KB：直接对齐 AI Review 的预算。现代模型的上下文足够容纳，而且
+    /// DiffBudget 会先跳过测试/生成代码这些低价值文件，实际能覆盖的改动
+    /// 比数字看起来大得多。
+    static let defaultMaxDiffBytes = 256 * 1024
 
     struct Input: Sendable {
         var stagedDiff: String
@@ -13,6 +16,8 @@ enum CommitPromptBuilder {
     struct Result: Sendable {
         var text: String
         var wasTruncated: Bool
+        /// 取舍说明（跳过了哪些、截断了哪些）。没有内容丢失时为 nil。
+        var note: String?
     }
 
     static func prompt(_ input: Input) -> String {
@@ -21,9 +26,8 @@ enum CommitPromptBuilder {
 
     static func build(_ input: Input) -> Result {
         let limit = max(0, input.maxDiffBytes)
-        let diffData = Data(input.stagedDiff.utf8)
-        let wasTruncated = diffData.count > limit
-        let diff = wasTruncated ? limitedDiff(input.stagedDiff, byteLimit: limit) : input.stagedDiff
+        let plan = DiffBudget.plan(diff: input.stagedDiff, byteLimit: limit)
+        let diff = plan.diff
         let subjects = input.recentSubjects
             .filter { !$0.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("merge ") }
             .prefix(20)
@@ -33,9 +37,7 @@ enum CommitPromptBuilder {
         let summaryWasTruncated = Data(input.fileSummary.utf8).count > 16 * 1024
         let summary = limited(input.fileSummary, byteLimit: 16 * 1024)
             + (summaryWasTruncated ? "\n（文件摘要也已达到提示词上限。）" : "")
-        let truncationNotice = wasTruncated
-            ? "注意：暂存区 diff 过大，下面只包含按文件截取的片段。请结合文件摘要概括，不要编造未展示的改动。"
-            : "下面是完整的暂存区 diff。"
+        let truncationNotice = plan.notice ?? "下面是完整的暂存区 diff。"
 
         let text = """
         请只根据下面提供的文本生成一条提交信息草稿，不要读取工作区文件或运行命令。目标是让不看 diff 的维护者也能从标题理解这次提交最主要的具体行为变化或修复结果。参考最近的人工提交标题，自行推断仓库惯用的格式、语言、措辞和是否使用 scope；历史标题只用于学习风格，不得用它们代替对当前改动的理解。
@@ -56,61 +58,17 @@ enum CommitPromptBuilder {
         按所提供的 JSON schema 输出：subject 放标题。当标题无法交代关键原因、多个紧密相关的变化或可从 diff 确认的测试时，body 用 1～3 行补充；否则留空。不要编造测试结果。字段内容只写提交信息本身，不要解释，不要使用代码块，不要添加“这是提交信息”之类的开场白。
         """
 
-        return Result(text: text, wasTruncated: wasTruncated)
+        return Result(text: text, wasTruncated: plan.wasTruncated, note: plan.notice)
     }
 
-    /// 超限时给每个文件留一段，而不是让排在前面的单个大文件吃完整个预算。
+    /// 旧接口：超限时智能取舍后返回 diff 文本，细节见 `DiffBudget`。
     static func limitedDiff(_ diff: String, byteLimit: Int) -> String {
-        guard byteLimit > 0 else { return "" }
-        let sections = splitFileDiffs(diff)
-        guard sections.count > 1 else { return limited(diff, byteLimit: byteLimit) }
-
-        var remaining = byteLimit
-        var output = ""
-        for (index, section) in sections.enumerated() {
-            if !output.isEmpty {
-                guard remaining > 1 else { break }
-                output.append("\n")
-                remaining -= 1
-            }
-            let remainingFiles = sections.count - index
-            let allowance = max(1, remaining / remainingFiles)
-            let fragment = limited(section, byteLimit: allowance)
-            output.append(fragment)
-            remaining -= Data(fragment.utf8).count
-            if remaining == 0 { break }
-        }
-        return output
+        DiffBudget.plan(diff: diff, byteLimit: byteLimit).diff
     }
 
-    private static func splitFileDiffs(_ diff: String) -> [String] {
-        var sections: [String] = []
-        var current: [Substring] = []
-        for line in diff.split(separator: "\n", omittingEmptySubsequences: false) {
-            if line.hasPrefix("diff --git "), !current.isEmpty {
-                sections.append(current.joined(separator: "\n"))
-                current.removeAll(keepingCapacity: true)
-            }
-            current.append(line)
-        }
-        if !current.isEmpty { sections.append(current.joined(separator: "\n")) }
-        return sections
-    }
-
+    /// 字节安全截断的单一实现在 `DiffBudget.limited`。
     static func limited(_ text: String, byteLimit: Int) -> String {
-        guard Data(text.utf8).count > byteLimit else { return text }
-        guard byteLimit > 0 else { return "" }
-
-        var bytes = 0
-        var end = text.startIndex
-        while end < text.endIndex {
-            let next = text.index(after: end)
-            let characterBytes = text[end..<next].utf8.count
-            if bytes + characterBytes > byteLimit { break }
-            bytes += characterBytes
-            end = next
-        }
-        return String(text[..<end])
+        DiffBudget.limited(text, byteLimit: byteLimit)
     }
 }
 

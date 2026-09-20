@@ -223,7 +223,7 @@ struct CreatePullRequestSheet: View {
     @State private var isWorking = false
     @State private var createdURL: String?
     @State private var isGeneratingDescription = false
-    @State private var generatedFromTruncatedDiff = false
+    @State private var generatedDiffNotice: String?
     @State private var canRetryDescriptionGeneration = false
     @State private var descriptionTask: Task<Void, Never>?
 
@@ -302,8 +302,8 @@ struct CreatePullRequestSheet: View {
                                 .buttonStyle(.link)
                         }
                         .font(.system(size: 10.5))
-                    } else if generatedFromTruncatedDiff {
-                        Label("diff 较大，只分析了一部分", systemImage: "exclamationmark.triangle")
+                    } else if let note = generatedDiffNotice {
+                        Label(note, systemImage: "exclamationmark.triangle")
                             .font(.system(size: 10.5))
                             .foregroundStyle(.orange)
                     } else if canRetryDescriptionGeneration {
@@ -445,14 +445,14 @@ struct CreatePullRequestSheet: View {
         let target = base.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !target.isEmpty else { return }
         isGeneratingDescription = true
-        generatedFromTruncatedDiff = false
+        generatedDiffNotice = nil
         canRetryDescriptionGeneration = false
         descriptionTask = Task {
             do {
                 let generated = try await model.generatePullRequestDescription(base: target)
                 try Task.checkCancellation()
                 body_ = generated.body
-                generatedFromTruncatedDiff = generated.wasTruncated
+                generatedDiffNotice = generated.note
             } catch is CancellationError {
                 // 用户取消时保留原有描述，不显示错误。
             } catch {

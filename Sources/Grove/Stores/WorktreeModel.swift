@@ -107,7 +107,8 @@ final class WorktreeModel: Identifiable {
     var amendLastCommit = false
     private(set) var isGeneratingCommitMessage = false
     private(set) var hasGeneratedCommitMessage = false
-    private(set) var generatedFromTruncatedDiff = false
+    /// AI 生成时对超大 diff 做了取舍的说明（跳过了哪些文件）。没丢弃内容时为 nil。
+    private(set) var generatedDiffNotice: String?
     private(set) var canRetryCommitMessageGeneration = false
     @ObservationIgnored private var commitMessageTask: Task<Void, Never>?
 
@@ -822,7 +823,7 @@ final class WorktreeModel: Identifiable {
             commitMessage = ""
             amendLastCommit = false
             hasGeneratedCommitMessage = false
-            generatedFromTruncatedDiff = false
+            generatedDiffNotice = nil
         } catch {
             app?.report(title: "提交失败", error: error)
         }
@@ -836,7 +837,7 @@ final class WorktreeModel: Identifiable {
         guard let service = app?.aiService else { return }
         isGeneratingCommitMessage = true
         canRetryCommitMessageGeneration = false
-        generatedFromTruncatedDiff = false
+        generatedDiffNotice = nil
 
         commitMessageTask = Task { [weak self] in
             guard let self else { return }
@@ -849,7 +850,8 @@ final class WorktreeModel: Identifiable {
                 )
                 try Task.checkCancellation()
                 self.commitMessage = generated.text
-                self.generatedFromTruncatedDiff = generated.wasTruncated
+                self.generatedDiffNotice = generated.note
+                self.hasGeneratedCommitMessage = true
                 self.hasGeneratedCommitMessage = true
             } catch is CancellationError {
                 // 用户主动取消不属于失败，静默回到空闲状态。

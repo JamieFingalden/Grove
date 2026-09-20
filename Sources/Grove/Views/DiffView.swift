@@ -191,15 +191,20 @@ struct DiffContentView: View {
     var model: WorktreeModel?
     /// 历史页一次只展示一个选中文件，仍要保留文件标题，避免代码失去归属感。
     var showsFileHeaders = false
-    @State private var rowBounds: [CGRect] = []
-    @State private var verticalOffset: CGFloat = 0
+    /// 提前算好的内容宽度。等宽字体的行宽可以按字符数精确估计，不需要靠
+    /// 逐行 GeometryReader 现场量 —— 那套做法在大 diff 下每帧要收集上千个
+    /// preference 再重算 body，滚动直接掉帧。
+    private let contentWidth: CGFloat
+
+    init(files: [FileDiff], model: WorktreeModel? = nil, showsFileHeaders: Bool = false) {
+        self.files = files
+        self.model = model
+        self.showsFileHeaders = showsFileHeaders
+        self.contentWidth = Self.estimatedWidth(for: files)
+    }
 
     var body: some View {
         GeometryReader { geometry in
-            let visibleContentWidth = rowBounds.lazy
-                .filter { $0.maxY > verticalOffset && $0.minY < verticalOffset + geometry.size.height }
-                .map(\.width)
-                .max() ?? 0
             ScrollView([.vertical, .horizontal]) {
                 LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
                     ForEach(files) { file in
@@ -236,114 +241,69 @@ struct DiffContentView: View {
                     }
                 }
                 .fixedSize(horizontal: true, vertical: false)
-                // 文档只占当前可见行需要的宽度，横向边界由原生滚动容器处理。
-                // 离屏长行仍保留原始布局，进入视口后再扩展滚动范围。
-                .frame(width: max(geometry.size.width, visibleContentWidth + 24), alignment: .leading)
+                .frame(width: max(geometry.size.width, contentWidth), alignment: .leading)
                 .padding(.bottom, 12)
-                .coordinateSpace(name: "diffContent")
-                .background(DiffVerticalOffsetReader(offset: $verticalOffset))
-            }
-            .onPreferenceChange(DiffRowBoundsKey.self) { rows in
-                DispatchQueue.main.async {
-                    rowBounds = rows
-                }
             }
             .scrollIndicators(.visible, axes: [.vertical, .horizontal])
             // 内容比视口小的时候，双向滚动的 ScrollView 会把它居中 ——
             // 一个只改了两行的 diff 就会飘在面板正中间。锚到左上角才是代码该有的样子。
             .defaultScrollAnchor(.topLeading)
-            // 文件或提交变化后必须创建新的滚动容器。否则 SwiftUI 会沿用上一个文件的
+            // 文件列表变化后必须创建新的滚动容器。否则 SwiftUI 会沿用上一个文件的
             // 横纵偏移，用户点开新文件时可能直接看到右下角甚至一片空白。
-            .id(files.hashValue)
+            // 只哈希文件路径而不是整个 diff 内容：这里只需要“文件集合变了就重置
+            // 滚动”，深层哈希几千行文本每次 body 求值都是一笔可观的开销。
+            .id(files.map(\.id).hashValue)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
     }
-}
 
-private struct DiffRowBoundsKey: PreferenceKey {
-    static var defaultValue: [CGRect] { [] }
+    // MARK: - 宽度估算
 
-    static func reduce(value: inout [CGRect], nextValue: () -> [CGRect]) {
-        value.append(contentsOf: nextValue())
-    }
-}
+    /// 11.5pt 等宽字体单个 ASCII 字符约 6.9pt，取 7 留余量。
+    private static let characterWidth: CGFloat = 7
+    /// 勾选列 + 两列行号 + 标记列 + 内边距。
+    private static let gutterWidth: CGFloat = 16 + 38 + 38 + 6 + 10 + 24
 
-private struct DiffRowBounds: View {
-    var body: some View {
-        GeometryReader { geometry in
-            let frame = geometry.frame(in: .named("diffContent"))
-            // 横向偏移不参与量宽，避免左右滚动本身触发文档重新布局。
-            Color.clear.preference(
-                key: DiffRowBoundsKey.self,
-                value: [CGRect(x: 0, y: frame.minY, width: frame.width, height: frame.height)]
-            )
-        }
-    }
-}
-
-private struct DiffVerticalOffsetReader: NSViewRepresentable {
-    @Binding var offset: CGFloat
-
-    func makeCoordinator() -> Coordinator { Coordinator(offset: $offset) }
-
-    func makeNSView(context: Context) -> AttachmentView {
-        let view = AttachmentView()
-        view.didEnterWindow = { [weak coordinator = context.coordinator] view in
-            DispatchQueue.main.async { coordinator?.attach(to: view) }
-        }
-        return view
-    }
-
-    func updateNSView(_ view: AttachmentView, context: Context) {
-        DispatchQueue.main.async { context.coordinator.attach(to: view) }
-    }
-
-    static func dismantleNSView(_ view: AttachmentView, coordinator: Coordinator) {
-        coordinator.detach()
-    }
-
-    final class AttachmentView: NSView {
-        var didEnterWindow: ((NSView) -> Void)?
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            if window != nil { didEnterWindow?(self) }
-        }
-    }
-
-    @MainActor
-    final class Coordinator: NSObject {
-        private let offset: Binding<CGFloat>
-        private weak var clipView: NSClipView?
-
-        init(offset: Binding<CGFloat>) { self.offset = offset }
-
-        func attach(to view: NSView) {
-            guard let clipView = view.enclosingScrollView?.contentView else { return }
-            guard self.clipView !== clipView else { return }
-            detach()
-            self.clipView = clipView
-            clipView.postsBoundsChangedNotifications = true
-            NotificationCenter.default.addObserver(
-                self, selector: #selector(boundsDidChange),
-                name: NSView.boundsDidChangeNotification, object: clipView
-            )
-            boundsDidChange()
-        }
-
-        func detach() {
-            NotificationCenter.default.removeObserver(self)
-            clipView = nil
-        }
-
-        @objc private func boundsDidChange() {
-            guard let y = clipView?.bounds.minY, abs(offset.wrappedValue - y) > 0.5 else { return }
-            // 等原生滚动状态同步后再更新宽度，避免 SwiftUI 恢复上一帧的滚动位置。
-            DispatchQueue.main.async { [weak self] in
-                guard let self, let y = clipView?.bounds.minY else { return }
-                offset.wrappedValue = y
+    static func estimatedWidth(for files: [FileDiff]) -> CGFloat {
+        var maxUnits = 0
+        for file in files {
+            // 文件头除了路径还有箭头和增删计数。
+            maxUnits = max(maxUnits, displayUnits(file.displayPath) + 24)
+            for hunk in file.hunks {
+                maxUnits = max(maxUnits, displayUnits(hunk.header) + 12)
+                for line in hunk.lines {
+                    maxUnits = max(maxUnits, displayUnits(line.text))
+                }
             }
+        }
+        return CGFloat(maxUnits) * characterWidth + gutterWidth
+    }
+
+    /// 把一行文本换算成等宽字符单位数：ASCII 算 1，CJK/全角/emoji 算 2，
+    /// 制表符按 8 列算。宁可偏宽 —— 估窄了会把长行截没。
+    static func displayUnits(_ text: String) -> Int {
+        var units = 0
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x09: units += 8
+            case 0x00...0x7F: units += 1
+            default: units += isWide(scalar) ? 2 : 1
+            }
+        }
+        return units
+    }
+
+    private static func isWide(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x1100...0x115F, 0x2E80...0x303E, 0x3041...0x33FF,
+             0x3400...0x4DBF, 0x4E00...0x9FFF, 0xA000...0xA4CF,
+             0xAC00...0xD7A3, 0xF900...0xFAFF, 0xFE10...0xFE19,
+             0xFE30...0xFE6F, 0xFF00...0xFF60, 0xFFE0...0xFFE6,
+             0x1F300...0x1F64F, 0x1F900...0x1F9FF, 0x20000...0x3FFFD:
+            return true
+        default:
+            return false
         }
     }
 }
@@ -380,7 +340,6 @@ private struct FileDiffHeader: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
         .fixedSize(horizontal: true, vertical: false)
-        .background(DiffRowBounds())
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.bar)
     }
@@ -468,7 +427,6 @@ private struct HunkView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 3)
             .fixedSize(horizontal: true, vertical: false)
-            .background(DiffRowBounds())
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.accentColor.opacity(0.07))
 
@@ -535,7 +493,6 @@ private struct DiffLineView: View {
         .foregroundStyle(foreground)
         .padding(.vertical, 0.5)
         .fixedSize(horizontal: true, vertical: false)
-        .background(DiffRowBounds())
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(isSelected ? Color.accentColor.opacity(0.22) : background)
         .contentShape(Rectangle())

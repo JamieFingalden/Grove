@@ -29,6 +29,7 @@ final class CommitPromptBuilderTests: XCTestCase {
         ))
 
         XCTAssertTrue(result.wasTruncated)
+        XCTAssertNotNil(result.note)
         XCTAssertTrue(result.text.contains("diff 过大"))
         XCTAssertLessThan(result.text.utf8.count, 18_000)
     }
@@ -106,6 +107,7 @@ final class PullRequestPromptBuilderTests: XCTestCase {
         ))
 
         XCTAssertFalse(result.wasTruncated)
+        XCTAssertNil(result.note)
         XCTAssertTrue(result.text.contains("published change"))
         XCTAssertTrue(result.text.contains("未提交的改动不属于这个 PR"))
     }
@@ -119,8 +121,95 @@ final class PullRequestPromptBuilderTests: XCTestCase {
         ))
 
         XCTAssertTrue(result.wasTruncated)
-        XCTAssertTrue(result.text.contains("提交 diff 过大"))
+        XCTAssertNotNil(result.note)
+        XCTAssertTrue(result.text.contains("diff 过大"))
         XCTAssertLessThan(result.text.utf8.count, 2_000)
+    }
+}
+
+/// DiffBudget：超大 diff 的智能取舍策略。锁定「跳过低价值文件、
+/// 优先完整保留核心代码、绝不超预算」这三个行为。
+final class DiffBudgetTests: XCTestCase {
+    private func fileDiff(_ path: String, lines: Int, marker: String = "+code") -> String {
+        """
+        diff --git a/\(path) b/\(path)
+        --- a/\(path)
+        +++ b/\(path)
+        @@ -0,0 +1,\(lines) @@
+        \(Array(repeating: marker, count: lines).joined(separator: "\n"))
+        """
+    }
+
+    func testSmallDiffPassesThroughUntouched() {
+        let diff = fileDiff("src/app.swift", lines: 5)
+        let plan = DiffBudget.plan(diff: diff, byteLimit: 10_000)
+
+        XCTAssertFalse(plan.wasTruncated)
+        XCTAssertNil(plan.notice)
+        XCTAssertEqual(plan.diff, diff)
+    }
+
+    func testTestFilesAreSkippedFirstAndListedByName() {
+        let core = fileDiff("src/payment.swift", lines: 30)
+        let tests = fileDiff("Tests/PaymentTests.swift", lines: 2_000)
+        let diff = core + "\n" + tests
+        // 预算只够放核心文件，测试文件必须让路。
+        let plan = DiffBudget.plan(diff: diff, byteLimit: Data(core.utf8).count + 600)
+
+        XCTAssertTrue(plan.wasTruncated)
+        XCTAssertTrue(plan.diff.contains("src/payment.swift"))
+        XCTAssertTrue(plan.diff.contains("Tests/PaymentTests.swift"), "被跳过的文件必须留下名字")
+        XCTAssertTrue(plan.diff.contains("已整体省略"))
+        XCTAssertFalse(plan.diff.contains(String(repeating: "+code", count: 100)), "测试内容不应占据预算")
+        XCTAssertLessThanOrEqual(Data(plan.diff.utf8).count, Data(core.utf8).count + 600)
+    }
+
+    func testLockAndGeneratedFilesAreLowValue() {
+        XCTAssertTrue(DiffBudget.isLowValue("web/package-lock.json"))
+        XCTAssertTrue(DiffBudget.isLowValue("Pods/Alamofire/Swift"))
+        XCTAssertTrue(DiffBudget.isLowValue("src/proto/service_pb2.py"))
+        XCTAssertTrue(DiffBudget.isLowValue("tests/test_payment.py"))
+        XCTAssertTrue(DiffBudget.isLowValue("ios/App/en.lproj/Localizable.strings"))
+        XCTAssertTrue(DiffBudget.isLowValue("a/Assets/icon.svg"))
+        XCTAssertFalse(DiffBudget.isLowValue("Sources/Grove/AI/DiffBudget.swift"))
+        XCTAssertFalse(DiffBudget.isLowValue("model/Building/Masonry_Optimization_Dxf.py"))
+        XCTAssertFalse(DiffBudget.isLowValue("latest_news.md"))
+    }
+
+    func testCoreFilesAreNeverDroppedSilentlyAndBudgetIsRespected() {
+        let sections = (0..<20).map { fileDiff("src/file\($0).swift", lines: 200) }
+        let diff = sections.joined(separator: "\n")
+        let limit = 4_000
+        let plan = DiffBudget.plan(diff: diff, byteLimit: limit)
+
+        XCTAssertTrue(plan.wasTruncated)
+        XCTAssertNotNil(plan.notice)
+        // 每个核心文件都必须出现（完整或截断或进清单）。
+        for index in 0..<20 {
+            XCTAssertTrue(plan.diff.contains("src/file\(index).swift"), "file\(index) 消失了")
+        }
+        XCTAssertLessThanOrEqual(Data(plan.diff.utf8).count, limit, "任何情况下都不能超预算")
+    }
+
+    func testLowValueFilesAreKeptWhenBudgetIsAmple() {
+        let core = fileDiff("src/app.swift", lines: 50)
+        let tests = fileDiff("Tests/AppTests.swift", lines: 60)
+        let diff = core + "\n" + tests
+        // 预算远大于总 diff：跳过规则不应触发。
+        let plan = DiffBudget.plan(diff: diff, byteLimit: 1_000_000)
+
+        XCTAssertFalse(plan.wasTruncated)
+        XCTAssertTrue(plan.diff.contains("AppTests.swift"))
+    }
+
+    func testSingleOversizedFileIsTrimmedWithMarker() {
+        let diff = fileDiff("src/huge.swift", lines: 2_000)
+        let plan = DiffBudget.plan(diff: diff, byteLimit: 800)
+
+        XCTAssertTrue(plan.wasTruncated)
+        XCTAssertTrue(plan.diff.contains("diff 过大"))
+        XCTAssertTrue(plan.diff.contains("被截断"))
+        XCTAssertLessThanOrEqual(Data(plan.diff.utf8).count, 800)
     }
 }
 

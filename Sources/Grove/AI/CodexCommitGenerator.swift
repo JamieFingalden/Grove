@@ -8,6 +8,8 @@ struct CodexCommitGenerator {
     struct PreparedInput: Sendable {
         var prompt: String
         var wasTruncated: Bool
+        /// 取舍说明（跳过/截断了哪些文件），无内容丢失时为 nil。
+        var note: String?
 
         var byteCount: Int { Data(prompt.utf8).count }
     }
@@ -15,6 +17,7 @@ struct CodexCommitGenerator {
     struct GeneratedMessage: Sendable {
         var text: String
         var wasTruncated: Bool
+        var note: String?
     }
 
     private struct StructuredOutput: Decodable {
@@ -32,7 +35,7 @@ struct CodexCommitGenerator {
             fileSummary: try await stat
         )
         let result = CommitPromptBuilder.build(input)
-        return PreparedInput(prompt: result.text, wasTruncated: result.wasTruncated)
+        return PreparedInput(prompt: result.text, wasTruncated: result.wasTruncated, note: result.note)
     }
 
     static func generate(
@@ -55,6 +58,6 @@ struct CodexCommitGenerator {
         let body = CommitMessageCleaner.clean(output.body ?? "")
         guard !subject.isEmpty else { throw CodexGenerationError.emptyOutput }
         let message = body.isEmpty ? subject : "\(subject)\n\n\(body)"
-        return GeneratedMessage(text: message, wasTruncated: input.wasTruncated)
+        return GeneratedMessage(text: message, wasTruncated: input.wasTruncated, note: input.note)
     }
 }

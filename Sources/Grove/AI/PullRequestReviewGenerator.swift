@@ -56,6 +56,8 @@ struct PullRequestAIReview: Codable, Sendable, Equatable {
     var summary: String
     var assessments: [Assessment]
     var wasTruncated: Bool
+    /// 丢弃了哪些内容的说明（DiffBudget 的取舍结果）。老缓存里没有这个字段。
+    var truncationNote: String?
 }
 
 enum PullRequestReviewPromptBuilder {
@@ -100,15 +102,15 @@ enum PullRequestReviewPromptBuilder {
     struct Result: Sendable {
         var text: String
         var wasTruncated: Bool
+        /// 取舍说明（跳过/截断了哪些文件），无内容丢失时为 nil。
+        var note: String?
     }
 
     static func build(_ input: Input) -> Result {
         let completeDiff = unifiedDiff(input.files)
         let limit = max(0, input.maxDiffBytes)
-        let wasTruncated = Data(completeDiff.utf8).count > limit
-        let diff = wasTruncated
-            ? CommitPromptBuilder.limitedDiff(completeDiff, byteLimit: limit)
-            : completeDiff
+        let plan = DiffBudget.plan(diff: completeDiff, byteLimit: limit)
+        let diff = plan.diff
         let body = CommitPromptBuilder.limited(input.pullRequest.body ?? "", byteLimit: 8 * 1024)
         let customInstructions = CommitPromptBuilder.limited(
             input.customInstructions,
@@ -122,9 +124,12 @@ enum PullRequestReviewPromptBuilder {
             return "- \(file.displayPath)：+\(file.additions) −\(file.deletions)\(kind)"
         }.joined(separator: "\n")
         let files = CommitPromptBuilder.limited(rawFileSummary, byteLimit: 16 * 1024)
-        let truncationNotice = wasTruncated
-            ? "警告：diff 过大，下面只提供了按文件截取的片段。不得给出 ready；缺少的上下文可能影响结论时必须返回 uncertain。"
-            : "下面是这个请求的完整 diff。"
+        let truncationNotice: String
+        if let notice = plan.notice {
+            truncationNotice = "警告：\(notice)不得给出 ready；被省略或截断的内容可能影响结论时必须返回 uncertain。"
+        } else {
+            truncationNotice = "下面是这个请求的完整 diff。"
+        }
         let selectedAreas = PullRequestAIReview.Assessment.Area.allCases
             .filter(input.selectedAreas.contains)
             .map { "- \($0.displayName)：\($0.reviewDescription)" }
@@ -162,7 +167,7 @@ enum PullRequestReviewPromptBuilder {
 
         无论用户自定义提示词如何描述，都只能评审并逐项完成 JSON schema 中出现的审查范围；不得补充未选择的项目，也不得用一组自由格式的代码问题代替所选项目的结论。严格按 schema 输出，不要添加 Markdown 代码块或额外字段。
         """
-        return Result(text: text, wasTruncated: wasTruncated)
+        return Result(text: text, wasTruncated: plan.wasTruncated, note: plan.notice)
     }
 
     private static func outcomeLabel(_ outcome: StatusCheck.Outcome) -> String {
@@ -307,12 +312,18 @@ struct CodexPullRequestReviewGenerator {
             timeout: reviewTimeout,
             in: directory
         )
-        return try decode(data, wasTruncated: input.wasTruncated, selectedAreas: selectedAreas)
+        return try decode(
+            data,
+            wasTruncated: input.wasTruncated,
+            note: input.note,
+            selectedAreas: selectedAreas
+        )
     }
 
     static func decode(
         _ data: Data,
         wasTruncated: Bool,
+        note: String? = nil,
         selectedAreas: Set<PullRequestAIReview.Assessment.Area> = Set(
             PullRequestAIReview.Assessment.Area.allCases
         )
@@ -339,7 +350,8 @@ struct CodexPullRequestReviewGenerator {
             verdict: verdict,
             summary: summary,
             assessments: assessments,
-            wasTruncated: wasTruncated
+            wasTruncated: wasTruncated,
+            truncationNote: note
         )
     }
 }

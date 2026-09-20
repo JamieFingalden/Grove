@@ -1055,7 +1055,12 @@ private struct PullRequestDetailView: View {
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
 
-                if aiReview.wasTruncated {
+                if let note = aiReview.truncationNote {
+                    Label("\(note)结论已按信息不足处理。",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.orange)
+                } else if aiReview.wasTruncated {
                     Label("改动过大，只审查了按文件截取的片段；结论已按信息不足处理。",
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.system(size: 10.5))

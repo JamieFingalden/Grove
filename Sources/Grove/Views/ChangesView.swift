@@ -462,8 +462,8 @@ private struct CommitBox: View {
                 .font(.system(size: 10.5))
             }
 
-            if model.generatedFromTruncatedDiff {
-                Label("diff 较大，只分析了一部分", systemImage: "exclamationmark.triangle")
+            if let note = model.generatedDiffNotice {
+                Label(note, systemImage: "exclamationmark.triangle")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.orange)
             }

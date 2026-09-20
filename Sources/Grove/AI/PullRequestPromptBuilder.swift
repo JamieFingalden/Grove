@@ -5,27 +5,25 @@ enum PullRequestPromptBuilder {
         var committedDiff: String
         var commitSubjects: [String]
         var fileSummary: String
-        var maxDiffBytes: Int = 32 * 1024
+        var maxDiffBytes: Int = 256 * 1024
     }
 
     struct Result: Sendable {
         var text: String
         var wasTruncated: Bool
+        /// 取舍说明。没有内容丢失时为 nil。
+        var note: String?
     }
 
     static func build(_ input: Input) -> Result {
         let limit = max(0, input.maxDiffBytes)
-        let wasTruncated = Data(input.committedDiff.utf8).count > limit
-        let diff = wasTruncated
-            ? CommitPromptBuilder.limitedDiff(input.committedDiff, byteLimit: limit)
-            : input.committedDiff
+        let plan = DiffBudget.plan(diff: input.committedDiff, byteLimit: limit)
+        let diff = plan.diff
         let subjects = input.commitSubjects.prefix(50)
             .map { "- \(CommitPromptBuilder.limited($0, byteLimit: 512))" }
             .joined(separator: "\n")
         let summary = CommitPromptBuilder.limited(input.fileSummary, byteLimit: 16 * 1024)
-        let truncationNotice = wasTruncated
-            ? "注意：提交 diff 过大，下面只包含按文件截取的片段。不要编造未展示的改动。"
-            : "下面是这个 PR 的完整已提交 diff。"
+        let truncationNotice = plan.notice ?? "下面是这个 PR 的完整已提交 diff。"
 
         let text = """
         请只根据下面提供的文本生成 Pull Request 描述，不要读取工作区文件或运行命令。未提交的改动不属于这个 PR，也不应被提及。
@@ -43,7 +41,7 @@ enum PullRequestPromptBuilder {
 
         按所提供的 JSON schema 输出。body 使用简洁、可直接发布的 Markdown，说明做了什么、为什么以及能从改动中确认的测试情况；不要解释生成过程，不要使用包裹全文的代码块，不要编造信息。
         """
-        return Result(text: text, wasTruncated: wasTruncated)
+        return Result(text: text, wasTruncated: plan.wasTruncated, note: plan.notice)
     }
 }
 
@@ -51,12 +49,16 @@ struct CodexPullRequestGenerator {
     struct PreparedInput: Sendable {
         var prompt: String
         var wasTruncated: Bool
+        /// 取舍说明。无内容丢失时为 nil。
+        var note: String?
+
         var byteCount: Int { Data(prompt.utf8).count }
     }
 
     struct GeneratedDescription: Sendable {
         var body: String
         var wasTruncated: Bool
+        var note: String?
     }
 
     private struct StructuredOutput: Decodable {
@@ -75,7 +77,7 @@ struct CodexPullRequestGenerator {
             commitSubjects: try await subjects,
             fileSummary: try await stat
         ))
-        return PreparedInput(prompt: result.text, wasTruncated: result.wasTruncated)
+        return PreparedInput(prompt: result.text, wasTruncated: result.wasTruncated, note: result.note)
     }
 
     static func generate(
@@ -100,6 +102,6 @@ struct CodexPullRequestGenerator {
         }
         let body = CommitMessageCleaner.clean(output.body)
         guard !body.isEmpty else { throw CodexGenerationError.emptyOutput }
-        return GeneratedDescription(body: body, wasTruncated: input.wasTruncated)
+        return GeneratedDescription(body: body, wasTruncated: input.wasTruncated, note: input.note)
     }
 }
