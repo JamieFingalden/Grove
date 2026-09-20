@@ -555,10 +555,9 @@ final class WorktreeModel: Identifiable {
         return nil
     }
 
-    /// 变基会重放多少个提交。nil 表示目标引用不存在或算不出来。
-    func rebaseCommitCount(onto target: String) async -> Int? {
-        guard await git.refExists(target, in: path) else { return nil }
-        return await git.commitCount(from: target, in: path)
+    /// 变基会重放多少个提交、落后目标多少个提交。nil 表示目标引用不存在或算不出来。
+    func rebasePreview(onto target: String) async -> GitClient.RebasePreview? {
+        await git.rebasePreview(onto: target, in: path)
     }
 
     /// 开始变基。冲突导致中断**不算失败** —— 那是变基的正常分支，

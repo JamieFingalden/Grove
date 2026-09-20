@@ -1178,7 +1178,7 @@ struct RebaseSheet: View {
 
     @State private var target = ""
     @State private var autostash = true
-    @State private var commitCount: Int?
+    @State private var preview: GitClient.RebasePreview?
     @State private var targetExists = true
     @State private var isWorking = false
 
@@ -1277,17 +1277,23 @@ struct RebaseSheet: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
 
-                    if let commitCount {
-                        if commitCount == 0 {
+                    if let preview {
+                        if preview.commitsToReplay > 0 {
+                            Label("\(preview.commitsToReplay) 个提交会被重放到 \(target) 上，它们的 SHA 会全部变化。",
+                                  systemImage: "arrow.triangle.branch")
+                                .font(.system(size: 11.5))
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else if preview.isFastForward {
+                            Label("分支落后 \(target) \(preview.commitsBehind) 个提交，变基会直接快进到 \(target)，不改写任何历史。",
+                                  systemImage: "arrow.up.circle")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
                             Label("已经在 \(target) 之上了，没有提交需要重放。",
                                   systemImage: "checkmark.circle")
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(.secondary)
-                        } else {
-                            Label("\(commitCount) 个提交会被重放到 \(target) 上，它们的 SHA 会全部变化。",
-                                  systemImage: "arrow.triangle.branch")
-                                .font(.system(size: 11.5))
-                                .fixedSize(horizontal: false, vertical: true)
                         }
                     } else if targetExists {
                         ProgressView().controlSize(.small)
@@ -1340,7 +1346,7 @@ struct RebaseSheet: View {
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(.defaultAction)
             .disabled(target.trimmingCharacters(in: .whitespaces).isEmpty
-                      || !targetExists || isWorking || commitCount == 0)
+                      || !targetExists || isWorking || preview?.isUpToDate == true)
         }
         .padding(14)
     }
@@ -1354,12 +1360,12 @@ struct RebaseSheet: View {
         let trimmed = target.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else {
             targetExists = true
-            commitCount = nil
+            preview = nil
             return
         }
-        commitCount = nil
-        let count = await model.rebaseCommitCount(onto: trimmed)
-        targetExists = count != nil
-        commitCount = count
+        preview = nil
+        let result = await model.rebasePreview(onto: trimmed)
+        targetExists = result != nil
+        preview = result
     }
 }

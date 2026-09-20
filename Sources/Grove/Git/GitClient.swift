@@ -597,6 +597,33 @@ struct GitClient: Sendable {
         return Int(output.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    /// 变基预览：要重放几个提交、落后目标几个提交。
+    ///
+    /// `target..HEAD` 为 0 只说明「HEAD 没有 target 缺的提交」，此时分支可能在
+    /// 目标**之下**（落后）—— 这恰恰是最该变基的场景：纯落后时变基就是一次
+    /// 快进，同步主干且不改写任何历史。只看这一个数字会把「落后待快进」
+    /// 误判成「已经最新」，还把按钮禁掉。
+    struct RebasePreview: Sendable, Equatable {
+        var commitsToReplay: Int
+        /// HEAD 落后目标的提交数（`HEAD..target`）。
+        var commitsBehind: Int
+
+        var isUpToDate: Bool { commitsToReplay == 0 && commitsBehind == 0 }
+        /// 没有本地提交、纯粹落后：变基是一次快进。
+        var isFastForward: Bool { commitsToReplay == 0 && commitsBehind > 0 }
+    }
+
+    /// 目标引用不存在或算不出来时返回 nil。
+    func rebasePreview(onto target: String, in directory: URL) async -> RebasePreview? {
+        guard await refExists(target, in: directory) else { return nil }
+        let (toReplay, behind) = await (
+            commitCount(from: target, in: directory),
+            commitCount(from: "HEAD", to: target, in: directory)
+        )
+        guard let toReplay, let behind else { return nil }
+        return RebasePreview(commitsToReplay: toReplay, commitsBehind: behind)
+    }
+
     /// 这个引用存不存在。变基目标可能是用户手敲的，先验一下比让 git 报错友好。
     func refExists(_ ref: String, in directory: URL) async -> Bool {
         await succeeds(["rev-parse", "--verify", "--quiet", "\(ref)^{commit}"], in: directory)

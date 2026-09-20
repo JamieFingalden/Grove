@@ -54,6 +54,48 @@ final class RebaseTests: XCTestCase {
 
     // MARK: -
 
+    /// 纯落后（没有本地提交）时，预览必须判定为「快进」而不是「已经最新」。
+    /// 旧逻辑只看 `origin/main..HEAD`，为 0 就误报「已经在之上」并禁掉按钮。
+    func testPreviewDetectsFastForwardWhenBranchIsBehind() async throws {
+        try write("基础\n", to: "base.txt")
+        try await commit("初始")
+
+        try await git.run(["checkout", "-q", "-b", "feature"], in: root)
+
+        // 主干往前走，feature 停在原地。
+        try await git.run(["checkout", "-q", "main"], in: root)
+        try write("主干新内容\n", to: "main.txt")
+        try await commit("主干提交")
+        try await git.run(["checkout", "-q", "feature"], in: root)
+
+        let behindPreview = await git.rebasePreview(onto: "main", in: root)
+        let preview = try XCTUnwrap(behindPreview, "目标引用存在时预览不能为 nil")
+        XCTAssertEqual(preview.commitsToReplay, 0)
+        XCTAssertEqual(preview.commitsBehind, 1)
+        XCTAssertTrue(preview.isFastForward)
+        XCTAssertFalse(preview.isUpToDate)
+
+        // 落后场景下变基应当真的把分支快进到 main。
+        try await git.rebase(onto: "main", autostash: false, in: root)
+        let head = try await git.run(["rev-parse", "HEAD"], in: root)
+        let main = try await git.run(["rev-parse", "main"], in: root)
+        XCTAssertEqual(
+            head.trimmingCharacters(in: .whitespacesAndNewlines),
+            main.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    func testPreviewReportsUpToDateWhenAlreadyOnTarget() async throws {
+        try write("基础\n", to: "base.txt")
+        try await commit("初始")
+
+        let upToDatePreview = await git.rebasePreview(onto: "main", in: root)
+        let preview = try XCTUnwrap(upToDatePreview)
+        XCTAssertTrue(preview.isUpToDate)
+        XCTAssertEqual(preview.commitsToReplay, 0)
+        XCTAssertEqual(preview.commitsBehind, 0)
+    }
+
     func testRebaseReplaysCommitsOnTop() async throws {
         try await makeDivergence(conflicting: false)
 
