@@ -938,13 +938,24 @@ final class WorktreeModel: Identifiable {
         )
     }
 
-    /// 拉取。`remote` 为 nil 时按分支自己的上游拉；分支还没上游时退回默认远端，
+    /// 拉取。不指定远端时按分支自己的上游拉；分支还没上游时退回默认远端，
     /// 免得第一次 push 之前拉取按钮永远是灰的。
-    func pull(from remote: NamedRemote? = nil) async {
+    /// 指定 `branch` 时是真正的「拉取自」：把那个远端分支的提交拉进当前分支，
+    /// 比如 feature 分支从 origin/main 同步主干 —— 这本来就是变基拉取的主场景。
+    func pull(from remote: NamedRemote? = nil, branch: String? = nil) async {
         let target = remote ?? (status.upstream == nil ? defaultRemote : nil)
+        // 只有远端没有分支时才默认拉同名分支；显式指定了分支就用它。
+        let targetBranch = branch ?? (target != nil ? worktree.branch : nil)
+        let activityLabel: String
+        if let target {
+            let ref = targetBranch.map { "\(target.name)/\($0)" } ?? target.name
+            activityLabel = "正在从 \(ref) 拉取…"
+        } else {
+            activityLabel = "正在拉取…"
+        }
         await performSync(
             .pull,
-            activity: target.map { "正在从 \($0.name) 拉取…" } ?? "正在拉取…",
+            activity: activityLabel,
             onFailure: { error in
                 // 变基拉取遇到冲突时 git 非零退出但仓库停在变基中间。
                 // 这不是「拉取失败」—— 用户接下来要解决冲突，跟显式变基是同一条路。
@@ -952,22 +963,18 @@ final class WorktreeModel: Identifiable {
                 if self.status.operation == .rebase {
                     self.app?.report(
                         title: "拉取遇到冲突",
-                        detail: "本地提交正在重放到远端最新之上，有文件冲突。在「冲突」区逐个解决并标记为已解决，再点上方的「继续」；不想继续就点「中止」。"
+                        detail: "拉取的提交正在重放到当前分支之上，有文件冲突。在「冲突」区逐个解决并标记为已解决，再点上方的「继续」；不想继续就点「中止」。"
                     )
                 } else {
                     self.app?.report(title: "拉取失败", error: error)
                 }
             }
         ) {
-            if let target {
-                try await self.git.pull(
-                    in: self.path,
-                    remote: target.name,
-                    branch: self.worktree.branch
-                )
-            } else {
-                try await self.git.pull(in: self.path)
-            }
+            try await self.git.pull(
+                in: self.path,
+                remote: target?.name,
+                branch: targetBranch
+            )
         }
     }
 

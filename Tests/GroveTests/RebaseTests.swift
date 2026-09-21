@@ -393,3 +393,62 @@ final class PullFromRemoteTests: XCTestCase {
         XCTAssertEqual(subjects.first, "本地提交")
     }
 }
+
+/// 「拉取自」的核心场景：当前分支从远端的其他分支（不是同名分支）拉取。
+final class PullFromBranchTests: XCTestCase {
+    private var root: URL!
+    private var git: GitClient!
+
+    override func setUp() async throws {
+        root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("grove-pullbranch-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        git = try await GitClient.resolve()
+
+        try await git.run(["init", "-q", "--bare", "-b", "main", root.appendingPathComponent("origin.git").path], in: root)
+        try await git.run(["clone", "-q", root.appendingPathComponent("origin.git").path, "clone"], in: root)
+        root = root.appendingPathComponent("clone")
+        try await git.run(["config", "user.email", "t@example.com"], in: root)
+        try await git.run(["config", "user.name", "测试"], in: root)
+    }
+
+    override func tearDown() async throws {
+        try? FileManager.default.removeItem(at: root.deletingLastPathComponent())
+    }
+
+    private func commit(_ message: String, files: [String: String]) async throws {
+        for (name, content) in files {
+            try content.write(to: root.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        try await git.run(["add", "-A"], in: root)
+        try await git.run(["commit", "-qm", message], in: root)
+    }
+
+    /// feature 分支（上游是 origin/feature）从 origin/main 拉主干最新：
+    /// 本地提交重放到主干提交之上，线性、无合并提交，且仍停在 feature 上。
+    func testFeatureBranchPullsFromOriginMain() async throws {
+        try await commit("初始", files: ["base.txt": "初始\n"])
+        try await git.run(["push", "-q", "-u", "origin", "main"], in: root)
+
+        try await git.run(["checkout", "-q", "-b", "feature"], in: root)
+        try await commit("功能提交", files: ["feature.txt": "功能\n"])
+        try await git.run(["push", "-q", "-u", "origin", "feature"], in: root)
+
+        // 主干在远端前进。
+        try await git.run(["checkout", "-q", "main"], in: root)
+        try await commit("主干提交", files: ["main.txt": "主干\n"])
+        try await git.run(["push", "-q", "origin", "main"], in: root)
+        try await git.run(["checkout", "-q", "feature"], in: root)
+
+        try await git.pull(in: root, remote: "origin", branch: "main")
+
+        // 线性历史：功能提交在主干提交之上。
+        let subjects = try await git.log(in: root, limit: 10, revision: "HEAD").map(\.subject)
+        XCTAssertEqual(subjects, ["功能提交", "主干提交", "初始"])
+        let branch = try await git.run(["rev-parse", "--abbrev-ref", "HEAD"], in: root)
+        XCTAssertEqual(branch.trimmingCharacters(in: .whitespacesAndNewlines), "feature")
+        // 两个分支的文件都在。
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("feature.txt").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("main.txt").path))
+    }
+}

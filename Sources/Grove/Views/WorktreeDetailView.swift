@@ -218,23 +218,41 @@ private struct WorktreeHeader: View {
         }
     }
 
-    /// 拉取按钮。多远端时跟推送一样：点主体按默认（上游）拉，
-    /// 点箭头选具体远端 —— fork 仓库从 upstream 拉最新正是这个场景。
+    /// 拉取按钮。点主体按默认（上游）拉；点箭头展开「拉取自」：
+    /// 远端 ▸ 它的分支，任意组合都能拉 —— feature 分支从 origin/main
+    /// 同步主干正是主场景。
     @ViewBuilder
     private var pullControl: some View {
         let remotes = model.repository?.remotes ?? []
         let isBusy = model.worktree.branch == nil || model.activity != nil
         let canPull = model.status.upstream != nil || model.defaultRemote != nil
+        // 总共有多少个可选的目标分支。只有 0 或 1 个时菜单没东西可选，
+        // 展开箭头纯属噪音。
+        let branchChoices = remotes.reduce(0) { $0 + remoteBranches(of: $1).count }
 
-        if remotes.count > 1 {
+        if !remotes.isEmpty && branchChoices > 1 {
             Menu {
                 ForEach(remotes) { remote in
-                    Button {
-                        Task { await model.pull(from: remote) }
-                    } label: {
-                        Text(remote.name == model.upstreamRemoteName
-                             ? "\(remote.name)（当前上游） — \(remote.summary)"
-                             : "\(remote.name) — \(remote.summary)")
+                    let branches = remoteBranches(of: remote)
+                    if !branches.isEmpty {
+                        Menu {
+                            ForEach(branches.prefix(60)) { branch in
+                                Button {
+                                    Task { await model.pull(from: remote, branch: branch.localName) }
+                                } label: {
+                                    if branch.localName == model.worktree.branch,
+                                        remote.name == model.upstreamRemoteName {
+                                        Text("\(branch.localName)（当前分支）")
+                                    } else {
+                                        Text(branch.localName)
+                                    }
+                                }
+                            }
+                        } label: {
+                            Text(remote.name == model.upstreamRemoteName
+                                 ? "\(remote.name)（当前上游） — \(remote.summary)"
+                                 : "\(remote.name) — \(remote.summary)")
+                        }
                     }
                 }
             } label: {
@@ -246,7 +264,7 @@ private struct WorktreeHeader: View {
             .tint(syncTint(for: .pull))
             .fixedSize()
             .disabled(isBusy || !canPull)
-            .help("git pull --rebase --autostash。点右侧箭头可从其他远端拉取（本地提交重放到该远端最新之上，不产生合并提交）")
+            .help("git pull --rebase --autostash：按上游拉取（点箭头可选任意远端的任意分支，变基拉取不产生合并提交）")
         } else {
             Button {
                 Task { await model.pull() }
@@ -257,6 +275,13 @@ private struct WorktreeHeader: View {
             .disabled(isBusy || !canPull)
             .help("git pull --rebase --autostash：本地提交重放到远端最新之上，不产生合并提交；工作区改动自动暂存恢复")
         }
+    }
+
+    /// 某个远端下的远端分支（`origin/main` 里去掉 `origin/` 的部分是 localName）。
+    private func remoteBranches(of remote: NamedRemote) -> [RemoteBranch] {
+        guard let all = model.repository?.remoteBranches else { return [] }
+        let prefix = "\(remote.name)/"
+        return all.filter { $0.name.hasPrefix(prefix) }
     }
 
     /// 敲 `git push` 一致，点箭头能展开选别的远端。
