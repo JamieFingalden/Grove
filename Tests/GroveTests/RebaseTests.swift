@@ -320,3 +320,76 @@ final class PullRebaseTests: XCTestCase {
         XCTAssertEqual(subjects.first, "本地提交")
     }
 }
+
+/// 「拉取自」：从显式指定的远端拉，不依赖分支上游配置。
+final class PullFromRemoteTests: XCTestCase {
+    private var root: URL!
+    private var git: GitClient!
+
+    override func setUp() async throws {
+        root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("grove-pullfrom-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        git = try await GitClient.resolve()
+
+        // origin 是上游；mirror 是另一个远端，上面有更新的提交。
+        try await git.run(["init", "-q", "--bare", "-b", "main", root.appendingPathComponent("origin.git").path], in: root)
+        try await git.run(["init", "-q", "--bare", "-b", "main", root.appendingPathComponent("mirror.git").path], in: root)
+        try await git.run(["clone", "-q", root.appendingPathComponent("origin.git").path, "clone"], in: root)
+        root = root.appendingPathComponent("clone")
+        try await git.run(["config", "user.email", "t@example.com"], in: root)
+        try await git.run(["config", "user.name", "测试"], in: root)
+        try await git.run(["remote", "add", "mirror", root.appendingPathComponent("../mirror.git").path], in: root)
+    }
+
+    override func tearDown() async throws {
+        try? FileManager.default.removeItem(at: root.deletingLastPathComponent())
+    }
+
+    /// 上游（origin）没动、mirror 上有新提交：从 mirror 拉能拿到它的提交，
+    /// 而且依然是变基拉取的线性历史。
+    func testPullFromExplicitRemoteIgnoresUpstream() async throws {
+        try "初始\n".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try await git.run(["add", "-A"], in: root)
+        try await git.run(["commit", "-qm", "初始"], in: root)
+        try await git.run(["push", "-q", "-u", "origin", "main"], in: root)
+
+        // mirror 上的新提交：推过去，本地不要。
+        try "镜像改动\n".write(to: root.appendingPathComponent("mirror.txt"), atomically: true, encoding: .utf8)
+        try await git.run(["add", "-A"], in: root)
+        try await git.run(["commit", "-qm", "镜像提交"], in: root)
+        try await git.run(["push", "-q", "mirror", "main"], in: root)
+        try await git.run(["reset", "-q", "--hard", "HEAD~1"], in: root)
+
+        // 本地自己的新提交 → 和 mirror 分叉。
+        try "本地改动\n".write(to: root.appendingPathComponent("local.txt"), atomically: true, encoding: .utf8)
+        try await git.run(["add", "-A"], in: root)
+        try await git.run(["commit", "-qm", "本地提交"], in: root)
+
+        try await git.pull(in: root, remote: "mirror", branch: "main")
+
+        let subjects = try await git.log(in: root, limit: 10, revision: "HEAD").map(\.subject)
+        XCTAssertEqual(subjects.first, "本地提交")
+        XCTAssertEqual(subjects.count(where: { $0 == "镜像提交" }), 1)
+        XCTAssertFalse(subjects.contains { $0.hasPrefix("Merge") })
+    }
+
+    /// 分支没有任何上游时，显式远端 + 分支名也能拉（首推前的分支）。
+    func testPullFromExplicitRemoteWithoutUpstream() async throws {
+        try "初始\n".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try await git.run(["add", "-A"], in: root)
+        try await git.run(["commit", "-qm", "初始"], in: root)
+        try await git.run(["push", "-q", "mirror", "main"], in: root)
+        // 本地分支不设 -u，故意没有上游跟踪。
+        try await git.run(["branch", "--unset-upstream"], in: root)
+
+        try "本地改动\n".write(to: root.appendingPathComponent("local.txt"), atomically: true, encoding: .utf8)
+        try await git.run(["add", "-A"], in: root)
+        try await git.run(["commit", "-qm", "本地提交"], in: root)
+
+        try await git.pull(in: root, remote: "mirror", branch: "main")
+
+        let subjects = try await git.log(in: root, limit: 10, revision: "HEAD").map(\.subject)
+        XCTAssertEqual(subjects.first, "本地提交")
+    }
+}

@@ -938,10 +938,13 @@ final class WorktreeModel: Identifiable {
         )
     }
 
-    func pull() async {
+    /// 拉取。`remote` 为 nil 时按分支自己的上游拉；分支还没上游时退回默认远端，
+    /// 免得第一次 push 之前拉取按钮永远是灰的。
+    func pull(from remote: NamedRemote? = nil) async {
+        let target = remote ?? (status.upstream == nil ? defaultRemote : nil)
         await performSync(
             .pull,
-            activity: "正在拉取…",
+            activity: target.map { "正在从 \($0.name) 拉取…" } ?? "正在拉取…",
             onFailure: { error in
                 // 变基拉取遇到冲突时 git 非零退出但仓库停在变基中间。
                 // 这不是「拉取失败」—— 用户接下来要解决冲突，跟显式变基是同一条路。
@@ -956,7 +959,15 @@ final class WorktreeModel: Identifiable {
                 }
             }
         ) {
-            try await self.git.pull(in: self.path)
+            if let target {
+                try await self.git.pull(
+                    in: self.path,
+                    remote: target.name,
+                    branch: self.worktree.branch
+                )
+            } else {
+                try await self.git.pull(in: self.path)
+            }
         }
     }
 
@@ -969,8 +980,9 @@ final class WorktreeModel: Identifiable {
         )
     }
 
-    /// 一键推送时默认推去哪：优先分支自己的上游，其次 origin，再退回第一个远端。
-    var defaultPushRemote: NamedRemote? {
+    /// 一键推送/拉取时默认去哪个远端：优先分支自己的上游，其次 origin，再退回第一个。
+    /// 推送和拉取共用同一套优先级。
+    var defaultRemote: NamedRemote? {
         let remotes = repository?.remotes ?? []
         if let name = upstreamRemoteName, let match = remotes.first(where: { $0.name == name }) {
             return match

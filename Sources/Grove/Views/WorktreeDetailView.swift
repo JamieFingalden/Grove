@@ -218,11 +218,48 @@ private struct WorktreeHeader: View {
         }
     }
 
-    /// 推送按钮。
-    ///
-    /// 只有一个远端时就是一个普通按钮 —— 多问一步「推到哪」纯属添乱。
-    /// 有多个远端才变成分离式按钮：主区域按分支自己的上游推（跟终端里
-    /// 敲 `git push` 一致），点箭头能展开选别的远端。
+    /// 拉取按钮。多远端时跟推送一样：点主体按默认（上游）拉，
+    /// 点箭头选具体远端 —— fork 仓库从 upstream 拉最新正是这个场景。
+    @ViewBuilder
+    private var pullControl: some View {
+        let remotes = model.repository?.remotes ?? []
+        let isBusy = model.worktree.branch == nil || model.activity != nil
+        let canPull = model.status.upstream != nil || model.defaultRemote != nil
+
+        if remotes.count > 1 {
+            Menu {
+                ForEach(remotes) { remote in
+                    Button {
+                        Task { await model.pull(from: remote) }
+                    } label: {
+                        Text(remote.name == model.upstreamRemoteName
+                             ? "\(remote.name)（当前上游） — \(remote.summary)"
+                             : "\(remote.name) — \(remote.summary)")
+                    }
+                }
+            } label: {
+                syncLabel(for: .pull, title: "拉取", systemImage: "arrow.down")
+            } primaryAction: {
+                Task { await model.pull() }
+            }
+            .menuStyle(.button)
+            .tint(syncTint(for: .pull))
+            .fixedSize()
+            .disabled(isBusy || !canPull)
+            .help("git pull --rebase --autostash。点右侧箭头可从其他远端拉取（本地提交重放到该远端最新之上，不产生合并提交）")
+        } else {
+            Button {
+                Task { await model.pull() }
+            } label: {
+                syncLabel(for: .pull, title: "拉取", systemImage: "arrow.down")
+            }
+            .tint(syncTint(for: .pull))
+            .disabled(isBusy || !canPull)
+            .help("git pull --rebase --autostash：本地提交重放到远端最新之上，不产生合并提交；工作区改动自动暂存恢复")
+        }
+    }
+
+    /// 敲 `git push` 一致，点箭头能展开选别的远端。
     /// 这在「内网 GitLab 做主、GitHub 做备份」这种仓库上是刚需。
     @ViewBuilder
     private var pushControl: some View {
@@ -246,7 +283,7 @@ private struct WorktreeHeader: View {
             } label: {
                 syncLabel(for: .push, title: "推送", systemImage: "arrow.up")
             } primaryAction: {
-                Task { await model.push(to: model.defaultPushRemote) }
+                Task { await model.push(to: model.defaultRemote) }
             }
             .menuStyle(.button)
             .tint(syncTint(for: .push))
@@ -319,8 +356,8 @@ private struct WorktreeHeader: View {
     }
 
     private func pushHelp(remotes: [NamedRemote]) -> String {
-        let target = model.defaultPushRemote?.name ?? "上游"
-        let others = remotes.filter { $0.name != model.defaultPushRemote?.name }.map(\.name)
+        let target = model.defaultRemote?.name ?? "上游"
+        let others = remotes.filter { $0.name != model.defaultRemote?.name }.map(\.name)
         var text = "推送到 \(target)"
         if model.status.upstream == nil { text += "（并建立上游跟踪）" }
         if !others.isEmpty { text += "；点箭头可选 \(others.joined(separator: "、"))" }
@@ -329,14 +366,7 @@ private struct WorktreeHeader: View {
 
     private var actions: some View {
         HStack(spacing: 8) {
-            Button {
-                Task { await model.pull() }
-            } label: {
-                syncLabel(for: .pull, title: "拉取", systemImage: "arrow.down")
-            }
-            .tint(syncTint(for: .pull))
-            .help("git pull --rebase --autostash：本地提交重放到远端最新之上，不产生合并提交；工作区改动自动暂存恢复")
-            .disabled(model.status.upstream == nil || model.activity != nil)
+            pullControl
 
             rebaseControl
 

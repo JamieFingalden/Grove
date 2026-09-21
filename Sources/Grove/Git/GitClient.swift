@@ -489,17 +489,20 @@ struct GitClient: Sendable {
         try await run(arguments, in: directory, timeout: ProcessRunner.networkTimeout)
     }
 
-    func pull(in directory: URL) async throws {
+    /// `remote` / `branch` 都为 nil 时是裸 `git pull`，按分支自己的上游拉。
+    /// 指定远端时不依赖上游配置 —— 没推过途的分支也能从任意远端拉。
+    /// 注意带上 branch：`git pull <remote>` 不带 refspec 时会拉远端的 HEAD，
+    /// 通常不是想要的分支。
+    func pull(in directory: URL, remote: String? = nil, branch: String? = nil) async throws {
         // `--rebase`：分叉时把本地提交重放到远端最新之上，绝不产生
         // "Merge branch 'main' of ..." 合并提交。冲突会停在变基中间，
         // 由界面的冲突面板接手，跟显式变基是同一条路。
         // `--autostash`：工作区有未提交改动时先自动存起来，变基完再恢复，
         // 不然裸 pull --rebase 会直接拒绝执行。
-        try await run(
-            ["pull", "--rebase", "--autostash"],
-            in: directory,
-            timeout: ProcessRunner.networkTimeout
-        )
+        var arguments = ["pull", "--rebase", "--autostash"]
+        if let remote { arguments.append(remote) }
+        if let branch { arguments.append(branch) }
+        try await run(arguments, in: directory, timeout: ProcessRunner.networkTimeout)
     }
 
     /// 推送。
