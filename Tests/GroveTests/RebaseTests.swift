@@ -223,3 +223,100 @@ func XCTAssertThrowsErrorAsync(
         // 预期
     }
 }
+
+/// 变基拉取：拉取按钮的行为必须是 rebase 而不是 merge / ff-only。
+/// 用本地裸仓库当远端，跑真 `git pull`。
+final class PullRebaseTests: XCTestCase {
+    private var root: URL!
+    private var origin: URL!
+    private var git: GitClient!
+
+    override func setUp() async throws {
+        root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("grove-pullrebase-\(UUID().uuidString)")
+        origin = root.appendingPathComponent("origin.git")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        git = try await GitClient.resolve()
+
+        try await git.run(["init", "-q", "--bare", "-b", "main", origin.path], in: root)
+        try await git.run(["clone", "-q", origin.path, "clone"], in: root)
+        root = root.appendingPathComponent("clone")
+        try await git.run(["config", "user.email", "t@example.com"], in: root)
+        try await git.run(["config", "user.name", "测试"], in: root)
+    }
+
+    override func tearDown() async throws {
+        try? FileManager.default.removeItem(at: root.deletingLastPathComponent())
+    }
+
+    private func write(_ text: String, to name: String) throws {
+        try text.write(to: root.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+
+    private func commit(_ message: String) async throws {
+        try await git.run(["add", "-A"], in: root)
+        try await git.run(["commit", "-qm", message], in: root)
+    }
+
+    /// 本地和远端各自前进（分叉）。以前的 --ff-only 在这里会直接报错。
+    func testDivergedPullRebasesLocalCommitsOntoRemote() async throws {
+        try write("初始\n", to: "a.txt")
+        try await commit("初始")
+        try await git.run(["push", "-q", "origin", "main"], in: root)
+
+        // 远端新提交：先在克隆里做出来推上去，再让本地退回去 —— 
+        // 本地和远端就各有一个对方没有的提交了。
+        try write("远端改动\n", to: "remote.txt")
+        try await commit("远端提交")
+        try await git.run(["push", "-q", "origin", "main"], in: root)
+        try await git.run(["reset", "-q", "--hard", "HEAD~1"], in: root)
+
+        // 本地新提交。
+        try write("本地改动\n", to: "local.txt")
+        try await commit("本地提交")
+
+        // 分叉已经形成：本地和远端各有对方没有的提交。
+        let ahead = try await git.run(["rev-list", "--count", "origin/main..HEAD"], in: root)
+        let behind = try await git.run(["rev-list", "--count", "HEAD..origin/main"], in: root)
+        XCTAssertEqual(ahead.trimmingCharacters(in: .whitespacesAndNewlines), "1")
+        XCTAssertEqual(behind.trimmingCharacters(in: .whitespacesAndNewlines), "1")
+
+        try await git.pull(in: root)
+
+        // 历史线性：本地提交在远端提交之上，没有合并提交。
+        let subjects = try await git.log(in: root, limit: 10, revision: "HEAD").map(\.subject)
+        XCTAssertEqual(subjects.first, "本地提交")
+        XCTAssertTrue(subjects.contains("远端提交"))
+        XCTAssertFalse(subjects.contains { $0.hasPrefix("Merge") })
+
+        let parents = try await git.run(["rev-list", "--parents", "-n", "1", "HEAD"], in: root)
+        XCTAssertEqual(
+            parents.split(separator: " ").count, 2,  // HEAD + 单亲 = 没有合并提交
+            "拉取产生了合并提交：\(parents)"
+        )
+    }
+
+    /// 工作区有未提交改动时照样能拉（autostash），改动原样回来。
+    func testPullWithDirtyWorktreeAutostashes() async throws {
+        try write("初始\n", to: "a.txt")
+        try await commit("初始")
+        try await git.run(["push", "-q", "origin", "main"], in: root)
+
+        try write("远端改动\n", to: "remote.txt")
+        try await commit("远端提交")
+        try await git.run(["push", "-q", "origin", "main"], in: root)
+        try await git.run(["reset", "-q", "--hard", "HEAD~1"], in: root)
+
+        // 未提交的本地改动 + 需要变基的已提交改动同时存在。
+        try write("本地改动\n", to: "local.txt")
+        try await commit("本地提交")
+        try write("还没提交的东西\n", to: "dirty.txt")
+
+        try await git.pull(in: root)
+
+        let dirty = try String(contentsOf: root.appendingPathComponent("dirty.txt"), encoding: .utf8)
+        XCTAssertEqual(dirty, "还没提交的东西\n")
+        let subjects = try await git.log(in: root, limit: 10, revision: "HEAD").map(\.subject)
+        XCTAssertEqual(subjects.first, "本地提交")
+    }
+}

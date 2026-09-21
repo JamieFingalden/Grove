@@ -490,9 +490,16 @@ struct GitClient: Sendable {
     }
 
     func pull(in directory: URL) async throws {
-        // `--ff-only`：拉取绝不自动产生合并提交。真需要合并时让用户显式选，
-        // 免得 GUI 悄悄造出一堆 "Merge branch 'main' of ..." 的垃圾提交。
-        try await run(["pull", "--ff-only"], in: directory, timeout: ProcessRunner.networkTimeout)
+        // `--rebase`：分叉时把本地提交重放到远端最新之上，绝不产生
+        // "Merge branch 'main' of ..." 合并提交。冲突会停在变基中间，
+        // 由界面的冲突面板接手，跟显式变基是同一条路。
+        // `--autostash`：工作区有未提交改动时先自动存起来，变基完再恢复，
+        // 不然裸 pull --rebase 会直接拒绝执行。
+        try await run(
+            ["pull", "--rebase", "--autostash"],
+            in: directory,
+            timeout: ProcessRunner.networkTimeout
+        )
     }
 
     /// 推送。

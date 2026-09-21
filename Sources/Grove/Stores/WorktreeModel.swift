@@ -939,7 +939,23 @@ final class WorktreeModel: Identifiable {
     }
 
     func pull() async {
-        await performSync(.pull, activity: "正在拉取…") {
+        await performSync(
+            .pull,
+            activity: "正在拉取…",
+            onFailure: { error in
+                // 变基拉取遇到冲突时 git 非零退出但仓库停在变基中间。
+                // 这不是「拉取失败」—— 用户接下来要解决冲突，跟显式变基是同一条路。
+                await self.refresh()
+                if self.status.operation == .rebase {
+                    self.app?.report(
+                        title: "拉取遇到冲突",
+                        detail: "本地提交正在重放到远端最新之上，有文件冲突。在「冲突」区逐个解决并标记为已解决，再点上方的「继续」；不想继续就点「中止」。"
+                    )
+                } else {
+                    self.app?.report(title: "拉取失败", error: error)
+                }
+            }
+        ) {
             try await self.git.pull(in: self.path)
         }
     }

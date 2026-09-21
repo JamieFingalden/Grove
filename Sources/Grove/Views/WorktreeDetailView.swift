@@ -335,7 +335,7 @@ private struct WorktreeHeader: View {
                 syncLabel(for: .pull, title: "拉取", systemImage: "arrow.down")
             }
             .tint(syncTint(for: .pull))
-            .help("git pull --ff-only")
+            .help("git pull --rebase --autostash：本地提交重放到远端最新之上，不产生合并提交；工作区改动自动暂存恢复")
             .disabled(model.status.upstream == nil || model.activity != nil)
 
             rebaseControl
