@@ -137,11 +137,13 @@ enum DateParsing {
     /// 每次新建一个又太浪费（刷新一次历史要解析几百个日期）。
     /// FormatStyle 是值类型，共享它没有任何数据竞争风险。
     private static let style = Date.ISO8601FormatStyle()
+    private static let fractionalStyle = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
 
     static func iso8601(_ string: String) -> Date? {
         let trimmed = string.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return nil }
-        // git 的 `%aI` 带时区偏移（`+08:00`），这个 style 能正确吃下来。
+        // GitLab 带小数秒，git 的 `%aI` 不带；两种格式都可能带时区偏移。
+        if let date = try? fractionalStyle.parse(trimmed) { return date }
         return try? style.parse(trimmed)
     }
 }
