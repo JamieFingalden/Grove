@@ -61,7 +61,7 @@ enum CodeSyntax {
         var result = AttributedString()
         guard !text.isEmpty else { return result }
 
-        let tokens = (path.flatMap(Language.forPath(_:)).map { tokens(for: text, language: $0) }) ?? []
+        let tokens = (path.flatMap(Language.forPath(_:)).map { Self.tokens(for: text, language: $0) }) ?? []
         // 所有样式边界点：语法 token 边界 + 词级高亮边界，按位置排序去重。
         var boundaries: Set<String.Index> = [text.startIndex, text.endIndex]
         for token in tokens {

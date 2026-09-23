@@ -348,6 +348,21 @@ final class DiffReviewTests: XCTestCase {
         )
         XCTAssertEqual(SplitLayout.dominantSide(for: synthetic.lines), .new)
     }
+
+    func testConflictMarkerCountIgnoresIndentedLookalikes() {
+        // 编辑器用行首 `<<<<<<<` 数冲突块：字符串字面量里带缩进的伪标记不算，
+        // 否则会拦着用户标记已解决。
+        let conflicted = "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> feature\nc"
+        XCTAssertEqual(CodeEditorSheet.conflictMarkerCount(in: conflicted), 1)
+        XCTAssertEqual(CodeEditorSheet.conflictMarkerCount(in: "plain text"), 0)
+        XCTAssertEqual(CodeEditorSheet.conflictMarkerCount(in: ""), 0)
+        XCTAssertEqual(CodeEditorSheet.conflictMarkerCount(in: "  <<<<<<< 缩进的不算"), 0)
+        // 多块也能数对
+        XCTAssertEqual(
+            CodeEditorSheet.conflictMarkerCount(in: "<<<<<<< a\n=======\n>>>>>>> b\n<<<<<<< c\n=======\n>>>>>>> d"),
+            2
+        )
+    }
 }
 
 extension CodeSyntax {

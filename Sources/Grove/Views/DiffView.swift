@@ -5,6 +5,10 @@ import SwiftUI
 struct DiffPane: View {
     @Bindable var model: WorktreeModel
 
+    /// 正在编辑的文件。轻量代码编辑：改个参数值、手写冲突的第三种解法，
+    /// 不值得为此开一个 IDE。
+    @State private var editingChange: FileChange?
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -21,6 +25,14 @@ struct DiffPane: View {
                 .animation(.snappy(duration: 0.2), value: model.selectedLineCount)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .sheet(item: $editingChange) { change in
+            CodeEditorSheet(
+                url: model.path.appendingPathComponent(change.path),
+                displayPath: change.path,
+                model: model,
+                conflictedChange: change.isConflicted ? change : nil
+            )
+        }
         // 键盘浏览：Space 勾/取消整块，[ / ] 在文件间跳。焦点在 diff 面板时生效。
         .focusable(true)
         .onKeyPress(.space) {
@@ -161,6 +173,16 @@ struct DiffPane: View {
                 .labelsHidden()
                 .fixedSize()
                 .controlSize(.small)
+            }
+
+            if let change = model.selectedChange, change.primaryKind != .deleted {
+                Button {
+                    editingChange = change
+                } label: {
+                    Label("编辑", systemImage: "square.and.pencil")
+                }
+                .controlSize(.small)
+                .help("直接在 Grove 里编辑这个文件（⌘S 保存）；冲突文件改完可以标记为已解决")
             }
 
             if let change = model.selectedChange, !showsConflictPane(for: change) {
