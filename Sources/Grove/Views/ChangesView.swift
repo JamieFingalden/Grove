@@ -8,7 +8,9 @@ struct ChangesView: View {
         // 不显式声明撑满的话，整个详情区会缩成中间一条、上下留出大片空白，
         // 而文件列表被挤到几乎没有高度、内容直接被裁掉。
         GeometryReader { geometry in
-            let defaultListWidth = max(260, geometry.size.width * 0.3)
+            // 文件列表是两行式紧凑行，不需要 30% 那么宽 —— 默认宽度
+            // 按比例但封顶，把空间留给代码。分隔条仍可手动拖动。
+            let defaultListWidth = min(max(260, geometry.size.width * 0.22), 360)
             HSplitView {
                 VStack(spacing: 0) {
                     fileList
@@ -93,6 +95,11 @@ struct ChangesView: View {
                     }
                 }
                 .listStyle(.inset)
+                // 列表聚焦时 Space 也能勾整块（与 diff 面板同款快捷键），手不用离开键盘。
+                .onKeyPress(.space) {
+                    model.toggleCurrentHunk()
+                    return .handled
+                }
                 // 列表要吃掉「表头」和「提交框」之外的全部高度。
                 // 少了这句，List 只按内容的固有高度显示，改动一多就被裁成一条。
                 .frame(maxHeight: .infinity)

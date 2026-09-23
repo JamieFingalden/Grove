@@ -699,6 +699,8 @@ struct MergePullRequestSheet: View {
     @State private var deleteBranch = true
     @State private var isWorking = false
     @State private var failure: String?
+    /// 服务端因为冲突拒绝合并（或预检就知道有冲突），可以改在本地解决。
+    @State private var conflictBlocked = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -722,7 +724,7 @@ struct MergePullRequestSheet: View {
                     .foregroundStyle(.orange)
             }
             if pullRequest.mergeable?.uppercased() == "CONFLICTING" {
-                Label("跟目标分支有冲突，托管平台无法自动合并。", systemImage: "exclamationmark.triangle.fill")
+                Label("跟目标分支有冲突，服务端无法自动合并。可以直接在本地解决并合并。", systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.red)
             }
@@ -763,6 +765,22 @@ struct MergePullRequestSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            if conflictBlocked || pullRequest.mergeable?.uppercased() == "CONFLICTING" {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Grove 会把请求的改动合入本地检出的「\(pullRequest.baseRefName)」分支：有冲突的文件会出现在变更视图的「冲突」区，解决后点「继续」完成合并；不想继续了随时「中止」，仓库回到合并前的样子。")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button {
+                        Task { await mergeLocally() }
+                    } label: {
+                        Label("在本地解决并合并…", systemImage: "arrow.triangle.merge")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isWorking)
+                }
+            }
+
             Spacer()
 
             HStack {
@@ -800,9 +818,23 @@ struct MergePullRequestSheet: View {
         } catch {
             // 合并失败的原因（缺权限、检查未过、分支保护规则）都在托管平台 CLI 的报错里，
             // 直接显示在弹窗里而不是关掉窗口 —— 用户正要决定下一步怎么办。
-            failure = error.localizedDescription
+            // 冲突是唯一能就地接手处理的：改走本地合并流程，别让用户
+            // 对着一句英文原始报错束手无策。
+            let message = error.localizedDescription
+            if message.lowercased().contains("conflict") || message.contains("冲突") {
+                conflictBlocked = true
+                failure = "服务端无法自动合并：这个请求和目标分支有冲突，需要在本地解决后再合并。原始报错：\(message)"
+            } else {
+                conflictBlocked = false
+                failure = message
+            }
             return
         }
+        await finishMerge()
+    }
+
+    /// 服务端或本地合并成功后的收尾：关弹窗、刷新列表和缓存。
+    private func finishMerge() async {
         repository.removePullRequest(number: pullRequest.number)
         appModel.removeCachedAIReview(
             for: repository.root,
@@ -812,6 +844,27 @@ struct MergePullRequestSheet: View {
         // 服务端已经合并成功就立刻关弹窗。后面的 fetch、分支和所有工作树
         // 状态刷新可能需要几秒，它们是同步本地视图，不应让用户一直守着 loading。
         await repository.fetch()
+    }
+
+    /// 改在本地合并：把 PR 的源提交合入目标分支的工作树。
+    /// 冲突时不在这里解决 —— 把用户直接送到变更视图的冲突现场。
+    private func mergeLocally() async {
+        isWorking = true
+        defer { isWorking = false }
+        failure = nil
+
+        do {
+            switch try await repository.mergePullRequestLocally(pullRequest) {
+            case .conflicted(let worktree):
+                appModel.selection = .worktree(repository: repository.root, worktree: worktree)
+                dismiss()
+            case .mergedAndPushed:
+                await finishMerge()
+            }
+        } catch {
+            conflictBlocked = false
+            failure = error.localizedDescription
+        }
     }
 }
 

@@ -529,6 +529,17 @@ struct GitClient: Sendable {
         )
     }
 
+    /// 在指定工作树里开始一次普通合并。服务端拒绝自动合并、需要本地
+    /// 解决时用它。冲突时 git 以非零退出，`run` 会抛错 —— 调用方随后用
+    /// `currentOperation` 确认是否进入「合并中」，是则走既有的继续/中止流程。
+    func startMerge(message: String, of revision: String, in directory: URL) async throws {
+        try await run(
+            ["merge", "--no-edit", "--no-progress", "-m", message, revision],
+            in: directory,
+            timeout: ProcessRunner.networkTimeout
+        )
+    }
+
     static func pushArguments(
         remote: String?,
         branch: String?,
@@ -881,6 +892,10 @@ enum GroveError: LocalizedError, Sendable {
     case worktreePathExists(URL)
     case branchAlreadyCheckedOut(branch: String, worktree: URL)
     case operationNotSteppable(RepositoryOperation)
+    /// 想在本地合并 PR 时，没有任何工作树停在目标分支上。
+    case noWorktreeOnBranch(String)
+    /// 目标工作树还有未提交的改动，直接合并可能把两摊事情搅在一起。
+    case worktreeDirty(String)
 
     var errorDescription: String? {
         switch self {
@@ -898,6 +913,10 @@ enum GroveError: LocalizedError, Sendable {
             "目录已存在：\(url.path)"
         case .branchAlreadyCheckedOut(let branch, let worktree):
             "分支 \(branch) 已经在工作树「\(worktree.lastPathComponent)」里检出了。git 不允许同一分支同时存在于两个工作树。"
+        case .noWorktreeOnBranch(let branch):
+            "没有找到停在「\(branch)」分支上的工作树。请先检出或创建一个「\(branch)」的工作树，再在本地合并。"
+        case .worktreeDirty(let name):
+            "工作树「\(name)」还有未提交的改动。先提交或贮藏它们，再在本地合并。"
         case .operationNotSteppable(let operation):
             "\(operation.rawValue)的状态无法从 Grove 里继续或中止，请在终端处理。"
         }

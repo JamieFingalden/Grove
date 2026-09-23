@@ -532,6 +532,98 @@ final class WorktreeModel: Identifiable {
         selectionAnchorLineID = ids.first
     }
 
+    // MARK: - 键盘浏览
+
+    /// 键盘浏览用的文件顺序：冲突 → 暂存 → 未暂存，与变更列表的分区一致，
+    /// [ / ] 按这个顺序在文件间跳。
+    struct ChangeRowRef: Hashable {
+        var path: String
+        var side: DiffSide
+    }
+
+    static func orderedChangeRows(_ status: WorktreeStatus) -> [ChangeRowRef] {
+        var rows: [ChangeRowRef] = []
+        for change in status.changes where change.isConflicted {
+            rows.append(ChangeRowRef(path: change.path, side: .worktree))
+        }
+        for change in status.changes where !change.isConflicted && change.staged != nil {
+            rows.append(ChangeRowRef(path: change.path, side: .staged))
+        }
+        for change in status.changes where !change.isConflicted && change.staged == nil {
+            rows.append(ChangeRowRef(path: change.path, side: .worktree))
+        }
+        return rows
+    }
+
+    /// [ / ]：跳到相邻的文件。当前选中行不在列表里（比如刚被暂存掉）时，
+    /// 就近落在同名文件上，浏览的连贯感不断。
+    func selectNeighboringChange(offset: Int) {
+        let rows = Self.orderedChangeRows(status)
+        guard !rows.isEmpty else { return }
+        let index: Int
+        if let current = rows.firstIndex(where: { $0.path == selectedPath && $0.side == diffSide })
+            ?? rows.firstIndex(where: { $0.path == selectedPath }) {
+            index = min(max(current + offset, 0), rows.count - 1)
+        } else {
+            index = offset > 0 ? 0 : rows.count - 1
+        }
+        diffSide = rows[index].side
+        selectedPath = rows[index].path
+    }
+
+    /// Space：勾/取消「光标」所在整块。光标 = 上次点选的行；
+    /// 没点过就落在当前文件的第一个有改动的 hunk 上。
+    func toggleCurrentHunk() {
+        guard let diff, selectedChange?.isConflicted != true else { return }
+        var target: DiffHunk?
+        if let anchor = selectionAnchorLineID {
+            target = Self.hunk(containingLineID: anchor, in: diff)
+        }
+        if target == nil {
+            target = diff.first { $0.id == selectedPath }?
+                .hunks.first { hunk in hunk.lines.contains { $0.kind == .addition || $0.kind == .deletion } }
+        }
+        guard let hunk = target else { return }
+        toggleHunk(hunk)
+    }
+
+    /// 找到包含指定行的 hunk（键盘光标定位用）。
+    static func hunk(containingLineID id: Int, in diff: [FileDiff]) -> DiffHunk? {
+        for file in diff {
+            for hunk in file.hunks where hunk.lines.contains(where: { $0.id == id }) {
+                return hunk
+            }
+        }
+        return nil
+    }
+
+    /// 展开未更改区域：按当前查看的一侧读取真实文件内容。
+    /// 工作区侧直接读磁盘；暂存区侧读 index 里的版本 ——
+    /// 工作区可能已经改得跟暂存区不一样了，不能拿磁盘内容充数。
+    func unchangedLines(path: String, startLine: Int, count: Int) async -> [String]? {
+        // 防御性上限：LazyVStack 扛得住大行数，但不能让一次误点
+        // 把一个 50 万行的文件全吞进内存。
+        guard count > 0, count <= 100_000 else { return nil }
+        do {
+            let raw: String
+            if diffSide == .staged {
+                raw = try await git.run(["show", ":\(path)"], in: worktree.path)
+            } else {
+                raw = try String(contentsOf: worktree.path.appendingPathComponent(path), encoding: .utf8)
+            }
+            // 逐行剥离 CRLF；文件末尾的换行会多切出一个空尾元素，不影响切片。
+            let lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map { sub -> String in
+                let text = String(sub)
+                return text.hasSuffix("\r") ? String(text.dropLast()) : text
+            }
+            let start = startLine - 1
+            guard start >= 0, start + count <= lines.count else { return nil }
+            return Array(lines[start..<(start + count)])
+        } catch {
+            return nil
+        }
+    }
+
     func hunkSelectionState(_ hunk: DiffHunk) -> HunkSelection {
         let changed = hunk.lines.filter { $0.kind == .addition || $0.kind == .deletion }.map(\.id)
         guard !changed.isEmpty else { return .none }

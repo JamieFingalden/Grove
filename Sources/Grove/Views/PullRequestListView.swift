@@ -23,8 +23,9 @@ struct PullRequestListView: View {
 
     private var splitBody: some View {
         GeometryReader { geometry in
-            // geometry 已经是扣掉左侧项目菜单后的内容区；列表默认 30%，详情默认 70%。
-            let defaultListWidth = max(260, geometry.size.width * 0.3)
+            // geometry 已经是扣掉左侧项目菜单后的内容区。列表默认按比例但封顶
+            // （两行式文件行不需要 30% 那么宽），空间留给右侧详情。
+            let defaultListWidth = min(max(260, geometry.size.width * 0.22), 360)
             HSplitView {
                 list
                     .frame(
@@ -362,6 +363,13 @@ private struct PullRequestDetailView: View {
     @State private var threads: [ReviewThread] = []
     @State private var diffFiles: [FileDiff] = []
     @State private var selectedDiffFileID: String?
+
+    /// 详情分区：讨论流 / 代码查看器。代码查看器要撑满剩余高度，
+    /// 放不进页面的 ScrollView 里（那只能得到固定 520pt 的小盒子，
+    /// 文件列表和 diff 拼在半高窗口里，review 体验和变更视图差一大截）——
+    /// 分页是结构需要，不只是导航偏好。
+    private enum DetailTab { case conversation, code }
+    @State private var activeDetailTab: DetailTab = .conversation
     @State private var isLoadingThreads = false
     @State private var isLoadingDiff = false
     @State private var didFailDiff = false
@@ -379,22 +387,52 @@ private struct PullRequestDetailView: View {
     private var current: PullRequest { detailed ?? pullRequest }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+        VStack(spacing: 0) {
+            // 头部固定：标题、操作、标签、统计。不跟内容一起滚 ——
+            // 在对话和代码之间来回切时，标题栏一直在原位。
+            VStack(alignment: .leading, spacing: 14) {
                 titleBlock
                 actionBar
                 if !current.labels.isEmpty { labelRow }
                 statsRow
-                if let checks = current.statusCheckRollup, !checks.isEmpty {
-                    checksSection(checks)
-                }
-                bodySection
-                codeSection
-                if isReviewingAI || aiReview != nil { aiReviewSection }
-                reviewSection
             }
-            .padding(18)
+            .padding(.horizontal, 18)
+            .padding(.top, 16)
+            .padding(.bottom, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            Divider()
+
+            Picker("分区", selection: $activeDetailTab) {
+                Text("概览").tag(DetailTab.conversation)
+                Text("代码变更\(diffFiles.isEmpty ? "" : " · \(diffFiles.count)")")
+                    .tag(DetailTab.code)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 18)
+            .padding(.vertical, 8)
+
+            Group {
+                if activeDetailTab == .conversation {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            if let checks = current.statusCheckRollup, !checks.isEmpty {
+                                checksSection(checks)
+                            }
+                            bodySection
+                            if isReviewingAI || aiReview != nil { aiReviewSection }
+                            reviewSection
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.bottom, 18)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                } else {
+                    codeSection
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .task {
             aiReviewInstructions = appModel.aiReviewInstructions(for: repository.root)
@@ -949,17 +987,11 @@ private struct PullRequestDetailView: View {
     private var codeSection: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
-                Text("代码变更")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                if !diffFiles.isEmpty {
-                    Text("\(diffFiles.count) 个文件")
-                        .font(.system(size: 10, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.tertiary)
-                }
                 if isLoadingDiff { ProgressView().controlSize(.mini) }
                 Spacer()
+                if !diffFiles.isEmpty {
+                    DiffReadingControls()
+                }
                 if didFailDiff {
                     Button("重试") { Task { await reloadDiff() } }
                         .buttonStyle(.borderless)
@@ -985,8 +1017,9 @@ private struct PullRequestDetailView: View {
                     }
                 } else {
                     GeometryReader { geometry in
-                        // 文件列表只占代码评审区域的 30%，把主要空间留给代码。
-                        let defaultFileListWidth = max(180, geometry.size.width * 0.3)
+                        // 代码评审的文件列表同样封顶：它是导航不是主角，
+                        // 默认给足看清文件名即可，代码区拿大头。
+                        let defaultFileListWidth = min(max(200, geometry.size.width * 0.2), 320)
                         HSplitView {
                             List(diffFiles, selection: $selectedDiffFileID) { file in
                                 DiffFileRow(file: file)
@@ -1013,7 +1046,7 @@ private struct PullRequestDetailView: View {
                     }
                 }
             }
-            .frame(height: 520)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .textBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay { RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5) }

@@ -29,6 +29,17 @@ struct DiffHunk: Identifiable, Hashable, Sendable {
     var newStart: Int
     var newCount: Int
     var lines: [DiffLine]
+
+    /// 这个 hunk 里有没有旧行号可显示。新建文件的 hunk 一条都没有 ——
+    /// 统一视图据此收起旧行号列，不给全空的死区留位置。
+    var hasOldNumbers: Bool {
+        lines.contains { $0.oldNumber != nil }
+    }
+
+    /// 同上，新侧。纯删除的 hunk 没有新行号。
+    var hasNewNumbers: Bool {
+        lines.contains { $0.newNumber != nil }
+    }
 }
 
 /// 一个文件的 diff。
@@ -57,6 +68,19 @@ struct FileDiff: Identifiable, Hashable, Sendable {
 
     var id: String { newPath ?? oldPath ?? "unknown" }
     var displayPath: String { newPath ?? oldPath ?? "未知文件" }
+
+    /// 文件名部分（不含目录）。列表和标题里永远完整显示它：
+    /// 同目录下的多个文件，中间截断会把唯一的区分信息抹掉。
+    var fileName: String {
+        guard let slash = displayPath.lastIndex(of: "/") else { return displayPath }
+        return String(displayPath[displayPath.index(after: slash)...])
+    }
+
+    /// 目录部分（不含文件名）；根目录返回 nil。
+    var directory: String? {
+        guard let slash = displayPath.lastIndex(of: "/") else { return nil }
+        return String(displayPath[displayPath.startIndex..<slash])
+    }
 
     var additions: Int {
         hunks.reduce(0) { $0 + $1.lines.filter { $0.kind == .addition }.count }

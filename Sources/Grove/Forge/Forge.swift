@@ -54,6 +54,15 @@ enum ForgeKind: String, Sendable, Hashable, CaseIterable {
         }
     }
 
+    /// 只抓源端（写到 FETCH_HEAD）：供「在本地合并 PR」用，
+    /// 不落地任何本地分支，合完即丢，不污染分支列表。
+    func headOnlyRefspec(number: Int) -> String {
+        switch self {
+        case .github: "+refs/pull/\(number)/head"
+        case .gitlab: "+refs/merge-requests/\(number)/head"
+        }
+    }
+
     /// 安装和登录的提示，工具缺失时显示给用户。
     var setupHint: String {
         switch self {

@@ -8,14 +8,33 @@ struct DiffPane: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            if model.selectedLineCount > 0 {
-                Divider()
-                selectionBar
-            }
             Divider()
             content
+                // 勾行操作条浮在 diff 上方而不是挤进布局：勾选瞬间你正盯着的
+                // 那行不该被顶走，取消勾选时内容也不该跳回来。
+                .overlay(alignment: .top) {
+                    if model.selectedLineCount > 0 {
+                        selectionBar
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                }
+                .animation(.snappy(duration: 0.2), value: model.selectedLineCount)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // 键盘浏览：Space 勾/取消整块，[ / ] 在文件间跳。焦点在 diff 面板时生效。
+        .focusable(true)
+        .onKeyPress(.space) {
+            model.toggleCurrentHunk()
+            return .handled
+        }
+        .onKeyPress("[") {
+            model.selectNeighboringChange(offset: -1)
+            return .handled
+        }
+        .onKeyPress("]") {
+            model.selectNeighboringChange(offset: 1)
+            return .handled
+        }
     }
 
     /// 勾了行之后才出现的操作条。
@@ -61,7 +80,14 @@ struct DiffPane: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(Color.accentColor.opacity(0.08))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.14), radius: 8, y: 2)
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @MainActor
@@ -136,10 +162,17 @@ struct DiffPane: View {
                 .fixedSize()
                 .controlSize(.small)
             }
+
+            if let change = model.selectedChange, !showsConflictPane(for: change) {
+                layoutToggle
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
     }
+
+    /// 阅读（布局 + 字号）控制。选择持久化，变更视图和 PR 评审共用一份。
+    private var layoutToggle: some View { DiffReadingControls() }
 
     @ViewBuilder
     private var content: some View {
@@ -158,7 +191,15 @@ struct DiffPane: View {
                 } else {
                     // 冲突文件的 combined diff 只读：从三方 diff 里裁出来的补丁没法 `git apply`，
                     // 勾行暂存只会报一堆看不懂的错。
-                    DiffContentView(files: diff, model: model.selectedChange?.isConflicted == true ? nil : model)
+                    DiffContentView(
+                        files: diff,
+                        model: model.selectedChange?.isConflicted == true ? nil : model,
+                        // combined diff 没有可靠的旧/新两侧，分栏只会配出错位的行。
+                        allowSplit: model.selectedChange?.isConflicted != true,
+                        gapLoader: { path, startLine, count in
+                            await model.unchangedLines(path: path, startLine: startLine, count: count)
+                        }
+                    )
                 }
             } else {
                 ProgressView()
@@ -201,120 +242,241 @@ struct DiffContentView: View {
     var model: WorktreeModel?
     /// 历史页一次只展示一个选中文件，仍要保留文件标题，避免代码失去归属感。
     var showsFileHeaders = false
-    /// 提前算好的内容宽度。等宽字体的行宽可以按字符数精确估计，不需要靠
-    /// 逐行 GeometryReader 现场量 —— 那套做法在大 diff 下每帧要收集上千个
-    /// preference 再重算 body，滚动直接掉帧。
-    private let contentWidth: CGFloat
+    /// 合并冲突的 combined diff 没有可靠的旧/新两侧，禁用分栏。
+    var allowSplit = true
+    /// 展开未更改区域时读取文件真实内容的加载器：(路径, 起始行, 行数)。
+    /// 为 nil（比如 PR 评审没有本地文件可读）时不显示折叠条。
+    typealias GapLoader = (_ path: String, _ startLine: Int, _ count: Int) async -> [String]?
+    var gapLoader: GapLoader?
 
-    init(files: [FileDiff], model: WorktreeModel? = nil, showsFileHeaders: Bool = false) {
+    /// 展开过的未更改区域（原始文本行）。key = "文件#hunk"。
+    @State private var expandedGapKeys: Set<String> = []
+    @State private var expandedGapLines: [String: [String]] = [:]
+    @AppStorage(DiffLayout.storageKey) private var layoutRaw = DiffLayout.unified.rawValue
+
+    /// 词级差异区间（line.id 索引）。init 里一次算完，
+    /// 滚动时行视图只做查表，不在 body 里反复扫字符串。
+    private let wordHighlights: [Int: [Range<String.Index>]]
+
+    private var isSplit: Bool { allowSplit && layoutRaw == DiffLayout.split.rawValue }
+
+    /// 阅读栏的最大宽度（pt）。GitHub 的 diff 页面同样限宽居中：视线扫一行
+    /// 100+ 字符已经很吃力，内容左贴边、右侧一大片空背景，观感像布局坏了。
+    /// 取值按「常态窗口也能触发」来定：面板超过这个宽就开始居中留边，
+    /// 否则只有全屏才生效，用户会觉得改了和没改一样。
+    private static let readingColumnWidth: CGFloat = 920
+
+    init(files: [FileDiff], model: WorktreeModel? = nil, showsFileHeaders: Bool = false,
+         allowSplit: Bool = true, gapLoader: GapLoader? = nil) {
         self.files = files
         self.model = model
         self.showsFileHeaders = showsFileHeaders
-        self.contentWidth = Self.estimatedWidth(for: files)
+        self.allowSplit = allowSplit
+        self.gapLoader = gapLoader
+
+        var highlights: [Int: [Range<String.Index>]] = [:]
+        for file in files {
+            // line id 是解析器里的全局计数器，跨文件不重复，直接合并。
+            for (lineID, ranges) in DiffWordHighlight.ranges(for: file) {
+                highlights[lineID, default: []].append(contentsOf: ranges)
+            }
+        }
+        self.wordHighlights = highlights
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            ScrollView([.vertical, .horizontal]) {
-                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
-                    ForEach(files) { file in
-                        Section {
-                            if file.isBinary {
+        // 流式文档：长行自动折行、没有横向滚动（旧行为是按最长行定宽的固定画布，
+        // 一行 500 字符就把整个文件撑成横向滚动）。
+        //
+        // 阅读栏限宽 + 居中（GitHub 同款）：超宽窗口下内容像一页居中的文档，
+        // 两侧留白对称、读作「边距」；内容左贴边、右侧一大片空背景，
+        // 观感上则像布局坏了 —— 短行为主的文件尤其明显。
+        ScrollView(.vertical) {
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                ForEach(files) { file in
+                    Section {
+                        if file.isBinary {
+                            DiffNotice(
+                                text: "二进制文件，无法按行比较。",
+                                systemImage: "doc.badge.gearshape"
+                            )
+                        } else if file.isModeChangeOnly {
+                            DiffNotice(
+                                text: "只有文件权限变了：\(file.oldMode ?? "?") → \(file.newMode ?? "?")",
+                                systemImage: "lock.rotation"
+                            )
+                        } else if file.hunks.isEmpty {
+                            if file.isDiffMissing {
                                 DiffNotice(
-                                    text: "二进制文件，无法按行比较。",
-                                    systemImage: "doc.badge.gearshape"
+                                    text: "文件过大，服务端未返回 diff 内容，本地也没有可补算的提交；请在浏览器中查看。",
+                                    systemImage: "exclamationmark.triangle"
                                 )
-                            } else if file.isModeChangeOnly {
-                                DiffNotice(
-                                    text: "只有文件权限变了：\(file.oldMode ?? "?") → \(file.newMode ?? "?")",
-                                    systemImage: "lock.rotation"
-                                )
-                            } else if file.hunks.isEmpty {
-                                if file.isDiffMissing {
-                                    DiffNotice(
-                                        text: "文件过大，服务端未返回 diff 内容，本地也没有可补算的提交；请在浏览器中查看。",
-                                        systemImage: "exclamationmark.triangle"
-                                    )
-                                } else {
-                                    DiffNotice(text: "内容没有变化。", systemImage: "equal.circle")
-                                }
                             } else {
-                                ForEach(file.hunks) { hunk in
-                                    HunkView(hunk: hunk, model: model)
-                                }
+                                DiffNotice(text: "内容没有变化。", systemImage: "equal.circle")
                             }
-                        } header: {
-                            if showsFileHeaders || files.count > 1 {
-                                FileDiffHeader(file: file)
+                        } else {
+                            ForEach(file.hunks) { hunk in
+                                gapBefore(file: file, hunk: hunk)
+                                hunkBody(file: file, hunk: hunk)
                             }
+                        }
+                    } header: {
+                        if showsFileHeaders || files.count > 1 {
+                            FileDiffHeader(file: file)
                         }
                     }
                 }
-                .fixedSize(horizontal: true, vertical: false)
-                .frame(width: max(geometry.size.width, contentWidth), alignment: .leading)
-                .padding(.bottom, 12)
             }
-            .scrollIndicators(.visible, axes: [.vertical, .horizontal])
-            // 内容比视口小的时候，双向滚动的 ScrollView 会把它居中 ——
-            // 一个只改了两行的 diff 就会飘在面板正中间。锚到左上角才是代码该有的样子。
-            .defaultScrollAnchor(.topLeading)
-            // 文件列表变化后必须创建新的滚动容器。否则 SwiftUI 会沿用上一个文件的
-            // 横纵偏移，用户点开新文件时可能直接看到右下角甚至一片空白。
-            // 只哈希文件路径而不是整个 diff 内容：这里只需要“文件集合变了就重置
-            // 滚动”，深层哈希几千行文本每次 body 求值都是一笔可观的开销。
-            .id(files.map(\.id).hashValue)
+            .frame(maxWidth: Self.readingColumnWidth, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.bottom, 12)
         }
+        .scrollIndicators(.visible, axes: .vertical)
+        .defaultScrollAnchor(.top)
+        .onChange(of: files.map(\.id)) { _, _ in
+            // 文件集合变了，展开区域对应的行号已失效，全部收起。
+            expandedGapKeys.removeAll()
+            expandedGapLines.removeAll()
+        }
+        // 文件列表或布局变化后必须创建新的滚动容器，否则 SwiftUI 会沿用
+        // 上一个文件的纵向偏移。只哈希文件路径而不是整个 diff 内容：
+        // 深层哈希几千行文本每次 body 求值都是一笔可观的开销。
+        .id("\(files.map(\.id).hashValue)-\(layoutRaw)")
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
     }
 
-    // MARK: - 宽度估算
+    // MARK: - hunk 与折叠区渲染
 
-    /// 11.5pt 等宽字体单个 ASCII 字符约 6.9pt，取 7 留余量。
-    private static let characterWidth: CGFloat = 7
-    /// 勾选列 + 两列行号 + 标记列 + 内边距。
-    private static let gutterWidth: CGFloat = 16 + 38 + 38 + 6 + 10 + 24
+    @ViewBuilder
+    private func hunkBody(file: FileDiff, hunk: DiffHunk) -> some View {
+        let path = file.newPath ?? file.oldPath
+        if isSplit {
+            SplitHunkView(
+                hunk: hunk,
+                model: model,
+                filePath: path,
+                highlights: wordHighlights
+            )
+        } else {
+            HunkView(hunk: hunk, model: model, filePath: path, highlights: wordHighlights)
+        }
+    }
 
-    static func estimatedWidth(for files: [FileDiff]) -> CGFloat {
-        var maxUnits = 0
-        for file in files {
-            // 文件头除了路径还有箭头和增删计数。
-            maxUnits = max(maxUnits, displayUnits(file.displayPath) + 24)
-            for hunk in file.hunks {
-                maxUnits = max(maxUnits, displayUnits(hunk.header) + 12)
-                for line in hunk.lines {
-                    maxUnits = max(maxUnits, displayUnits(line.text))
+    /// 两个 hunk 之间（以及文件开头到第一个 hunk 之间）被 git 折叠掉的未更改区域。
+    /// 展开的内容只进视图层，永远不碰 PatchBuilder —— 那是数据完整性红线。
+    @ViewBuilder
+    private func gapBefore(file: FileDiff, hunk: DiffHunk) -> some View {
+        // 没有 loader（比如 PR 评审没有本地文件）就不显示折叠条。
+        if gapLoader != nil, let info = gapInfo(file: file, hunk: hunk) {
+            gapContent(file: file, hunk: hunk, info: info)
+        }
+    }
+
+    @ViewBuilder
+    private func gapContent(file: FileDiff, hunk: DiffHunk, info: (startLine: Int, count: Int)) -> some View {
+        let key = "\(file.id)#\(hunk.id)"
+        if let texts = expandedGapLines[key] {
+            gapHunkBody(file: file, hunk: hunk, startLine: info.startLine, texts: texts)
+        } else if expandedGapKeys.contains(key) {
+            DiffGapSeparator(count: info.count, isLoading: true, action: {})
+        } else {
+            DiffGapSeparator(count: info.count, isLoading: false) {
+                Task {
+                    expandedGapKeys.insert(key)
+                    guard let path = file.newPath ?? file.oldPath,
+                          let texts = await gapLoader?(path, info.startLine, info.count) else { return }
+                    expandedGapLines[key] = texts
                 }
             }
         }
-        return CGFloat(maxUnits) * characterWidth + gutterWidth
     }
 
-    /// 把一行文本换算成等宽字符单位数：ASCII 算 1，CJK/全角/emoji 算 2，
-    /// 制表符按 8 列算。宁可偏宽 —— 估窄了会把长行截没。
-    static func displayUnits(_ text: String) -> Int {
-        var units = 0
-        for scalar in text.unicodeScalars {
-            switch scalar.value {
-            case 0x09: units += 8
-            case 0x00...0x7F: units += 1
-            default: units += isWide(scalar) ? 2 : 1
+    /// 计算某个 hunk 前面折叠了多少行未更改内容。
+    private func gapInfo(file: FileDiff, hunk: DiffHunk) -> (startLine: Int, count: Int)? {
+        let previousNewEnd: Int
+        if let index = file.hunks.firstIndex(of: hunk), index > 0 {
+            let previous = file.hunks[index - 1]
+            previousNewEnd = previous.newStart + previous.newCount - 1
+        } else {
+            previousNewEnd = 0
+        }
+        let count = hunk.newStart - previousNewEnd - 1
+        guard count > 0 else { return nil }
+        return (previousNewEnd + 1, count)
+    }
+
+    @ViewBuilder
+    private func gapHunkBody(file: FileDiff, hunk: DiffHunk, startLine: Int, texts: [String]) -> some View {
+        let path = file.newPath ?? file.oldPath
+        let synthetic = Self.gapHunk(hollowing: hunk, startLine: startLine, texts: texts)
+        if isSplit {
+            SplitHunkView(
+                hunk: synthetic,
+                model: nil,
+                filePath: path,
+                highlights: [:]
+            )
+        } else {
+            HunkView(hunk: synthetic, model: nil, filePath: path, highlights: [:], showsHeader: false)
+        }
+    }
+
+    /// 把展开的原始文本行包成一个合成的 context hunk。行号双侧连续，
+    /// id 用负数空间，绝不与解析器分配的正数 id 撞车。
+    static func gapHunk(hollowing hunk: DiffHunk, startLine: Int, texts: [String]) -> DiffHunk {
+        let base = -(hunk.id * 100_003 + 1)
+        var lines: [DiffLine] = []
+        lines.reserveCapacity(texts.count)
+        for (offset, text) in texts.enumerated() {
+            let number = startLine + offset
+            lines.append(DiffLine(
+                id: base - offset,
+                kind: .context,
+                text: text.hasSuffix("\r") ? String(text.dropLast()) : text,
+                oldNumber: number,
+                newNumber: number
+            ))
+        }
+        return DiffHunk(
+            id: base,
+            header: "",
+            oldStart: startLine,
+            oldCount: texts.count,
+            newStart: startLine,
+            newCount: texts.count,
+            lines: lines
+        )
+    }
+}
+
+/// hunk 之间未更改区域的折叠条。展开成本是一次文件读取，所以默认收起。
+private struct DiffGapSeparator: View {
+    let count: Int
+    var isLoading = false
+    var action: () -> Void = {}
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if isLoading {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 9.5))
+                }
+                Text("间隔 \(count) 行未更改，点击展开")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.primary.opacity(0.04))
+            .contentShape(Rectangle())
         }
-        return units
-    }
-
-    private static func isWide(_ scalar: Unicode.Scalar) -> Bool {
-        switch scalar.value {
-        case 0x1100...0x115F, 0x2E80...0x303E, 0x3041...0x33FF,
-             0x3400...0x4DBF, 0x4E00...0x9FFF, 0xA000...0xA4CF,
-             0xAC00...0xD7A3, 0xF900...0xFAFF, 0xFE10...0xFE19,
-             0xFE30...0xFE6F, 0xFF00...0xFF60, 0xFFE0...0xFFE6,
-             0x1F300...0x1F64F, 0x1F900...0x1F9FF, 0x20000...0x3FFFD:
-            return true
-        default:
-            return false
-        }
+        .buttonStyle(.plain)
+        .help("展开查看这段没有变化的代码")
     }
 }
 
@@ -323,23 +485,33 @@ private struct FileDiffHeader: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            // 不截断路径。这个标题栏在双向滚动的 ScrollView 里，宽度由所在分组的
-            // 内容决定；让它参与压缩的话，短 diff 里的路径会被截成 `…pp.swift`
-            // 这种没法认的样子。让它把内容撑宽、交给横向滚动更合理。
-            Text(file.displayPath)
+            // 文件名完整优先：它是识别文件的主要信息。目录退到后面，
+            // 空间不够时截头保尾，而不是把文件名本身截断。
+            Text(file.fileName)
                 .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .fixedSize(horizontal: true, vertical: false)
+                .lineLimit(1)
+                .layoutPriority(1)
+
+            if let directory = file.directory {
+                Text(directory)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                    .layoutPriority(-1)
+            }
 
             if file.isRename, let oldPath = file.oldPath {
                 Text("← \(oldPath)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: true, vertical: false)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                    .layoutPriority(-2)
             }
 
-            // 增删计数紧跟在路径后面，不用 Spacer 推到右边。
-            // 这个标题栏在横向可滚动的容器里，Spacer 会一路撑到滚动内容的宽度，
-            // 把计数顶到可视区之外 —— 短 diff 里就表现为「计数不见了」。
+            Spacer(minLength: 8)
+
             Text("+\(file.additions)")
                 .foregroundStyle(.green)
             Text("−\(file.deletions)")
@@ -349,9 +521,9 @@ private struct FileDiffHeader: View {
         .monospacedDigit()
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
-        .fixedSize(horizontal: true, vertical: false)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.bar)
+        .help(file.displayPath)
     }
 }
 
@@ -368,17 +540,26 @@ struct DiffFileRow: View {
                 .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 3))
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(file.displayPath)
+                // 文件名永远完整：同目录下的多个文件靠它区分，
+                // 中间截断会把唯一有用的信息抹掉。目录另起一行，
+                // 截头保尾（保留离文件最近的部分，通常才是区分关键）。
+                Text(file.fileName)
                     .font(.system(size: 11.5, design: .monospaced))
                     .lineLimit(1)
-                    .truncationMode(.middle)
+                    .layoutPriority(1)
 
                 if file.isRename, let oldPath = file.oldPath {
-                    Text("原路径：\(oldPath)")
+                    Text("← \(oldPath)")
                         .font(.system(size: 9.5, design: .monospaced))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
-                        .truncationMode(.middle)
+                        .truncationMode(.head)
+                } else if let directory = file.directory {
+                    Text(directory)
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
                 }
             }
 
@@ -392,6 +573,8 @@ struct DiffFileRow: View {
         .font(.system(size: 10, weight: .semibold, design: .rounded))
         .monospacedDigit()
         .padding(.vertical, 1)
+        // 悬停看完整路径：目录行被截断时的兑底。
+        .help(file.displayPath)
     }
 
     private var badge: String {
@@ -412,9 +595,14 @@ struct DiffFileRow: View {
 private struct HunkView: View {
     let hunk: DiffHunk
     var model: WorktreeModel?
+    var filePath: String?
+    var highlights: [Int: [Range<String.Index>]] = [:]
+    /// 合成的展开 hunk 没有文件头可显示。
+    var showsHeader = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if showsHeader {
             HStack(spacing: 6) {
                 if let model {
                     // 整块勾选。逐行点在几十行的 hunk 上太累，
@@ -432,16 +620,26 @@ private struct HunkView: View {
                 Text(hunk.header)
                     .font(.system(size: 10.5, design: .monospaced))
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: true, vertical: false)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 3)
-            .fixedSize(horizontal: true, vertical: false)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.accentColor.opacity(0.07))
+            }
 
             ForEach(hunk.lines) { line in
-                DiffLineView(line: line, model: model)
+                DiffLineView(
+                    line: line,
+                    model: model,
+                    filePath: filePath,
+                    highlights: highlights[line.id] ?? [],
+                    // 行号列按 hunk 自适应：新建文件没有旧行号，
+                    // 那一列就是从头到尾的死区，不渲染。
+                    showsOldNumber: hunk.hasOldNumbers,
+                    showsNewNumber: hunk.hasNewNumbers
+                )
             }
         }
     }
@@ -458,7 +656,15 @@ private struct HunkView: View {
 private struct DiffLineView: View {
     let line: DiffLine
     var model: WorktreeModel?
+    var filePath: String?
+    /// 词级差异区间：这行里真正变化的片段，叠一层强调底色。
+    var highlights: [Range<String.Index>] = []
+    /// 这个 hunk 要不要渲染旧/新行号列（新建文件没有旧行号，纯删除没有新行号）。
+    var showsOldNumber = true
+    var showsNewNumber = true
     @State private var isGutterHovered = false
+    /// 阅读字号，与工具条的 A−/A+ 联动（12 = 默认，9…18 可调）。
+    @AppStorage(DiffReading.fontSizeKey) private var fontSize = DiffReading.defaultFontSize
 
     private var isSelectable: Bool {
         model != nil && (line.kind == .addition || line.kind == .deletion)
@@ -473,27 +679,44 @@ private struct DiffLineView: View {
     private static let gutterWidth: CGFloat = 38
 
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(alignment: .top, spacing: 0) {
             // 勾选标记 + 两列行号是唯一的点击热区。之前整行都能点，
             // 双击选词、三击选段会连带触发勾选（点两次 = 勾上又取消，闪烁），
             // 正文区域必须留给文本选择/复制。
             gutter
+                .padding(.top, 1)
 
             Text(marker)
                 .frame(width: 10, alignment: .leading)
+                .padding(.top, 1)
 
-            Text(line.text.isEmpty ? " " : line.text)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: true, vertical: false)
-
-            Spacer(minLength: 0)
+            Text(CodeSyntax.attributed(
+                line.text.isEmpty ? " " : line.text,
+                path: filePath,
+                highlights: highlights,
+                highlight: highlightTint
+            ))
+            .textSelection(.enabled)
+            // 长行折行：这是阅读体验的根。横向滚动意味着读一行要拖一次滚动条，
+            // 折行后视线只需纵向移动 —— 和读普通文档一样。
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.trailing, 12)
         }
-        .font(.system(size: 11.5, design: .monospaced))
+        .font(.system(size: fontSize, design: .monospaced))
         .foregroundStyle(foreground)
+        .lineSpacing(1.5)
         .padding(.vertical, 0.5)
-        .fixedSize(horizontal: true, vertical: false)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(isSelected ? Color.accentColor.opacity(0.22) : background)
+        // 左缘色条：不用扫整行背景就能一眼分出增/删行（GitHub 同款）。
+        .overlay(alignment: .leading) {
+            if line.kind == .addition || line.kind == .deletion {
+                Rectangle()
+                    .fill(line.kind == .addition ? Color.green.opacity(0.7) : Color.red.opacity(0.7))
+                    .frame(width: 2.5)
+            }
+        }
     }
 
     /// 勾选列 + 双侧行号列。可选行包成一个 Button；
@@ -515,11 +738,15 @@ private struct DiffLineView: View {
                         .foregroundStyle(isSelected ? Color.accentColor : Color.secondary.opacity(0.5))
                         .frame(width: 16)
 
-                    Text(line.oldNumber.map(String.init) ?? "")
-                        .frame(width: Self.gutterWidth, alignment: .trailing)
-                    Text(line.newNumber.map(String.init) ?? "")
-                        .frame(width: Self.gutterWidth, alignment: .trailing)
-                        .padding(.trailing, 6)
+                    if showsOldNumber {
+                        Text(line.oldNumber.map(String.init) ?? "")
+                            .frame(width: Self.gutterWidth, alignment: .trailing)
+                    }
+                    if showsNewNumber {
+                        Text(line.newNumber.map(String.init) ?? "")
+                            .frame(width: Self.gutterWidth, alignment: .trailing)
+                            .padding(.trailing, 6)
+                    }
                 }
                 .contentShape(Rectangle())
                 .background(isGutterHovered ? Color.primary.opacity(0.06) : Color.clear)
@@ -535,13 +762,21 @@ private struct DiffLineView: View {
             }
             .help("点击选中此行；Shift + 点击从上次选的行选到这里")
         } else {
+            // 只读场景（历史 / PR 评审）没有勾选交互，
+            // 16pt 的勾选空位不预留 —— 那是白送给空气的宽度。
             HStack(spacing: 0) {
-                Color.clear.frame(width: 16)
-                Text(line.oldNumber.map(String.init) ?? "")
-                    .frame(width: Self.gutterWidth, alignment: .trailing)
-                Text(line.newNumber.map(String.init) ?? "")
-                    .frame(width: Self.gutterWidth, alignment: .trailing)
-                    .padding(.trailing, 6)
+                if model != nil {
+                    Color.clear.frame(width: 16)
+                }
+                if showsOldNumber {
+                    Text(line.oldNumber.map(String.init) ?? "")
+                        .frame(width: Self.gutterWidth, alignment: .trailing)
+                }
+                if showsNewNumber {
+                    Text(line.newNumber.map(String.init) ?? "")
+                        .frame(width: Self.gutterWidth, alignment: .trailing)
+                        .padding(.trailing, 6)
+                }
             }
         }
     }
@@ -559,6 +794,16 @@ private struct DiffLineView: View {
         switch line.kind {
         case .noNewline: .secondary
         default: .primary
+        }
+    }
+
+    /// 词级高亮底色：跟着行的增/删属性走，叠在行底色上形成「同色系更深一档」
+    /// 的效果 —— 变化片段一眼可辨，又不会满屏刺眼。
+    private var highlightTint: Color? {
+        switch line.kind {
+        case .deletion: .red.opacity(0.22)
+        case .addition: .green.opacity(0.28)
+        default: nil
         }
     }
 

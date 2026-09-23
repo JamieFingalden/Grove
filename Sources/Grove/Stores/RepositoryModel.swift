@@ -220,6 +220,64 @@ final class RepositoryModel: Identifiable {
         await refreshPullRequests()
     }
 
+    /// 在本地合并 PR 的结果。
+    enum LocalPullRequestMergeOutcome {
+        /// 本地也冲突了：目标工作树已进入「合并中」，用户在变更视图的
+        /// 「冲突」区解决后点「继续」，再推送完成。解决不了随时「中止」。
+        case conflicted(worktree: URL)
+        /// 本地顺利合上了（本地基线和服务端不同步等少见情况），已推送到远端。
+        case mergedAndPushed(worktree: URL)
+    }
+
+    /// 服务端因为冲突拒绝自动合并时的出路：在本地把 PR 的源提交合入目标分支。
+    ///
+    /// 选一个正停在目标分支上的工作树来做。冲突不在这里解决 —— 让它停留在
+    /// 「合并中」状态，变更视图顶部的「继续 / 中止」横幅接管剩下的流程，
+    /// 和拉取、变基遇冲突是同一套。
+    func mergePullRequestLocally(_ pullRequest: PullRequest) async throws -> LocalPullRequestMergeOutcome {
+        guard let target = worktrees.first(where: { !$0.isBare && $0.branch == pullRequest.baseRefName }) else {
+            throw GroveError.noWorktreeOnBranch(pullRequest.baseRefName)
+        }
+
+        // 合并前确认工作树是干净的：把 PR 提交和未提交改动搅在同一个
+        // 工作树里，出了问题很难说清哪部分是谁的。
+        if let model = worktreeModel(for: target.path),
+           model.status.changes.contains(where: { $0.isStaged || ($0.unstaged != nil && $0.unstaged != .untracked) }) {
+            throw GroveError.worktreeDirty(target.path.lastPathComponent)
+        }
+
+        // 服务端为每个请求维护只读的头 ref（fork 的 PR 也在）。只抓到
+        // FETCH_HEAD，不落地任何本地分支。
+        try await git.fetchRefspec(
+            pullRequest.forge.headOnlyRefspec(number: pullRequest.number),
+            in: root
+        )
+
+        do {
+            try await git.startMerge(
+                message: "合并 \(pullRequest.displayNumber)：\(pullRequest.title)",
+                of: "FETCH_HEAD",
+                in: target.path
+            )
+            // 本地居然顺利合上了。直接推回远端，PR 会随之标记为已合并。
+            try await git.push(
+                in: target.path,
+                remote: "origin",
+                branch: pullRequest.baseRefName,
+                setUpstream: false
+            )
+        } catch {
+            // 合并冲突时 git 以非零退出。确认工作树真的进入「合并中」
+            // 再当作冲突处理，否则原样抛出（可能是网络、权限等别的问题）。
+            guard await git.currentOperation(in: target.path) == .merge else { throw error }
+            if let model = worktreeModel(for: target.path) { await model.refreshStatus() }
+            return .conflicted(worktree: target.path)
+        }
+
+        if let model = worktreeModel(for: target.path) { await model.refreshStatus() }
+        return .mergedAndPushed(worktree: target.path)
+    }
+
     func initialPushTarget() -> InitialPushTarget? {
         if let selected = app?.selectedWorktreeModel,
            selected.repositoryRoot == root,

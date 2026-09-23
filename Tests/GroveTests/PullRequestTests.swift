@@ -203,4 +203,11 @@ final class CheckRollupTests: XCTestCase {
         // conclusion，信它会显示成已完成。
         XCTAssertEqual(check(status: "QUEUED", conclusion: "SUCCESS").outcome, .pending)
     }
+
+    func testHeadOnlyRefspecDoesNotCreateLocalBranches() {
+        // 「在本地合并 PR」只抓 FETCH_HEAD，不落地任何本地分支 ——
+        // 落地会污染分支列表，还会和同名本地分支打架。
+        XCTAssertEqual(ForgeKind.github.headOnlyRefspec(number: 750), "+refs/pull/750/head")
+        XCTAssertEqual(ForgeKind.gitlab.headOnlyRefspec(number: 750), "+refs/merge-requests/750/head")
+    }
 }
