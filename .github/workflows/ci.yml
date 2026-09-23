@@ -16,17 +16,9 @@ concurrency:
 
 jobs:
   build:
-    name: 测试与打包 (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
+    name: 测试与打包 (arm64)
+    runs-on: macos-15
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15
-            arch: arm64
-          - runner: macos-15-intel
-            arch: x86_64
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     defaults:
@@ -58,32 +50,29 @@ jobs:
         run: swift test
 
       - name: 构建应用并验证签名与架构
-        env:
-          EXPECTED_ARCH: ${{ matrix.arch }}
         run: |
           zsh scripts/build.sh
           codesign --verify --deep --strict dist/Grove.app
           actual_arch=$(lipo -archs dist/Grove.app/Contents/MacOS/Grove)
-          if [[ "$actual_arch" != "$EXPECTED_ARCH" ]]; then
-            echo "::error::构建架构不符：预期 $EXPECTED_ARCH，实际 $actual_arch"
+          if [[ "$actual_arch" != "arm64" ]]; then
+            echo "::error::构建架构不符：预期 arm64，实际 $actual_arch"
             exit 1
           fi
 
       - name: 打包 DMG 并生成校验文件
         env:
           VERSION: ${{ steps.version.outputs.value }}
-          ARCH: ${{ matrix.arch }}
         run: |
           zsh scripts/make-dmg.sh
           cd dist
-          asset="Grove-$VERSION-$ARCH.dmg"
+          asset="Grove-$VERSION-arm64.dmg"
           mv "Grove-$VERSION.dmg" "$asset"
           shasum -a 256 "$asset" > "$asset.sha256"
 
       - name: 上传安装包
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 固定 v7.0.1
         with:
-          name: Grove-${{ steps.version.outputs.value }}-${{ matrix.arch }}
+          name: Grove-${{ steps.version.outputs.value }}-arm64
           path: |
             dist/*.dmg
             dist/*.sha256
@@ -103,7 +92,7 @@ jobs:
       - name: 下载安装包
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # 固定 v8.0.1
         with:
-          pattern: Grove-*
+          pattern: Grove-*-arm64
           path: dist
           merge-multiple: true
 

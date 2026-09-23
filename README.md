@@ -31,7 +31,7 @@ This produces `dist/Grove.app`. The script generates the icon, compiles a releas
 
 ### GitHub Actions
 
-[CI](.github/workflows/ci.yml) runs on pushes to `main`, pull requests, and manual dispatches. It runs `swift test`, builds and verifies the app, and packages separate Apple Silicon (`arm64`) and Intel (`x86_64`) DMGs using macOS 15 with Xcode 26.3. Download the DMG and its SHA-256 checksum from the run's artifacts, retained for 14 days. Live API tests and visual render tests remain opt-in.
+[CI](.github/workflows/ci.yml) runs on pushes to `main`, pull requests, and manual dispatches. It runs `swift test`, builds and verifies the app, and packages an Apple Silicon (`arm64`) DMG using macOS 15 with Xcode 26.3. Download the DMG and its SHA-256 checksum from the run's artifact, retained for 14 days. Live API tests and visual render tests remain opt-in.
 
 To publish a release, update `CFBundleShortVersionString` (three numeric components) and `CFBundleVersion` in `Support/Info.plist`, commit and push the changes, then push a matching tag, for example:
 
@@ -40,7 +40,7 @@ git tag v0.1.6
 git push origin v0.1.6
 ```
 
-The tag must match the plist version exactly (`v<version>`). Both architectures must pass before CI creates a GitHub Release with generated notes, DMGs, and checksums. An existing release is not overwritten; publish fixes under a new version. Manual runs only produce artifacts, even when a tag is selected.
+The tag must match the plist version exactly (`v<version>`). The arm64 build must pass before CI creates a GitHub Release with generated notes, the DMG, and its checksum. An existing release is not overwritten; publish fixes under a new version. Manual runs only produce artifacts, even when a tag is selected.
 
 No custom secrets are needed: publishing uses the built-in `GITHUB_TOKEN`. CI packages use ad-hoc signing and are not Apple-notarized, so macOS Gatekeeper may require explicit approval to open them.
 
