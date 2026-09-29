@@ -158,8 +158,9 @@ final class AppModel {
     /// 侧边栏选中项。仓库和工作树用同一个枚举，`NavigationSplitView` 的选择才好绑。
     enum Selection: Hashable, Sendable {
         case worktree(repository: URL, worktree: URL)
-        /// 仓库级的 PR 列表（不属于任何单个工作树）。
-        case pullRequests(repository: URL)
+        /// 仓库级的项目主页：PR、CI/CD 等仓库级功能都作为主页里的分栏。
+        /// 以后再加仓库级能力只加 tab，侧边栏不再长行。
+        case repositoryHome(repository: URL)
     }
 
     private let bookmarks = RepositoryBookmarks()
@@ -452,10 +453,18 @@ final class AppModel {
             await repository.refreshForgeMetadata()
         }
 
-        // 上面的循环结束前，PR 列表视图可能已经带着空 slug 试过一次加载（被跳过）。
-        // 托管商标识就位后补一次，选中项恢复成「合并请求」时打开 app 就有数据。
-        if case .pullRequests(let root) = selection, let repository = repository(for: root) {
+        // 上面的循环结束前，主页的分栏可能已经带着空 slug 试过一次加载（被跳过）。
+        // 托管商标识就位后补一次，选中项恢复成「项目主页」时打开 app 就有数据。
+        if case .repositoryHome(let root) = selection, let repository = repository(for: root) {
             await repository.refreshPullRequests()
+        }
+
+        // CI 状态点（工作树行的绿红点）也在这个时候首次拉取；
+        // 之后靠抓取/刷新和 CI 分栏的轮询续命。
+        await withTaskGroup(of: Void.self) { group in
+            for repository in repositories where repository.forge != nil {
+                group.addTask { await repository.refreshPipelineStatuses() }
+            }
         }
     }
 
@@ -655,7 +664,7 @@ final class AppModel {
         if case .worktree(let repositoryRoot, _) = selection, repositoryRoot == repository.root {
             selection = nil
         }
-        if case .pullRequests(let repositoryRoot) = selection, repositoryRoot == repository.root {
+        if case .repositoryHome(let repositoryRoot) = selection, repositoryRoot == repository.root {
             selection = nil
         }
     }
@@ -674,7 +683,7 @@ final class AppModel {
     var selectedRepository: RepositoryModel? {
         switch selection {
         case .worktree(let root, _): repository(for: root)
-        case .pullRequests(let root): repository(for: root)
+        case .repositoryHome(let root): repository(for: root)
         case nil: nil
         }
     }

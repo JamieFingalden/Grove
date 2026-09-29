@@ -247,6 +247,117 @@ struct GitHubClient: ForgeClient {
         try await ghChecked(["pr", "ready", String(number)], in: directory)
     }
 
+    // MARK: - CI/CD（走 gh；GitHub Actions 没有单任务粒度的接口）
+
+    private struct RunListDTO: Decodable {
+        let databaseId: Int
+        let status: String
+        let conclusion: String?
+        let displayTitle: String?
+        let event: String?
+        let headBranch: String?
+        let headSha: String?
+        let createdAt: Date?
+        let updatedAt: Date?
+        let url: String?
+        let workflowName: String?
+    }
+
+    private struct RunViewDTO: Decodable {
+        struct JobDTO: Decodable {
+            let databaseId: Int
+            let name: String
+            let status: String
+            let conclusion: String?
+            let startedAt: Date?
+            let completedAt: Date?
+            let url: String?
+        }
+        let jobs: [JobDTO]?
+    }
+
+    func pipelines(in directory: URL, limit: Int) async throws -> [CIPipeline] {
+        let result = try await ghChecked([
+            "run", "list", "--limit", String(limit),
+            "--json",
+            "databaseId,status,conclusion,displayTitle,event,headBranch,headSha,createdAt,updatedAt,url,workflowName"
+        ], in: directory)
+        let dtos = try Self.decoder.decode([RunListDTO].self, from: result.standardOutput)
+        return dtos.map { dto in
+            CIPipeline(
+                id: dto.databaseId,
+                status: CIStatus.github(status: dto.status, conclusion: dto.conclusion),
+                ref: dto.headBranch ?? "",
+                sha: dto.headSha ?? "",
+                title: dto.displayTitle ?? dto.workflowName,
+                trigger: dto.event,
+                createdAt: dto.createdAt,
+                duration: duration(from: dto.createdAt, to: dto.updatedAt),
+                webURL: dto.url
+            )
+        }
+    }
+
+    func jobs(pipelineID: Int, in directory: URL) async throws -> [CIJob] {
+        let result = try await ghChecked([
+            "run", "view", String(pipelineID), "--json", "jobs"
+        ], in: directory)
+        let dto = try Self.decoder.decode(RunViewDTO.self, from: result.standardOutput)
+        return (dto.jobs ?? []).map { job in
+            CIJob(
+                id: job.databaseId,
+                name: job.name,
+                stage: nil,
+                status: CIStatus.github(status: job.status, conclusion: job.conclusion),
+                duration: duration(from: job.startedAt, to: job.completedAt),
+                queuedDuration: nil,
+                allowFailure: false,
+                webURL: job.url
+            )
+        }
+    }
+
+    func jobLog(jobID: Int, in directory: URL) async throws -> String {
+        // 日志下载是重定向，gh api 会自己跟过去再吐正文。
+        guard let slug = await repositorySlug(in: directory) else {
+            throw GroveError.noGitHubRemote
+        }
+        let result = try await ghChecked([
+            "api", "repos/\(slug)/actions/jobs/\(jobID)/logs"
+        ], in: directory)
+        return String(data: result.standardOutput, encoding: .utf8) ?? ""
+    }
+
+    func retryJob(jobID: Int, in directory: URL) async throws {
+        throw GroveError.jobControlUnsupported
+    }
+
+    func cancelJob(jobID: Int, in directory: URL) async throws {
+        throw GroveError.jobControlUnsupported
+    }
+
+    func runManualJob(jobID: Int, in directory: URL) async throws {
+        throw GroveError.jobControlUnsupported
+    }
+
+    func retryPipeline(id: Int, in directory: URL) async throws {
+        // --failed 只重跑失败的，对齐 GitLab 重试流水线的语义。
+        _ = try await ghChecked(["run", "rerun", String(id), "--failed"], in: directory)
+    }
+
+    func cancelPipeline(id: Int, in directory: URL) async throws {
+        _ = try await ghChecked(["run", "cancel", String(id)], in: directory)
+    }
+
+    func runPipeline(ref: String, in directory: URL) async throws {
+        throw GroveError.pipelineRunUnsupported
+    }
+
+    private func duration(from start: Date?, to end: Date?) -> TimeInterval? {
+        guard let start, let end, end > start else { return nil }
+        return end.timeIntervalSince(start)
+    }
+
     func close(number: Int, in directory: URL) async throws {
         try await ghChecked(["pr", "close", String(number)], in: directory)
     }

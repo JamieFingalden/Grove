@@ -1093,6 +1093,8 @@ final class WorktreeModel: Identifiable {
     /// 也就是终端里裸 `git push` 的行为。
     func push(to remote: NamedRemote? = nil) async {
         let label = remote.map { "正在推送到 \($0.name)…" } ?? "正在推送…"
+        // 推送真正落地才启动盯梢（闭包抛错时不会置位）。
+        var didPush = false
         await performSync(
             .push,
             activity: label,
@@ -1120,6 +1122,12 @@ final class WorktreeModel: Identifiable {
                 branch: self.worktree.branch,
                 setUpstream: needsUpstream
             )
+            didPush = true
+        }
+
+        // 推完自动盯这条分支的流水线：绿了/红了弹通知，不用守着网页。
+        if didPush, let branch = worktree.branch, !branch.isEmpty, remote == nil || remote?.name == "origin" {
+            repository?.watchPipeline(afterPush: branch)
         }
     }
 

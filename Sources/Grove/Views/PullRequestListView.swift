@@ -93,7 +93,11 @@ struct PullRequestListView: View {
                                 isAIReviewing: appModel.isAIReviewing(
                                     for: repository.root,
                                     pullRequestNumber: pullRequest.number
-                                )
+                                ),
+                                aiVerdict: appModel.cachedAIReview(
+                                    for: repository.root,
+                                    pullRequestNumber: pullRequest.number
+                                )?.review.verdict
                             )
                         }
                         .buttonStyle(.plain)
@@ -242,6 +246,9 @@ private struct PullRequestRow: View {
     let worktree: Worktree?
     let isSelected: Bool
     let isAIReviewing: Bool
+    /// 本地已缓存的 AI Review 结论。平台不知道它存在；行里要亮出来，
+    /// 不然「AI 都审完了还写着未评审」看着自相矛盾。
+    let aiVerdict: PullRequestAIReview.Verdict?
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -261,9 +268,12 @@ private struct PullRequestRow: View {
                                 : Color(nsColor: .tertiaryLabelColor)
                         )
                     Text(pullRequest.title)
-                        .font(.system(size: 12))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(isSelected ? Color.accentColor : .primary)
-                        .lineLimit(2)
+                        // 单行。两行标题会让行高随内容漂移，NSTableCellView 量错后
+                        // 相邻行就叠在一起 —— 改单行后行高只由结构决定，彻底稳定。
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
 
                 HStack(spacing: 6) {
@@ -283,11 +293,46 @@ private struct PullRequestRow: View {
                     if isAIReviewing {
                         MiniBadge(text: "Review 中", systemImage: "sparkles", tint: .purple)
                     }
+
+                    // 开放中的请求才需要看状态；已合并/已关闭的是历史记录，
+                    // 徽标堆上去只会把行撑长。
+                    if pullRequest.isActive {
+                        // 冲突是硬阻断，红色放在最前面 —— 合不了就是白等。
+                        if pullRequest.mergeable?.uppercased() == "CONFLICTING" {
+                            MiniBadge(text: "有冲突", systemImage: "exclamationmark.triangle.fill", tint: .red)
+                        }
+
+                        // 评审状态常显：没有徽标的话，列表里看不出哪些 PR
+                        // 还没人看过（旧版 GitLab 列表接口不回审批数据，
+                        // 映射不出来时也要明确说「未评审」，而不是什么都不显示）。
+                        switch pullRequest.review {
+                        case .approved:
+                            MiniBadge(text: "已批准", systemImage: "checkmark.seal.fill", tint: .green)
+                        case .changesRequested:
+                            MiniBadge(text: "要求修改", systemImage: "exclamationmark.bubble.fill", tint: .orange)
+                        case .pending:
+                            MiniBadge(text: "待评审", systemImage: "clock.fill", tint: .orange)
+                        case .none:
+                            // 自己批过也算：有些自建实例不回传整体审批规则，
+                            // 但「你已批准」这件事 Grove 自己知道。
+                            if pullRequest.viewerHasApproved {
+                                MiniBadge(text: "已批准", systemImage: "checkmark.seal.fill", tint: .green)
+                            } else if !isAIReviewing && aiVerdict == nil {
+                                MiniBadge(text: "未评审", systemImage: "eye", tint: .secondary)
+                            }
+                        }
+
+                        if let aiVerdict, !isAIReviewing {
+                            MiniBadge(
+                                text: aiVerdictLabel(aiVerdict),
+                                systemImage: "sparkles",
+                                tint: aiVerdictTint(aiVerdict)
+                            )
+                        }
+                    }
+
                     if let checks = pullRequest.checks.label, let icon = pullRequest.checks.systemImage {
                         MiniBadge(text: checks, systemImage: icon, tint: checksTint)
-                    }
-                    if let review = pullRequest.review.label, let icon = pullRequest.review.systemImage {
-                        MiniBadge(text: review, systemImage: icon, tint: reviewTint)
                     }
                     if worktree != nil {
                         MiniBadge(text: "已检出", systemImage: "leaf.fill", tint: .teal)
@@ -296,6 +341,7 @@ private struct PullRequestRow: View {
                         MiniBadge(text: "fork", systemImage: "tuningfork", tint: .indigo)
                     }
                 }
+                .lineLimit(1)
             }
         }
         .padding(.vertical, 3)
@@ -324,11 +370,19 @@ private struct PullRequestRow: View {
         }
     }
 
-    private var reviewTint: Color {
-        switch pullRequest.review {
-        case .approved: .green
-        case .changesRequested: .orange
-        case .pending, .none: .secondary
+    private func aiVerdictLabel(_ verdict: PullRequestAIReview.Verdict) -> String {
+        switch verdict {
+        case .ready: "AI 可合并"
+        case .needsChanges: "AI 建议修改"
+        case .uncertain: "AI 无法判断"
+        }
+    }
+
+    private func aiVerdictTint(_ verdict: PullRequestAIReview.Verdict) -> Color {
+        switch verdict {
+        case .ready: .green
+        case .needsChanges: .red
+        case .uncertain: .orange
         }
     }
 }
@@ -476,6 +530,10 @@ private struct PullRequestDetailView: View {
         // 完整详情不只补正文，还包含当前用户的审批状态。即使列表接口已经
         // 带了正文也必须加载，否则批准过的 MR 仍会错误显示「批准」。
         detailed = await loadedDetail
+        // 详情里的审批/冲突状态并回列表行 —— 列表接口拿不到这些。
+        if let detail = await loadedDetail {
+            repository.mergeDetailIntoList(detail)
+        }
 
         threads = await loadedThreads ?? []
         isLoadingThreads = false
@@ -652,6 +710,14 @@ private struct PullRequestDetailView: View {
         }
         isWorking = false
 
+        // 审批状态只有详情接口知道；批准/撤销后把最新详情并回列表，
+        // 不然行上永远亮着「未评审」。
+        if action == .approve || action == .unapprove,
+           let fresh = try? await forge.pullRequest(number: current.number, in: repository.root) {
+            detailed = fresh
+            repository.mergeDetailIntoList(fresh)
+        }
+
         // 列表刷新不该占着操作按钮的 loading。批准状态已经在本地立即更新，
         // 评论区也已单独重载；列表里的汇总角标慢半拍在后台补齐即可。
         Task { await repository.refreshPullRequests() }
@@ -671,6 +737,16 @@ private struct PullRequestDetailView: View {
                     .font(.system(size: 12, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
+
+                if current.mergeable?.uppercased() == "CONFLICTING" {
+                    Label("有冲突", systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(Color.red))
+                        .help("目标分支和源分支改了同一处，需要先解决冲突才能合并")
+                }
 
                 if current.isCrossRepository, let owner = current.headRepositoryOwner {
                     MiniBadge(text: "来自 \(owner.login) 的 fork", systemImage: "tuningfork", tint: .indigo)

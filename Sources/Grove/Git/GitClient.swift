@@ -892,7 +892,11 @@ enum GroveError: LocalizedError, Sendable {
     case worktreePathExists(URL)
     case branchAlreadyCheckedOut(branch: String, worktree: URL)
     case operationNotSteppable(RepositoryOperation)
-    /// 想在本地合并 PR 时，没有任何工作树停在目标分支上。
+    /// GitHub Actions 没有单任务重试/取消的接口，只能整条 run 一起。
+    case jobControlUnsupported
+    /// GitHub 的手动触发要指定 workflow 文件，不支持按 ref 直接跑。
+    case pipelineRunUnsupported
+    /// 没有找到停在目标分支上的工作树。（本地合并 PR 用）
     case noWorktreeOnBranch(String)
     /// 目标工作树还有未提交的改动，直接合并可能把两摊事情搅在一起。
     case worktreeDirty(String)
@@ -913,6 +917,10 @@ enum GroveError: LocalizedError, Sendable {
             "目录已存在：\(url.path)"
         case .branchAlreadyCheckedOut(let branch, let worktree):
             "分支 \(branch) 已经在工作树「\(worktree.lastPathComponent)」里检出了。git 不允许同一分支同时存在于两个工作树。"
+        case .jobControlUnsupported:
+            "GitHub Actions 只能整条流水线重跑或取消，没有单任务粒度。用列表或详情顶部的流水线按钮。"
+        case .pipelineRunUnsupported:
+            "GitHub Actions 的手动触发要指定 workflow 文件（gh workflow run），这里暂不支持按分支直接跑。"
         case .noWorktreeOnBranch(let branch):
             "没有找到停在「\(branch)」分支上的工作树。请先检出或创建一个「\(branch)」的工作树，再在本地合并。"
         case .worktreeDirty(let name):

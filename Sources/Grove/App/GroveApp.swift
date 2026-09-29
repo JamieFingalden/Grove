@@ -1,10 +1,30 @@
 import AppKit
 import SwiftUI
+import UserNotifications
 
 @MainActor
 struct GroveApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel()
+
+    /// 通知点击路由：挂住 delegate 的长命对象。
+    /// 点击「CI 失败」通知 → 打开对应仓库的项目主页。
+    private let notificationRouter: PipelineNotificationRouter
+
+    init() {
+        let model = AppModel()
+        _model = State(initialValue: model)
+
+        let router = PipelineNotificationRouter()
+        router.openRepository = { root in
+            // 主页的分栏自己带加载；这里只负责把仓库送到眼前。
+            if model.repository(for: root) != nil {
+                model.selection = .repositoryHome(repository: root)
+            }
+        }
+        UNUserNotificationCenter.current().delegate = router
+        notificationRouter = router
+    }
 
     var body: some Scene {
         WindowGroup {

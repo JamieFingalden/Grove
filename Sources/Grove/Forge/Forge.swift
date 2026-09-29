@@ -70,6 +70,18 @@ enum ForgeKind: String, Sendable, Hashable, CaseIterable {
         case .gitlab: "brew install glab && glab auth login --hostname <你的 GitLab 主机>"
         }
     }
+
+    /// GitHub Actions 的接口只能整条 run 重跑/取消，没有单任务粒度；
+    /// 界面据此隐藏单任务按钮，避免点了才发现做不了。
+    var supportsJobLevelControl: Bool {
+        self == .gitlab
+    }
+
+    /// 手动跑一条新流水线：GitLab 可以直接按 ref 跑；
+    /// GitHub 的 workflow_dispatch 要指定 workflow 文件，暂不提供。
+    var supportsPipelineRun: Bool {
+        self == .gitlab
+    }
 }
 
 /// 一条评论线程里的单条发言。
@@ -173,6 +185,27 @@ protocol ForgeClient: Sendable {
     /// 要求修改。GitLab 没有这个动作，实现里降级成一条普通评论。
     func requestChanges(number: Int, body: String, in directory: URL) async throws
     func comment(number: Int, body: String, in directory: URL) async throws
+
+    // MARK: - CI/CD（可视化 + 控制台）
+    // Grove 只做「看」和「按」：看状态看日志、重试/取消/触发。
+    // 跑构建的永远是平台自己的 Runner，Grove 不长成 CI 执行器。
+
+    func pipelines(in directory: URL, limit: Int) async throws -> [CIPipeline]
+    func jobs(pipelineID: Int, in directory: URL) async throws -> [CIJob]
+    /// 任务日志原文（通常含 ANSI 颜色码，展示前用 CILog 清洗）。
+    func jobLog(jobID: Int, in directory: URL) async throws -> String
+    /// 重试单个任务。GitHub Actions 没有这个粒度，只能整条重跑。
+    func retryJob(jobID: Int, in directory: URL) async throws
+    /// 取消正在跑的任务。
+    func cancelJob(jobID: Int, in directory: URL) async throws
+    /// 触发手动型（manual）任务。
+    func runManualJob(jobID: Int, in directory: URL) async throws
+    /// 重试流水线里失败/被取消的任务（GitHub 对应 rerun --failed）。
+    func retryPipeline(id: Int, in directory: URL) async throws
+    /// 取消整条流水线。
+    func cancelPipeline(id: Int, in directory: URL) async throws
+    /// 在指定 ref（分支/Tag）上手动跑一条新流水线。执行仍在平台 Runner 上。
+    func runPipeline(ref: String, in directory: URL) async throws
 }
 
 /// 新建远程仓库的参数。`path` 可以只写仓库名，也可以写 `组织/仓库名`。

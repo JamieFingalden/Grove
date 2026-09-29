@@ -24,6 +24,39 @@ final class RepositoryModel: Identifiable {
     var pullRequests: [PullRequest] = []
     /// PR 列表视图当前显示的内容，按 `listState` 过滤。
     var listPullRequests: [PullRequest] = []
+
+    /// 只有详情接口才知道的状态（审批、可合并性 —— GitLab 的列表接口两样都不回）。
+    /// 列表每次刷新都被服务端数据整体替换，把已知详情记在这里刷新后重放，
+    /// 否则「批准过 → 刷新 → 又变回未评审」。
+    private var detailKnownState: [Int: PullRequest] = [:]
+
+    /// 把详情接口的已知状态并进列表行。看详情、批准/撤销后都会调。
+    func mergeDetailIntoList(_ detail: PullRequest) {
+        detailKnownState[detail.number] = detail
+        applyDetailState()
+    }
+
+    /// 将叠层里的详情状态应用到当前列表（刷新后重放用）。
+    private func applyDetailState() {
+        guard !detailKnownState.isEmpty else { return }
+        for index in listPullRequests.indices {
+            guard let detail = detailKnownState[listPullRequests[index].number] else { continue }
+            listPullRequests[index].reviewDecision = detail.reviewDecision
+            listPullRequests[index].viewerHasApproved = detail.viewerHasApproved
+            if let mergeable = detail.mergeable {
+                listPullRequests[index].mergeable = mergeable
+            }
+        }
+        // 开放列表是列表行之外的另一份缓存（角标、工作树关联用），同步一份。
+        for index in pullRequests.indices {
+            guard let detail = detailKnownState[pullRequests[index].number] else { continue }
+            pullRequests[index].reviewDecision = detail.reviewDecision
+            pullRequests[index].viewerHasApproved = detail.viewerHasApproved
+            if let mergeable = detail.mergeable {
+                pullRequests[index].mergeable = mergeable
+            }
+        }
+    }
     /// PR 列表视图选中的状态筛选。
     var listState: PullRequestListState = .open
     /// `owner/repo`。nil 表示不是 GitHub 仓库（或者 `gh` 不可用）。
@@ -186,6 +219,7 @@ final class RepositoryModel: Identifiable {
                 pullRequests = try await open
                 listPullRequests = try await filtered
             }
+            applyDetailState()
         } catch {
             app?.report(title: "读取 PR 列表失败", error: error)
         }
@@ -218,6 +252,70 @@ final class RepositoryModel: Identifiable {
         }
         await refresh()
         await refreshPullRequests()
+        await refreshPipelineStatuses()
+    }
+
+    // MARK: - CI 状态联动
+
+    /// 分支 → 它最新一条流水线的状态。侧边栏工作树行的小点用。
+    /// 来源有三处：启动探测、抓取/刷新、CI 分栏的轮询 —— 都是拿到新列表就覆盖。
+    private(set) var pipelineStatusByRef: [String: CIStatus] = [:]
+
+    func updatePipelineStatuses(from pipelines: [CIPipeline]) {
+        pipelineStatusByRef = CIPipelineIndex.latestStatusByRef(pipelines)
+    }
+
+    /// 拉一份流水线列表刷新分支状态点。失败静默：这只是装饰性信息。
+    func refreshPipelineStatuses() async {
+        guard let forge else { return }
+        guard let pipelines = try? await forge.pipelines(in: root, limit: 50) else { return }
+        updatePipelineStatuses(from: pipelines)
+    }
+
+    // MARK: - 推送后盯流水线
+
+    private var pipelineWatchTask: Task<Void, Never>?
+
+    /// 推送成功后自动盯这条分支的流水线：出现 → 跟到终态 → 弹系统通知。
+    /// 这是「常驻客户端」才能给的体验：推完就可以切走干别的。
+    /// 上限约 27 分钟（8 秒 × 200 轮），超时静默放弃。
+    func watchPipeline(afterPush branch: String) {
+        guard !branch.isEmpty else { return }
+        pipelineWatchTask?.cancel()
+        pipelineWatchTask = Task { [weak self] in
+            // 服务器时钟可能有点偏差，窗口放宽一分钟。
+            let since = Date().addingTimeInterval(-60)
+            await PipelineNotifier.requestAuthorization()
+            for _ in 0..<200 {
+                guard !Task.isCancelled else { return }
+                guard let self else { return }
+                guard let forge = self.forge else { return }
+                if let pipelines = try? await forge.pipelines(in: self.root, limit: 20) {
+                    self.updatePipelineStatuses(from: pipelines)
+                    // 找推送之后新出现的这条分支的流水线（列表最新在前）。
+                    if let pipeline = pipelines.first(where: {
+                        $0.ref == branch && ($0.createdAt ?? .distantPast) >= since
+                    }) {
+                        if pipeline.status.isFinal {
+                            self.finishWatch(pipeline)
+                            return
+                        }
+                    }
+                }
+                try? await Task.sleep(for: .seconds(8))
+            }
+        }
+    }
+
+    private func finishWatch(_ pipeline: CIPipeline) {
+        Task {
+            await PipelineNotifier.notify(
+                status: pipeline.status,
+                ref: pipeline.ref,
+                repositoryName: root.lastPathComponent,
+                repositoryRoot: root
+            )
+        }
     }
 
     /// 在本地合并 PR 的结果。

@@ -9,45 +9,7 @@ struct SidebarView: View {
 
         List {
             ForEach(model.repositories) { repository in
-                Section {
-                    ForEach(repository.worktrees) { worktree in
-                        let selection = AppModel.Selection.worktree(
-                            repository: repository.root,
-                            worktree: worktree.path
-                        )
-                        let isSelected = model.selection == selection
-
-                        Button {
-                            model.selection = selection
-                        } label: {
-                            WorktreeRow(
-                                repository: repository,
-                                worktree: worktree,
-                                isSelected: isSelected
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .listRowBackground(selectionBackground(isSelected))
-                        .contextMenu {
-                            worktreeMenu(repository: repository, worktree: worktree)
-                        }
-                    }
-
-                    // 入口始终保留：远端状态的读取失败不该让评审功能凭空消失；
-                    // 点进去会说明是无远端、平台未识别，还是 CLI 未登录。
-                    let selection = AppModel.Selection.pullRequests(repository: repository.root)
-                    let isSelected = model.selection == selection
-
-                    Button {
-                        model.selection = selection
-                    } label: {
-                        PullRequestsRow(repository: repository, isSelected: isSelected)
-                    }
-                    .buttonStyle(.plain)
-                    .listRowBackground(selectionBackground(isSelected))
-                } header: {
-                    RepositoryHeader(repository: repository, sheet: $sheet)
-                }
+                RepositorySection(repository: repository, sheet: $sheet)
             }
         }
         .listStyle(.sidebar)
@@ -64,10 +26,106 @@ struct SidebarView: View {
 
     /// Finder 侧栏式选中态：系统自适应的浅灰底，不用大块强调色淹没文字和角标。
     private func selectionBackground(_ isSelected: Bool) -> some View {
-        RoundedRectangle(cornerRadius: 9, style: .continuous)
-            .fill(isSelected
-                  ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
-                  : .clear)
+        sidebarSelectionBackground(isSelected)
+    }
+}
+
+/// Finder 侧栏式选中态的通用实现（供仓库区块里的各行共用）。
+func sidebarSelectionBackground(_ isSelected: Bool) -> some View {
+    RoundedRectangle(cornerRadius: 9, style: .continuous)
+        .fill(isSelected
+              ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
+              : .clear)
+}
+
+/// 侧边栏行的统一高度：仓库行、工作树行、折叠三角都用它，节奏才一致。
+enum SidebarMetrics {
+    static let rowHeight: CGFloat = 32
+}
+
+// MARK: - 仓库区块
+
+/// 侧边栏里一个仓库的整块：主页入口置顶，工作树缩进在它下面、可收起展开。
+/// 层级语义：仓库 → 项目主页（仓库级）→ 工作树（检出级）。
+private struct RepositorySection: View {
+    @Environment(AppModel.self) private var model
+    let repository: RepositoryModel
+    @Binding var sheet: RootView.ActiveSheet?
+
+    @State private var worktreesExpanded = true
+
+    // 不包 Section：侧边栏 List 底层是 NSOutlineView，Section 是它的父节点，
+    // 动画移除子行时两者行数对不上会直接闪退（_validateParentRowEntry）。
+    // 现在没有 Section 头了，拆平成纯行列表，从结构上消除这个父节点。
+    @ViewBuilder
+    var body: some View {
+        @Bindable var model = model
+
+        // 仓库行 = 主页入口 + 工作树的折叠开关（三角长在仓库行上，
+        // Finder/Xcode 的形态）。
+        let homeSelection = AppModel.Selection.repositoryHome(repository: repository.root)
+        let homeIsSelected = model.selection == homeSelection
+
+        HStack(spacing: 6) {
+            Button {
+                // 动画安全的前提是拆平结构（无 Section 父节点）——已用无头脚本验证：
+                // 折叠/展开/快速连点都不再触发 NSOutlineView 断言。
+                withAnimation(.snappy(duration: 0.2)) {
+                    worktreesExpanded.toggle()
+                }
+            } label: {
+                Image(systemName: worktreesExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 12, height: 32)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(worktreesExpanded ? "收起工作树" : "展开工作树（\(repository.worktrees.count) 个）")
+
+            Button {
+                model.selection = homeSelection
+            } label: {
+                RepositoryHomeRow(
+                    repository: repository,
+                    isSelected: homeIsSelected,
+                    sheet: $sheet
+                )
+            }
+            .buttonStyle(.plain)
+        }
+        .listRowBackground(sidebarSelectionBackground(homeIsSelected))
+        .contextMenu {
+            Button("新建工作树…") { sheet = .newWorktree(repository) }
+            Button("在 Finder 显示") { SystemActions.revealInFinder(repository.root) }
+        }
+
+        if worktreesExpanded {
+            ForEach(repository.worktrees) { worktree in
+                let selection = AppModel.Selection.worktree(
+                    repository: repository.root,
+                    worktree: worktree.path
+                )
+                let isSelected = model.selection == selection
+
+                Button {
+                    model.selection = selection
+                } label: {
+                    WorktreeRow(
+                        repository: repository,
+                        worktree: worktree,
+                        isSelected: isSelected
+                    )
+                }
+                .buttonStyle(.plain)
+                // 缩进到仓库行图标正下方：三角(12) + 间距(6)。
+                .padding(.leading, 18)
+                .listRowBackground(sidebarSelectionBackground(isSelected))
+                .contextMenu {
+                    worktreeMenu(repository: repository, worktree: worktree)
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -99,18 +157,152 @@ struct SidebarView: View {
     }
 }
 
-// MARK: - 仓库标题
+// MARK: - 工作树行
 
-private struct RepositoryHeader: View {
+private struct WorktreeRow: View {
+    let repository: RepositoryModel
+    let worktree: Worktree
+    let isSelected: Bool
+
+    /// 这一行对应的详情模型。可能还没建（没被选中过），那就只显示静态信息。
+    private var detail: WorktreeModel? {
+        repository.worktreeModel(for: worktree.path)
+    }
+
+    private var pullRequest: PullRequest? {
+        detail?.linkedPullRequest ?? repository.pullRequest(forBranch: worktree.branch)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                .frame(width: 16)
+
+            // 单行。显示分支名 —— 这是工作树的身份；目录名与完整路径进悬停提示。
+            // 以前目录名+分支名两行叠着，目录名还常与分支名重复，行行都像双倍行距的墙。
+            Text(displayLabel)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .foregroundStyle(isSelected ? Color.accentColor : .primary)
+
+            if worktree.isLocked {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+            }
+            if worktree.isPrunable {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+                    .help("目录已不存在，可以清理掉")
+            }
+            if worktree.isDetached, let head = worktree.head {
+                // 游离 HEAD：名字旁边给个短 SHA，其它细节看悬停。
+                Text(String(head.prefix(7)))
+                    .font(.system(size: 10, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+            }
+
+            Spacer(minLength: 2)
+
+            trailingBadges
+        }
+        .padding(.vertical, 2)
+        .frame(minHeight: SidebarMetrics.rowHeight, alignment: .center)
+        // plain Button 默认只命中文字和图标；撑满并声明命中形状，
+        // 让整条侧栏行（包括中间空白）都能点击。
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .help(tooltip)
+    }
+
+    /// 行上显示的名字：分支优先（目录名常常就是分支名，两行叠着反而重复）。
+    private var displayLabel: String {
+        if let branch = worktree.branch, !branch.isEmpty { return branch }
+        return worktree.name
+    }
+
+    /// 悬停提示把完整信息补齐：检出状态 + 目录名 + 完整路径。
+    private var tooltip: String {
+        var lines = ["检出：\(worktree.checkoutLabel)"]
+        if worktree.name != displayLabel {
+            lines.append("目录：\(worktree.name)")
+        }
+        lines.append(worktree.path.path)
+        return lines.joined(separator: "\n")
+    }
+
+    private var icon: String {
+        if worktree.isBare { return "archivebox" }
+        // 主工作树不用 house：那是仓库行（主页）的图标，两栋房子换在一起
+        // 分不清谁是入口谁是检出。主检出用硬盘，别的用叶子。
+        if worktree.isPrimary { return "externaldrive" }
+        return "leaf"
+    }
+
+    @ViewBuilder
+    private var trailingBadges: some View {
+        HStack(spacing: 4) {
+            // 这个分支最新一条流水线的状态：推完不用打开 CI 页也知道绿了没。
+            if let branch = worktree.branch,
+               let ci = repository.pipelineStatusByRef[branch] {
+                Image(systemName: ci.systemImage)
+                    .font(.system(size: 9))
+                    .foregroundStyle(ci.tint)
+                    .help("CI：\(ci.label)（\(branch)）")
+            }
+
+            if let status = detail?.status {
+                if status.hasConflicts {
+                    Badge(text: "\(status.conflictCount)", systemImage: "exclamationmark.triangle.fill", tint: .red)
+                        .help("有冲突未解决")
+                } else if !status.isClean {
+                    Badge(text: "\(status.changes.count)", systemImage: "pencil", tint: .orange)
+                        .help("\(status.changes.count) 个文件有改动")
+                }
+
+                if status.ahead > 0 {
+                    Badge(text: "\(status.ahead)", systemImage: "arrow.up", tint: .blue)
+                        .help("领先上游 \(status.ahead) 个提交")
+                }
+                if status.behind > 0 {
+                    Badge(text: "\(status.behind)", systemImage: "arrow.down", tint: .purple)
+                        .help("落后上游 \(status.behind) 个提交")
+                }
+            }
+
+            if let pullRequest {
+                PullRequestBadge(pullRequest: pullRequest)
+            }
+        }
+    }
+}
+
+// MARK: - PR 入口行
+
+/// 仓库行：项目名即主页入口。点进去是项目主页（PR、CI/CD 等分栏），
+/// 菜单里放仓库级操作（原仓库标题行的功能全部搬过来了）。
+private struct RepositoryHomeRow: View {
     @Environment(AppModel.self) private var model
     let repository: RepositoryModel
+    let isSelected: Bool
     @Binding var sheet: RootView.ActiveSheet?
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
+            Image(systemName: "house")
+                .font(.system(size: 13))
+                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                .frame(width: 16)
+
             Text(repository.name)
+                .font(.system(size: 13, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .foregroundStyle(isSelected ? Color.accentColor : .primary)
 
             if repository.isRefreshing {
                 ProgressView().controlSize(.mini)
@@ -147,155 +339,19 @@ private struct RepositoryHeader: View {
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 13))
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
         }
-    }
-
-}
-
-// MARK: - 工作树行
-
-private struct WorktreeRow: View {
-    let repository: RepositoryModel
-    let worktree: Worktree
-    let isSelected: Bool
-
-    /// 这一行对应的详情模型。可能还没建（没被选中过），那就只显示静态信息。
-    private var detail: WorktreeModel? {
-        repository.worktreeModel(for: worktree.path)
-    }
-
-    private var pullRequest: PullRequest? {
-        detail?.linkedPullRequest ?? repository.pullRequest(forBranch: worktree.branch)
-    }
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: icon)
-                .font(.system(size: 13))
-                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-                .frame(width: 16)
-
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 5) {
-                    Text(worktree.name)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .foregroundStyle(isSelected ? Color.accentColor : .primary)
-
-                    if worktree.isLocked {
-                        Image(systemName: "lock.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                    if worktree.isPrunable {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.orange)
-                            .help("目录已不存在，可以清理掉")
-                    }
-                }
-
-                HStack(spacing: 5) {
-                    Image(systemName: worktree.isDetached ? "arrow.triangle.branch" : "arrow.triangle.branch")
-                        .font(.system(size: 8.5))
-                    Text(worktree.checkoutLabel)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 2)
-
-            trailingBadges
-        }
-        .padding(.vertical, 2)
-        // plain Button 默认只命中文字和图标；撑满并声明命中形状，
-        // 让整条侧栏行（包括中间空白）都能点击。
+        .padding(.vertical, 3)
+        // 行高与工作树行统一（同一个常数），不然一行高一行矮很潦草。
+        .frame(minHeight: SidebarMetrics.rowHeight, alignment: .center)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-    }
-
-    private var icon: String {
-        if worktree.isBare { return "archivebox" }
-        if worktree.isPrimary { return "house" }
-        return "leaf"
-    }
-
-    @ViewBuilder
-    private var trailingBadges: some View {
-        HStack(spacing: 4) {
-            if let status = detail?.status {
-                if status.hasConflicts {
-                    Badge(text: "\(status.conflictCount)", systemImage: "exclamationmark.triangle.fill", tint: .red)
-                        .help("有冲突未解决")
-                } else if !status.isClean {
-                    Badge(text: "\(status.changes.count)", systemImage: "pencil", tint: .orange)
-                        .help("\(status.changes.count) 个文件有改动")
-                }
-
-                if status.ahead > 0 {
-                    Badge(text: "\(status.ahead)", systemImage: "arrow.up", tint: .blue)
-                        .help("领先上游 \(status.ahead) 个提交")
-                }
-                if status.behind > 0 {
-                    Badge(text: "\(status.behind)", systemImage: "arrow.down", tint: .purple)
-                        .help("落后上游 \(status.behind) 个提交")
-                }
-            }
-
-            if let pullRequest {
-                PullRequestBadge(pullRequest: pullRequest)
-            }
-        }
-    }
-}
-
-// MARK: - PR 入口行
-
-private struct PullRequestsRow: View {
-    let repository: RepositoryModel
-    let isSelected: Bool
-
-    private var unavailableReason: String? { repository.pullRequestUnavailableReason }
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "arrow.triangle.pull")
-                .font(.system(size: 13))
-                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-                .frame(width: 16)
-
-            // 平台不同叫法不同：GitHub 是 Pull Request，GitLab 是合并请求。
-            Text(repository.reviewTerm)
-                .foregroundStyle(isSelected ? Color.accentColor : .primary)
-
-            Spacer(minLength: 4)
-
-            if repository.isRefreshingPullRequests {
-                ProgressView().controlSize(.mini)
-            } else if unavailableReason != nil {
-                // 用不了也要看得见，并且点进去能知道差哪一步。
-                Image(systemName: "exclamationmark.circle")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.orange)
-            } else if !repository.pullRequests.isEmpty {
-                Text("\(repository.pullRequests.count)")
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(.vertical, 2)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .opacity(unavailableReason == nil ? 1 : 0.6)
-        .help(unavailableReason ?? "查看这个仓库的\(repository.reviewTerm)")
     }
 }
 

@@ -138,9 +138,9 @@ struct RootView: View {
                 } else {
                     placeholder
                 }
-            case .pullRequests:
+            case .repositoryHome:
                 if let repository = model.selectedRepository {
-                    PullRequestListView(repository: repository)
+                    ProjectHomeView(repository: repository)
                         .id(repository.root)
                 } else {
                     placeholder
@@ -238,7 +238,7 @@ struct RootView: View {
     private var refreshTrigger: String {
         switch model.selection {
         case .worktree(_, let path): "wt:\(path.path)"
-        case .pullRequests(let root): "pr:\(root.path)"
+        case .repositoryHome(let root): "home:\(root.path)"
         case nil: "none"
         }
     }
@@ -247,7 +247,9 @@ struct RootView: View {
         switch model.selection {
         case .worktree:
             await model.selectedWorktreeModel?.refresh()
-        case .pullRequests:
+        case .repositoryHome:
+            // 主页里的分栏自己带加载和轮询（CI 每 10–30 秒自刷）；
+            // 这里补拉一次 PR 列表，供概览卡片和拉取请求分栏用。
             await model.selectedRepository?.refreshPullRequests()
         case nil:
             break

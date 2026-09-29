@@ -457,6 +457,105 @@ struct GitLabClient: ForgeClient {
         try await runChecked(arguments, in: directory)
     }
 
+    // MARK: - CI/CD（GitLab 13.x 的接口都在；直接 REST，不依赖 glab 子命令）
+
+    private struct PipelineListDTO: Decodable {
+        let id: Int
+        let status: String
+        let ref: String?
+        let sha: String?
+        let createdAt: Date?
+        let duration: Double?
+        let webUrl: String?
+    }
+
+    private struct PipelineJobDTO: Decodable {
+        let id: Int
+        let name: String
+        let stage: String?
+        let status: String
+        let duration: Double?
+        let queuedDuration: Double?
+        let allowFailure: Bool?
+        let webUrl: String?
+    }
+
+    func pipelines(in directory: URL, limit: Int) async throws -> [CIPipeline] {
+        let data = try await api("projects/:id/pipelines?per_page=\(limit)", in: directory)
+        let dtos = try Self.decoder.decode([PipelineListDTO].self, from: data)
+        return dtos.map { dto in
+            CIPipeline(
+                id: dto.id,
+                status: CIStatus.gitlab(dto.status),
+                ref: dto.ref ?? "",
+                sha: dto.sha ?? "",
+                title: nil,
+                trigger: nil,
+                createdAt: dto.createdAt,
+                duration: dto.duration,
+                webURL: dto.webUrl
+            )
+        }
+    }
+
+    func jobs(pipelineID: Int, in directory: URL) async throws -> [CIJob] {
+        let data = try await api("projects/:id/pipelines/\(pipelineID)/jobs?per_page=100", in: directory)
+        let dtos = try Self.decoder.decode([PipelineJobDTO].self, from: data)
+        return dtos.map { dto in
+            CIJob(
+                id: dto.id,
+                name: dto.name,
+                stage: dto.stage,
+                status: CIStatus.gitlab(dto.status),
+                duration: dto.duration,
+                queuedDuration: dto.queuedDuration,
+                allowFailure: dto.allowFailure ?? false,
+                webURL: dto.webUrl
+            )
+        }
+    }
+
+    func jobLog(jobID: Int, in directory: URL) async throws -> String {
+        let data = try await api("projects/:id/jobs/\(jobID)/trace", in: directory)
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    func retryJob(jobID: Int, in directory: URL) async throws {
+        _ = try await api("projects/:id/jobs/\(jobID)/retry", in: directory, method: "POST")
+    }
+
+    func cancelJob(jobID: Int, in directory: URL) async throws {
+        _ = try await api("projects/:id/jobs/\(jobID)/cancel", in: directory, method: "POST")
+    }
+
+    func runManualJob(jobID: Int, in directory: URL) async throws {
+        _ = try await api("projects/:id/jobs/\(jobID)/play", in: directory, method: "POST")
+    }
+
+    func retryPipeline(id: Int, in directory: URL) async throws {
+        _ = try await api("projects/:id/pipelines/\(id)/retry", in: directory, method: "POST")
+    }
+
+    func cancelPipeline(id: Int, in directory: URL) async throws {
+        _ = try await api("projects/:id/pipelines/\(id)/cancel", in: directory, method: "POST")
+    }
+
+    func runPipeline(ref: String, in directory: URL) async throws {
+        _ = try await api(
+            "projects/:id/pipeline?ref=\(Self.queryEscaped(ref))",
+            in: directory,
+            method: "POST"
+        )
+    }
+
+    /// 查询参数里的分支名转义：`feature/x` 的 `/` 和空格都得编码，
+    /// 否则 REST 端会把路径切错。
+    static func queryEscaped(_ value: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-_.~")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
     func close(number: Int, in directory: URL) async throws {
         // GitLab 关闭 MR 走更新接口；不能用删除接口，否则会丢失评审记录。
         _ = try await api(
