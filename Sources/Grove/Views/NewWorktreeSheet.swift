@@ -224,18 +224,22 @@ struct NewWorktreeSheet: View {
                         .font(.system(size: 11, design: .monospaced))
                         .onChange(of: path) { _, _ in pathWasEdited = true }
 
-                    Button("浏览…") {
-                        let suggestion = URL(fileURLWithPath: path.isEmpty
-                            ? repository.suggestedWorktreePath(for: effectiveBranchName).path
-                            : path)
-                        if let chosen = FolderPicker.chooseWorktreeLocation(suggesting: suggestion) {
-                            path = chosen.path
-                            pathWasEdited = true
+                    // 远程服务器上没有可用的目录选择面板，路径只能手敲
+                    //（默认值来自仓库根目录的兄弟目录，通常改个尾段就够）。
+                    if !repository.isRemote {
+                        Button("浏览…") {
+                            let suggestion = URL(fileURLWithPath: path.isEmpty
+                                ? repository.suggestedWorktreePath(for: effectiveBranchName).path
+                                : path)
+                            if let chosen = FolderPicker.chooseWorktreeLocation(suggesting: suggestion) {
+                                path = chosen.path
+                                pathWasEdited = true
+                            }
                         }
                     }
                 }
 
-                if !path.isEmpty, FileManager.default.fileExists(atPath: path) {
+                if !repository.isRemote, !path.isEmpty, FileManager.default.fileExists(atPath: path) {
                     Label("这个目录已经存在，git 不会往里创建工作树。", systemImage: "exclamationmark.triangle.fill")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.orange)
@@ -334,7 +338,7 @@ struct NewWorktreeSheet: View {
         }
 
         guard let worktree = await repository.createWorktree(at: target, source: gitSource) else { return }
-        appModel.selection = .worktree(repository: repository.root, worktree: worktree.path)
+        appModel.selection = .worktree(repository: repository.id, worktree: worktree.path)
         dismiss()
     }
 }

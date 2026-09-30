@@ -103,6 +103,17 @@ private struct WorktreeHeader: View {
                                 .padding(.vertical, 2)
                                 .background(.quaternary, in: Capsule())
                         }
+                        // 远程服务器上的工作树：标明在哪台机器上，
+                        // 免得和本地的同名项目混在一起认不出来。
+                        if let server = model.repository?.server {
+                            Label(server.displayName, systemImage: "server.rack")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.quaternary, in: Capsule())
+                                .help("\(server.destination):\(model.path.path)")
+                        }
                         if let operation = model.status.operation {
                             Label(operation.rawValue, systemImage: operation.systemImage)
                                 .font(.system(size: 10, weight: .semibold))
@@ -400,9 +411,18 @@ private struct WorktreeHeader: View {
             reviewControl
 
             Menu {
-                Button("在终端打开") { SystemActions.openInTerminal(model.path) }
-                Button("在编辑器打开") { SystemActions.openInEditor(model.path) }
-                Button("在 Finder 显示") { SystemActions.revealInFinder(model.path) }
+                // 远程工作树没有本机动作，复制给 user@host:path 形态。
+                if model.isRemote {
+                    if let server = model.repository?.server {
+                        Button("复制远程路径") {
+                            SystemActions.copyToPasteboard("\(server.destination):\(model.path.path)")
+                        }
+                    }
+                } else {
+                    Button("在终端打开") { SystemActions.openInTerminal(model.path) }
+                    Button("在编辑器打开") { SystemActions.openInEditor(model.path) }
+                    Button("在 Finder 显示") { SystemActions.revealInFinder(model.path) }
+                }
                 Divider()
                 Button("刷新") { Task { await model.refresh() } }
             } label: {

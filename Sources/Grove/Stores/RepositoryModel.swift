@@ -9,8 +9,14 @@ final class RepositoryModel: Identifiable {
     /// SwiftUI 的 sheet 路由、`ForEach` 的去重都会从非隔离上下文读它。
     /// 这是安全的：它是 `let`，而 `URL` 是 `Sendable`。
     nonisolated let root: URL
+    /// 仓库在哪台机器上。`.local` 时一切照旧；`.remote` 时 git 命令经
+    /// 绑定的 SSH 通道在服务器上执行，`root` 存的是远端绝对路径。
+    nonisolated let location: RepoLocation
     private let git: GitClient
     private weak var app: AppModel?
+
+    var isRemote: Bool { location.isRemote }
+    var server: RemoteServer? { location.server }
 
     /// 这个仓库对应的托管商客户端，按 `origin` 的主机在刷新时决定。
     /// nil 表示 Grove 认不出这个远端属于哪个平台 —— 评审功能整块关闭。
@@ -80,7 +86,7 @@ final class RepositoryModel: Identifiable {
         var branch: String
     }
 
-    nonisolated var id: URL { root }
+    nonisolated var id: RepoID { RepoID(location: location, root: root) }
     nonisolated var name: String { root.lastPathComponent }
 
     /// 每个工作树的详情模型，按路径缓存。切回来的时候不用重新加载，
@@ -94,9 +100,11 @@ final class RepositoryModel: Identifiable {
     init(
         root: URL,
         git: GitClient,
-        app: AppModel?
+        app: AppModel?,
+        server: RemoteServer? = nil
     ) {
         self.root = root
+        self.location = server.map(RepoLocation.remote) ?? .local
         self.git = git
         self.app = app
     }
@@ -141,7 +149,11 @@ final class RepositoryModel: Identifiable {
         origin = originURL.flatMap(GitRemote.parse)
         // 托管商只按 origin 认。一个仓库可能同时挂着内网 GitLab 的 origin 和
         // GitHub 备份 remote，让 CLI 自己去猜会认错到另一个仓库上。
-        forge = app?.forge(for: origin)
+        //
+        // 远程仓库暂不接 forge：gh / glab 的项目上下文要靠「在仓库目录里跑本地
+        // git」解析（见 GitLabClient.projectContext），服务器路径在本机不存在。
+        // git 侧功能（状态 / 提交 / 同步 / 工作树 / 冲突）不受影响。
+        forge = isRemote ? nil : app?.forge(for: origin)
         defaultBranch = resolvedDefaultBranch
 
         // 已经不存在的工作树，把缓存的详情模型也清掉，免得内存里挂着一堆死对象。
@@ -178,7 +190,7 @@ final class RepositoryModel: Identifiable {
         }
 
         // 当前正在看的那个再做一次完整刷新（历史 + 关联的 PR）。
-        if let selected = app?.selectedWorktreeModel, selected.repositoryRoot == root {
+        if let selected = app?.selectedWorktreeModel, selected.repository === self {
             await selected.refresh()
         }
     }
@@ -187,7 +199,9 @@ final class RepositoryModel: Identifiable {
     /// 启动和「重新检测」都走这里，网络慢时不会连本地 Git 一起重跑。
     func refreshForgeMetadata() async {
         let previousKind = forge?.kind
-        forge = app?.forge(for: origin)
+        // 远程仓库不接 forge（CLI 的项目上下文要在本机仓库目录里跑 git 解析），
+        // 这里不设的话 PR 列表的守卫会误放行，跑出一片连接错误。
+        forge = isRemote ? nil : app?.forge(for: origin)
         if previousKind != forge?.kind {
             slug = nil
             pullRequests = []
@@ -378,7 +392,7 @@ final class RepositoryModel: Identifiable {
 
     func initialPushTarget() -> InitialPushTarget? {
         if let selected = app?.selectedWorktreeModel,
-           selected.repositoryRoot == root,
+           selected.repository === self,
            let branch = selected.worktree.branch,
            selected.worktree.head != nil {
             return InitialPushTarget(directory: selected.path, branch: branch)
@@ -458,7 +472,9 @@ final class RepositoryModel: Identifiable {
     }
 
     func createWorktree(at path: URL, source: GitClient.WorktreeSource) async -> Worktree? {
-        if FileManager.default.fileExists(atPath: path.path) {
+        // 存在性与建目录都走传输层 —— 远程服务器上新建工作树同样可用。
+        // 占位检查用 fileExists：已存在的文件（不只是目录）同样挡住 git。
+        if await git.fileExists(atPath: path.path) {
             app?.report(title: "新建工作树失败", error: GroveError.worktreePathExists(path))
             return nil
         }
@@ -472,9 +488,9 @@ final class RepositoryModel: Identifiable {
 
         // 父目录不存在时 git worktree add 会直接失败，先建好。
         let parent = path.deletingLastPathComponent()
-        if !FileManager.default.fileExists(atPath: parent.path) {
+        if !(await git.directoryExists(atPath: parent.path)) {
             do {
-                try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+                try await git.createDirectory(atPath: parent.path)
             } catch {
                 app?.report(title: "无法创建目录 \(parent.lastPathComponent)", error: error)
                 return nil
@@ -629,6 +645,9 @@ final class RepositoryModel: Identifiable {
 
     /// 认不出托管商时，接入这台实例要做的事。
     var forgeSetup: AppModel.ForgeSetup? {
+        // 远程仓库不给接入指引 —— 问题不是 CLI 没配好，是远程暂不支持；
+        // 说明走 pullRequestUnavailableReason 那条路。
+        guard !isRemote else { return nil }
         guard forge == nil else { return nil }
         return app?.forgeSetup(for: origin)
     }
@@ -637,6 +656,9 @@ final class RepositoryModel: Identifiable {
     /// 「没远端」「平台认不出来」「CLI 没装/没登录」三种情况用户要做的事完全不同，
     /// 笼统说一句「不可用」等于没说。
     var pullRequestUnavailableReason: String? {
+        if isRemote {
+            return "远程服务器仓库暂不支持 PR / CI 视图。git 操作（提交、同步、工作树、冲突解决）全部可用；要看这个项目的 PR 和流水线，请把本地副本加进 Grove。"
+        }
         guard hasRemote else { return "这个仓库没有配置远端。" }
         guard origin != nil else { return "无法识别 origin 的地址。" }
         guard forge != nil else { return app?.forgeSetup(for: origin)?.summary }

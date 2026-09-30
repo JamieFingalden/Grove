@@ -102,7 +102,8 @@ enum LogParser {
         "%ae",  // 作者邮箱
         "%aI",  // 作者日期，ISO 8601 严格格式
         "%s",   // 标题（提交信息第一行）
-        "%D"    // 指向这个提交的引用（分支、标签、HEAD）
+        "%D",   // 指向这个提交的引用（分支、标签、HEAD）
+        "%b"    // 正文（标题之后的完整提交信息），内部换行原样保留
     ].joined(separator: "\u{1F}") + "\u{1E}"
 
     static func parse(_ output: String, remotes: [String] = []) -> [CommitSummary] {
@@ -125,7 +126,11 @@ enum LogParser {
                 date: DateParsing.iso8601(fields[4]) ?? Date(timeIntervalSince1970: 0),
                 parents: parents,
                 // `%D` 是第 7 个字段。老的日志格式没有它，缺了就是没有引用。
-                refs: fields.count >= 7 ? CommitRef.parse(fields[6], remotes: remotes) : []
+                refs: fields.count >= 7 ? CommitRef.parse(fields[6], remotes: remotes) : [],
+                // `%b` 是第 8 个。开头那行空白分隔符剥掉，正文内部换行不动。
+                body: fields.count >= 8
+                    ? fields[7].trimmingCharacters(in: .whitespacesAndNewlines)
+                    : ""
             )
         }
     }

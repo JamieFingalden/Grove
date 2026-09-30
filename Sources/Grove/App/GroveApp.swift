@@ -18,8 +18,9 @@ struct GroveApp: App {
         let router = PipelineNotificationRouter()
         router.openRepository = { root in
             // 主页的分栏自己带加载；这里只负责把仓库送到眼前。
-            if model.repository(for: root) != nil {
-                model.selection = .repositoryHome(repository: root)
+            // 只有本机仓库会有流水线通知，所以按本机位置构造 RepoID。
+            if model.repository(matching: RepoID(location: .local, root: root)) != nil {
+                model.selection = .repositoryHome(repository: RepoID(location: .local, root: root))
             }
         }
         UNUserNotificationCenter.current().delegate = router

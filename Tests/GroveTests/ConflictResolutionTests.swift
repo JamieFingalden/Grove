@@ -357,19 +357,21 @@ final class ConflictEditorModelTests: XCTestCase {
         XCTAssertEqual(editor.remainingCount, 1)
         let block = editor.document.blocks[0]
 
-        model.resolveBlock(block, with: .theirs)
+        await model.resolveBlock(block, with: .theirs)
         XCTAssertEqual(try read("both.txt"), "line1\nFEATURE\nline3\n")
         guard case .editor(let resolved) = model.conflictContent else { XCTFail("应该还在编辑器里"); return }
         XCTAssertTrue(resolved.isFullyResolved)
-        XCTAssertEqual(model.unresolvedMarkerCount(in: resolved.change), 0)
+        let remainingAfterResolve = await model.unresolvedMarkerCount(in: resolved.change)
+        XCTAssertEqual(remainingAfterResolve, 0)
 
         // 撤销：标记回到磁盘上。
-        model.resolveBlock(block, with: nil)
+        await model.resolveBlock(block, with: nil)
         XCTAssertTrue(try read("both.txt").contains("<<<<<<< HEAD"))
-        XCTAssertEqual(model.unresolvedMarkerCount(in: resolved.change), 1)
+        let remainingAfterUndo = await model.unresolvedMarkerCount(in: resolved.change)
+        XCTAssertEqual(remainingAfterUndo, 1)
 
         // 刷新不能把已做的选择冲掉（磁盘内容没变时保留编辑器状态）。
-        model.resolveBlock(block, with: .both)
+        await model.resolveBlock(block, with: .both)
         await model.refresh()
         let afterRefresh = try await waitForEditor(model)
         XCTAssertEqual(afterRefresh.resolutions[block.id], .both)
@@ -377,7 +379,7 @@ final class ConflictEditorModelTests: XCTestCase {
 
         // 外部改动：写盘前发现磁盘内容变了，这次选择不能覆盖上去。
         try write("外部编辑器写的\n", to: "both.txt")
-        model.resolveBlock(block, with: .ours)
+        await model.resolveBlock(block, with: .ours)
         XCTAssertEqual(try read("both.txt"), "外部编辑器写的\n")
 
         // 重新读取后按磁盘内容来：已经没有标记了。

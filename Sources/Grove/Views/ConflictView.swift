@@ -90,7 +90,9 @@ private struct ConflictLegend: View {
                 if let editor, hasTextualMarkers, !editor.document.blocks.isEmpty {
                     Menu("剩余全部…") {
                         ForEach(ConflictResolution.allCases, id: \.self) { resolution in
-                            Button(resolution.label) { model.resolveRemainingBlocks(with: resolution) }
+                            Button(resolution.label) {
+                                Task { await model.resolveRemainingBlocks(with: resolution) }
+                            }
                         }
                     }
                     .menuStyle(.borderlessButton)
@@ -155,7 +157,7 @@ private struct ConflictLegend: View {
 
     @MainActor
     private func confirmMarkResolved() async {
-        let remaining = model.unresolvedMarkerCount(in: change)
+        let remaining = await model.unresolvedMarkerCount(in: change)
         if remaining > 0 {
             let alert = NSAlert()
             alert.messageText = "文件里还有 \(remaining) 处冲突标记"
@@ -395,7 +397,9 @@ private struct ConflictDocumentView: View {
                                 resolution: editor.resolutions[block.id],
                                 startLine: item.startLine,
                                 isBusy: model.activity != nil,
-                                resolve: { resolution in model.resolveBlock(block, with: resolution) }
+                                resolve: { resolution in
+                                    Task { await model.resolveBlock(block, with: resolution) }
+                                }
                             )
                         }
                     }

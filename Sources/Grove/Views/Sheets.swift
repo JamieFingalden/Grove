@@ -856,7 +856,7 @@ struct MergePullRequestSheet: View {
         do {
             switch try await repository.mergePullRequestLocally(pullRequest) {
             case .conflicted(let worktree):
-                appModel.selection = .worktree(repository: repository.root, worktree: worktree)
+                appModel.selection = .worktree(repository: repository.id, worktree: worktree)
                 dismiss()
             case .mergedAndPushed:
                 await finishMerge()

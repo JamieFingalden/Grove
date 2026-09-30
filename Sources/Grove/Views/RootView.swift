@@ -16,15 +16,21 @@ struct RootView: View {
         case removeWorktree(RepositoryModel, Worktree)
         case cleanupBranches(RepositoryModel)
         case rebase(WorktreeModel)
+        case addRemoteServer
+        case editRemoteServer(RemoteServer)
+        case addRemoteProject(RemoteServer)
 
         var id: String {
             switch self {
-            case .newWorktree(let repository): "new-\(repository.root.path)"
-            case .createRemoteRepository(let repository): "remote-\(repository.root.path)"
+            case .newWorktree(let repository): "new-\(repository.id.identityKey)"
+            case .createRemoteRepository(let repository): "remote-\(repository.id.identityKey)"
             case .createPullRequest(let worktree): "pr-\(worktree.identity.path)"
             case .removeWorktree(_, let worktree): "remove-\(worktree.path.path)"
-            case .cleanupBranches(let repository): "cleanup-\(repository.root.path)"
+            case .cleanupBranches(let repository): "cleanup-\(repository.id.identityKey)"
             case .rebase(let worktree): "rebase-\(worktree.identity.path)"
+            case .addRemoteServer: "add-remote-server"
+            case .editRemoteServer(let server): "edit-remote-server-\(server.id)"
+            case .addRemoteProject(let server): "add-remote-project-\(server.id)"
             }
         }
     }
@@ -125,8 +131,8 @@ struct RootView: View {
         if !model.toolsReady {
             ProgressView("正在准备…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if model.repositories.isEmpty {
-            EmptyRepositoryView()
+        } else if model.allRepositories.isEmpty {
+            EmptyRepositoryView(connectServer: { sheet = .addRemoteServer })
         } else {
             switch model.selection {
             case .worktree:
@@ -170,6 +176,20 @@ struct RootView: View {
                 Label("打开仓库", systemImage: "folder.badge.plus")
             }
             .help("打开一个 git 仓库（⌘O）")
+        }
+
+        ToolbarItem(placement: .navigation) {
+            Button {
+                sheet = .addRemoteServer
+            } label: {
+                // 只留图标：中文长标签会把侧栏顶部的工具区挤得没有下脚处，
+                // 用途写进悬停提示。符号用 externaldrive.badge.plus —— 与
+                // 「打开仓库」的 folder.badge.plus 对仗，+ 号暗示「添加」。
+                // 注意别用 server.rack.badge.plus：不存在这个符号，渲染成空白。
+                Label("连接远程服务器", systemImage: "externaldrive.badge.plus")
+                    .labelStyle(.iconOnly)
+            }
+            .help("通过 SSH 管理远程服务器上的项目（添加 / 编辑服务器）")
         }
 
         ToolbarItemGroup {
@@ -237,8 +257,8 @@ struct RootView: View {
     /// 选中项的稳定标识。`.task(id:)` 靠它判断要不要重跑。
     private var refreshTrigger: String {
         switch model.selection {
-        case .worktree(_, let path): "wt:\(path.path)"
-        case .repositoryHome(let root): "home:\(root.path)"
+        case .worktree(let repository, let path): "wt:\(repository.identityKey):\(path.path)"
+        case .repositoryHome(let repository): "home:\(repository.identityKey)"
         case nil: "none"
         }
     }
@@ -277,6 +297,12 @@ private extension View {
                 CleanupBranchesSheet(repository: repository)
             case .rebase(let worktree):
                 RebaseSheet(model: worktree)
+            case .addRemoteServer:
+                RemoteServerSheet()
+            case .editRemoteServer(let server):
+                RemoteServerSheet(server: server)
+            case .addRemoteProject(let server):
+                AddRemoteProjectSheet(server: server)
             }
         }
     }
@@ -286,6 +312,7 @@ private extension View {
 
 struct EmptyRepositoryView: View {
     @Environment(AppModel.self) private var model
+    var connectServer: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 20) {
@@ -309,6 +336,15 @@ struct EmptyRepositoryView: View {
             }
             .controlSize(.large)
             .buttonStyle(.borderedProminent)
+
+            Button {
+                connectServer()
+            } label: {
+                Label("连接远程服务器…", systemImage: "server.rack")
+                    .padding(.horizontal, 6)
+            }
+            .controlSize(.large)
+            .buttonStyle(.bordered)
 
             if let message = model.availability(of: .github).message {
                 Label(message, systemImage: "info.circle")

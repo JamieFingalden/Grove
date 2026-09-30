@@ -53,7 +53,7 @@ final class LayoutRenderHarness: XCTestCase {
             XCTFail("没有工作树"); return
         }
         await model.refresh()
-        app.selection = .worktree(repository: repository.root, worktree: worktreePath)
+        app.selection = .worktree(repository: repository.id, worktree: worktreePath)
 
         // 选中一个未跟踪目录里的文件，顺便验证 `-uall` 之后目录被展开了。
         model.selectedPath = model.status.changes.first { $0.path.hasPrefix("try/") }?.path
@@ -325,11 +325,11 @@ final class ConflictRenderHarness: XCTestCase {
             XCTFail("没有工作树"); return
         }
         await model.refresh()
-        app.selection = .worktree(repository: repository.root, worktree: worktreePath)
+        app.selection = .worktree(repository: repository.id, worktree: worktreePath)
         model.selectedPath = "app.swift"
         try await Task.sleep(for: .milliseconds(800))
         if case .editor(let editor) = model.conflictContent, let first = editor.document.blocks.first {
-            model.resolveBlock(first, with: .both)
+            await model.resolveBlock(first, with: .both)
         }
         try await Task.sleep(for: .milliseconds(300))
         try render(RootView().environment(app), size: CGSize(width: 1280, height: 860), to: "/tmp/grove-render-conflict.png")

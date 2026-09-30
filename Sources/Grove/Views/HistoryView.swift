@@ -471,6 +471,17 @@ private struct CommitHeader: View {
             }
             .font(.system(size: 10.5))
             .foregroundStyle(.secondary)
+
+            // 提交正文（标题之后的完整信息）。只有标题的提交不占这块地方。
+            if !commit.body.isEmpty {
+                Text(commit.body)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 3)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 14)

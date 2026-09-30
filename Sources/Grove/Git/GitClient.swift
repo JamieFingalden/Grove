@@ -6,9 +6,11 @@ import Foundation
 /// 对它的支持一直不完整（`git worktree add` 的一堆语义要自己重实现）。命令行版本
 /// 由 git 官方维护、跟用户终端里的行为完全一致，porcelain 输出格式也有向后兼容承诺。
 /// 代价是每次调用都要 fork 一个进程，但这个开销（几毫秒）在 GUI 的刷新频率下无所谓。
+///
+/// 执行通道是可插拔的（`CommandTransport`）：本地走子进程，远程服务器走 ssh。
+/// 远端的 git 输出格式与本地一致，所以这个类型里的解析逻辑对两种通道通用。
 struct GitClient: Sendable {
-    let executable: URL
-    let environment: [String: String]
+    let transport: any CommandTransport
 
     /// 每条命令都带上的全局参数。
     private static let globalArguments = [
@@ -27,6 +29,15 @@ struct GitClient: Sendable {
         "-c", "gc.auto=0"
     ]
 
+    init(transport: any CommandTransport) {
+        self.transport = transport
+    }
+
+    /// 本地执行的旧入口，保留成员式初始化的形状（测试和既有调用方在用）。
+    init(executable: URL, environment: [String: String]) {
+        self.init(transport: LocalTransport(executable: executable, environment: environment))
+    }
+
     static func resolve() async throws -> GitClient {
         guard let executable = await ToolLocator.shared.locate("git") else {
             throw GroveError.gitNotFound
@@ -37,6 +48,12 @@ struct GitClient: Sendable {
         )
     }
 
+    /// 绑定到一台远程服务器的客户端。git 命令在服务器上执行，
+    /// 传入的目录路径按远端绝对路径解释。
+    static func remote(_ server: RemoteServer, sshExecutable: URL) -> GitClient {
+        GitClient(transport: SSHTransport(sshExecutable: sshExecutable, server: server))
+    }
+
     // MARK: - 底层调用
 
     @discardableResult
@@ -45,13 +62,8 @@ struct GitClient: Sendable {
         in directory: URL,
         timeout: Double = ProcessRunner.localTimeout
     ) async throws -> String {
-        let result = try await ProcessRunner.runChecked(
-            executable: executable,
-            arguments: Self.globalArguments + arguments,
-            workingDirectory: directory,
-            environment: environment,
-            timeout: timeout
-        )
+        let result = try await runRaw(arguments, in: directory, timeout: timeout)
+        try ensureSuccess(result, arguments: arguments)
         return result.stdout
     }
 
@@ -60,12 +72,25 @@ struct GitClient: Sendable {
         in directory: URL,
         timeout: Double = ProcessRunner.localTimeout
     ) async throws -> CommandResult {
-        try await ProcessRunner.run(
-            executable: executable,
-            arguments: Self.globalArguments + arguments,
-            workingDirectory: directory,
-            environment: environment,
-            timeout: timeout
+        try await transport.runGit(
+            Self.globalArguments + arguments,
+            worktreePath: directory.path,
+            timeout: timeout,
+            standardInput: nil
+        )
+    }
+
+    /// 与 `ProcessRunner.runChecked` 同一套错误语义：非零退出抛
+    /// `CommandFailure`，报错优先 stderr，stderr 空时退回 stdout。
+    private func ensureSuccess(_ result: CommandResult, arguments: [String]) throws {
+        guard !result.isSuccess else { return }
+        let message = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallback = result.trimmedStdout
+        throw CommandFailure(
+            executable: transport.label,
+            arguments: arguments,
+            exitCode: result.exitCode,
+            output: message.isEmpty ? fallback : message
         )
     }
 
@@ -73,6 +98,34 @@ struct GitClient: Sendable {
     func succeeds(_ arguments: [String], in directory: URL) async -> Bool {
         let result = try? await runRaw(arguments, in: directory)
         return result?.isSuccess ?? false
+    }
+
+    // MARK: - 文件原语（转发到传输层）
+
+    /// diff 面板编辑、冲突重写这些「git 之外」的文件操作用。
+    /// 本地走 FileManager，远程走同一条 ssh 连接。
+    func fileExists(atPath path: String) async -> Bool {
+        await transport.fileExists(atPath: path)
+    }
+
+    func directoryExists(atPath path: String) async -> Bool {
+        await transport.directoryExists(atPath: path)
+    }
+
+    func readData(atPath path: String) async -> Data? {
+        await transport.readData(atPath: path)
+    }
+
+    func writeData(_ data: Data, toPath path: String, atomic: Bool) async throws {
+        try await transport.writeData(data, toPath: path, atomic: atomic)
+    }
+
+    func modificationDate(atPath path: String) async -> Date? {
+        await transport.modificationDate(atPath: path)
+    }
+
+    func createDirectory(atPath path: String) async throws {
+        try await transport.createDirectory(atPath: path)
     }
 
     // MARK: - 仓库识别
@@ -113,17 +166,21 @@ struct GitClient: Sendable {
     }
 
     func status(in directory: URL) async throws -> WorktreeStatus {
-        let result = try await ProcessRunner.runChecked(
-            executable: executable,
+        let arguments = Self.globalArguments + [
             // `--untracked-files=all` 让 git 列出未跟踪**目录里的每个文件**。
             // 默认的 `normal` 会把整个未跟踪目录折叠成一行（`try/`），
             // 那种条目既没法单独暂存，点开也没有 diff 可看 —— 界面上就是一片空白。
             // 代价是没被 gitignore 挡住的巨型目录（node_modules 之类）会拖慢这条命令，
             // 但那种情况本来就该往 .gitignore 里加一行。
-            arguments: Self.globalArguments + ["status", "--porcelain=v2", "--branch", "--untracked-files=all", "-z"],
-            workingDirectory: directory,
-            environment: environment
+            "status", "--porcelain=v2", "--branch", "--untracked-files=all", "-z"
+        ]
+        let result = try await transport.runGit(
+            arguments,
+            worktreePath: directory.path,
+            timeout: ProcessRunner.localTimeout,
+            standardInput: nil
         )
+        try ensureSuccess(result, arguments: arguments)
         var status = StatusParser.parse(result.standardOutput)
         status.operation = await currentOperation(in: directory)
         return status
@@ -241,15 +298,16 @@ struct GitClient: Sendable {
         // 目录进不了 diff。正常情况下 `--untracked-files=all` 已经把未跟踪目录
         // 展开成具体文件了，走到这里的只剩子模块、符号链接这类特殊条目 ——
         // 给个二进制标记，界面会显示「无法按行比较」，总好过一片空白。
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: fileURL.path, isDirectory: &isDirectory) else { return nil }
-        if isDirectory.boolValue {
+        // 存在性检查走传输层：远程仓库的未跟踪文件同样要能预览。
+        let exists = await fileExists(atPath: fileURL.path)
+        guard exists else { return nil }
+        if await directoryExists(atPath: fileURL.path) {
             return FileDiff(oldPath: nil, newPath: path, hunks: [], isBinary: true,
                             isNewFile: true, isDeletedFile: false, isRename: false,
                             isModeChangeOnly: false, oldMode: nil, newMode: nil)
         }
 
-        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        guard let data = await readData(atPath: fileURL.path) else { return nil }
 
         // 判定二进制：前 8000 字节里出现 NUL 就当二进制处理 —— 这也是 git 自己的启发式。
         let sample = data.prefix(8000)
@@ -353,23 +411,25 @@ struct GitClient: Sendable {
     ///
     /// 靠 git 目录里的哨兵文件判断 —— 这是 git 自己在 shell 提示符脚本里用的办法，
     /// 没有别的命令能直接问出来。注意工作树的 git 目录是 `<repo>/.git/worktrees/<name>`，
-    /// 不是主仓库的 `.git`，所以必须现问一次。
+    /// 不是主仓库的 `.git`，所以必须现问一次。存在性检查走传输层，
+    /// 远程工作树同样能识别出「变基中 / 合并中」。
     func currentOperation(in directory: URL) async -> RepositoryOperation? {
         guard let gitDir = await gitDirectory(in: directory) else { return nil }
-        let fileManager = FileManager.default
 
-        func exists(_ name: String) -> Bool {
-            fileManager.fileExists(atPath: gitDir.appendingPathComponent(name).path)
+        func exists(_ name: String) async -> Bool {
+            await fileExists(atPath: gitDir.appendingPathComponent(name).path)
         }
 
         // 顺序有讲究：rebase 期间也可能存在 MERGE_HEAD（交互式 rebase 里的合并冲突），
         // 这时候该报「变基中」而不是「合并中」，否则用户会去点 `git merge --abort`，
         // 那条命令在 rebase 中间是无效的。
-        if exists("rebase-merge") || exists("rebase-apply") { return .rebase }
-        if exists("CHERRY_PICK_HEAD") { return .cherryPick }
-        if exists("REVERT_HEAD") { return .revert }
-        if exists("MERGE_HEAD") { return .merge }
-        if exists("BISECT_LOG") { return .bisect }
+        let hasRebaseMerge = await exists("rebase-merge")
+        let hasRebaseApply = await exists("rebase-apply")
+        if hasRebaseMerge || hasRebaseApply { return .rebase }
+        if await exists("CHERRY_PICK_HEAD") { return .cherryPick }
+        if await exists("REVERT_HEAD") { return .revert }
+        if await exists("MERGE_HEAD") { return .merge }
+        if await exists("BISECT_LOG") { return .bisect }
         return nil
     }
 
@@ -448,6 +508,7 @@ struct GitClient: Sendable {
     ///
     /// 补丁从 stdin 喂进去，不落临时文件 —— 少一处需要清理的东西，
     /// 也避免临时文件路径里有中文或空格时的各种转义问题。
+    /// 远程通道下 stdin 由 ssh 原样转发，行为一致。
     func applyPatch(
         _ patch: String,
         in directory: URL,
@@ -461,13 +522,14 @@ struct GitClient: Sendable {
         // 原样是什么就是什么，跑出一堆 warning 只会淹没真正的错误。
         arguments.append("--whitespace=nowarn")
 
-        try await ProcessRunner.runChecked(
-            executable: executable,
-            arguments: Self.globalArguments + arguments,
-            workingDirectory: directory,
-            environment: environment,
+        let full = Self.globalArguments + arguments
+        let result = try await transport.runGit(
+            full,
+            worktreePath: directory.path,
+            timeout: ProcessRunner.localTimeout,
             standardInput: Data(patch.utf8)
         )
+        try ensureSuccess(result, arguments: full)
     }
 
     func commit(message: String, amend: Bool = false, in directory: URL) async throws {
@@ -696,9 +758,9 @@ struct GitClient: Sendable {
     /// 把工作区里现在的内容当作解决结果。文件还在就 add，被用户删了就 rm。
     func markConflictResolved(path: String, in directory: URL) async throws {
         let url = directory.appendingPathComponent(path)
-        // 用 attributesOfItem 而不是 fileExists：后者会顺着符号链接走，
-        // 一个指向已删目标的链接会被误判成「文件没了」然后被 rm 掉。
-        if (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil {
+        // 存在性语义与本地版一致：不顺着符号链接走到目标（attributesOfItem），
+        // 一个指向已删目标的链接会被判成「文件没了」然后被 rm 掉。
+        if await fileExists(atPath: url.path) {
             try await run(["add", "--", path], in: directory)
         } else {
             try await run(["rm", "--quiet", "--", path], in: directory)
@@ -736,20 +798,23 @@ struct GitClient: Sendable {
 
         case .rebase:
             let gitDir = await gitDirectory(in: directory)
-            func stateFile(_ name: String) -> String? {
+            // 状态文件在远端服务器上时也要读得到 —— 冲突上下文的说明
+            // （「来自哪个分支」）不因通道而异。读失败按「不知道」处理。
+            func stateFile(_ name: String) async -> String? {
                 guard let gitDir else { return nil }
                 for stateDirectory in ["rebase-merge", "rebase-apply"] {
                     let url = gitDir.appendingPathComponent(stateDirectory).appendingPathComponent(name)
-                    if let text = try? String(contentsOf: url, encoding: .utf8) {
+                    if let data = await readData(atPath: url.path),
+                       let text = String(data: data, encoding: .utf8) {
                         return text.trimmingCharacters(in: .whitespacesAndNewlines)
                     }
                 }
                 return nil
             }
-            let rebasedBranch = stateFile("head-name").map { name in
+            let rebasedBranch = await stateFile("head-name").map { name in
                 name.hasPrefix("refs/heads/") ? String(name.dropFirst("refs/heads/".count)) : name
             }
-            let onto = stateFile("onto")
+            let onto = await stateFile("onto")
             var ontoName = "变基目标"
             if let onto {
                 ontoName = await refName(pointingAt: onto, in: directory) ?? String(onto.prefix(7))
@@ -885,6 +950,7 @@ struct GitClient: Sendable {
 /// Grove 自己抛出的错误，跟子进程失败区分开。
 enum GroveError: LocalizedError, Sendable {
     case gitNotFound
+    case sshNotFound
     case ghNotFound
     case ghNotAuthenticated
     case notARepository(URL)
@@ -905,6 +971,8 @@ enum GroveError: LocalizedError, Sendable {
         switch self {
         case .gitNotFound:
             "找不到 git。请先安装 Xcode 命令行工具：在终端里运行 xcode-select --install"
+        case .sshNotFound:
+            "找不到 ssh。远程服务器功能需要系统自带的 ssh（/usr/bin/ssh）。"
         case .ghNotFound:
             "找不到 GitHub CLI。PR 功能需要它：brew install gh"
         case .ghNotAuthenticated:

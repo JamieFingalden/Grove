@@ -323,6 +323,9 @@ struct CommitSummary: Identifiable, Hashable, Sendable {
     /// 指向这个提交的引用（分支、标签、HEAD）。来自 `%D`。
     /// 没有它的话，图上分不出哪条道是 main。
     var refs: [CommitRef]
+    /// 提交正文：标题之后的完整提交信息（`%b`）。内部换行原样保留，
+    /// 首尾的空白分隔已剥掉。默认空串 —— 很多提交只有标题一行。
+    var body: String = ""
 
     var id: String { oid }
     var shortOID: String { String(oid.prefix(7)) }

@@ -409,7 +409,7 @@ private struct ConflictRow: View {
     /// 带着 `<<<<<<<` 提交出去是冲突解决里最常见的事故，标记前先数一遍。
     @MainActor
     private func confirmMarkResolved() async {
-        let remaining = model.unresolvedMarkerCount(in: change)
+        let remaining = await model.unresolvedMarkerCount(in: change)
         if remaining > 0 {
             let alert = NSAlert()
             alert.messageText = "文件里还有 \(remaining) 处冲突标记"

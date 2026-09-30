@@ -10,6 +10,37 @@ final class CommitRefParsingTests: XCTestCase {
         XCTAssertEqual(refs[2], CommitRef(name: "v1.0", kind: .tag))
     }
 
+    // MARK: - 提交正文（%b）
+
+    /// 构造一条 `LogParser.format` 形状的记录。`refs` 和 `body` 由调用方补。
+    private func record(subject: String, refs: String = "", body: String = "") -> String {
+        "0123456789abcdef\u{1F}fedcba9876543210\u{1F}Jamie\u{1F}jamie@example.com"
+            + "\u{1F}2026-01-02T03:04:05+08:00\u{1F}\(subject)\u{1F}\(refs)\u{1F}\(body)\u{1E}"
+    }
+
+    func testParseKeepsMultilineBody() {
+        // `%b` 开头带标题后的空白分隔行；正文内部换行必须原样保留。
+        let output = record(subject: "修复解析", body: "\n第一行说明\n\n- 列表项一\n- 列表项二\n")
+        let commits = LogParser.parse(output)
+        XCTAssertEqual(commits.count, 1)
+        XCTAssertEqual(commits[0].body, "第一行说明\n\n- 列表项一\n- 列表项二")
+        XCTAssertEqual(commits[0].subject, "修复解析")
+    }
+
+    func testParseSubjectOnlyCommitHasEmptyBody() {
+        let output = record(subject: "只有标题")
+        XCTAssertEqual(LogParser.parse(output).first?.body, "")
+    }
+
+    func testParseOldFormatWithoutBodyFieldStillWorks() {
+        // 兼容缺 `%b` 字段的旧输出：不该把 refs 错读成正文。
+        let legacy = "0123456789abcdef\u{1F}fedcba9876543210\u{1F}Jamie\u{1F}jamie@example.com"
+            + "\u{1F}2026-01-02T03:04:05+08:00\u{1F}标题\u{1F}HEAD -> main\u{1E}"
+        let commits = LogParser.parse(legacy)
+        XCTAssertEqual(commits.first?.refs.first?.name, "main")
+        XCTAssertEqual(commits.first?.body, "")
+    }
+
     func testEmptyDecorationYieldsNothing() {
         XCTAssertTrue(CommitRef.parse("").isEmpty)
         XCTAssertTrue(CommitRef.parse("   ").isEmpty)

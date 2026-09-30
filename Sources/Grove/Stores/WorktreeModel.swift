@@ -33,6 +33,8 @@ final class WorktreeModel: Identifiable {
     var historyBranches: [Branch] { repository?.branches ?? [] }
     var historyRemoteBranches: [RemoteBranch] { repository?.remoteBranches ?? [] }
     var historyBranchLabel: String { historyBranch ?? worktree.branch ?? "当前工作树" }
+    /// 这个工作树在不在远程服务器上。文件读写要走 git 的传输通道而不是磁盘。
+    var isRemote: Bool { repository?.isRemote == true }
     /// 这个仓库出现过的提交身份，填筛选下拉框用。
     var knownAuthors: [CommitAuthor] = []
     var isLoadingHistory = false
@@ -176,7 +178,6 @@ final class WorktreeModel: Identifiable {
 
     nonisolated var id: URL { identity }
     var path: URL { worktree.path }
-    var repositoryRoot: URL { repository?.root ?? worktree.path }
     var isAICommitEnabled: Bool { app?.canUseAIGeneration == true }
 
     init(worktree: Worktree, repository: RepositoryModel?, git: GitClient, app: AppModel?) {
@@ -608,8 +609,12 @@ final class WorktreeModel: Identifiable {
             let raw: String
             if diffSide == .staged {
                 raw = try await git.run(["show", ":\(path)"], in: worktree.path)
+            } else if let data = await readEditorFile(at: worktree.path.appendingPathComponent(path)),
+                      let text = String(data: data, encoding: .utf8) {
+                // 远程工作树经 ssh 读，本机读盘 —— 严格 UTF-8，解不出来按没有处理。
+                raw = text
             } else {
-                raw = try String(contentsOf: worktree.path.appendingPathComponent(path), encoding: .utf8)
+                return nil
             }
             // 逐行剥离 CRLF；文件末尾的换行会多切出一个空尾元素，不影响切片。
             let lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map { sub -> String in
@@ -826,8 +831,8 @@ final class WorktreeModel: Identifiable {
 
     /// 文件里现在还剩几个冲突块。标记为已解决之前用它拦一下 ——
     /// 带着 `<<<<<<<` 提交出去是冲突解决里最常见的事故。
-    func unresolvedMarkerCount(in change: FileChange) -> Int {
-        guard case .text(let text, _) = Self.readConflictSource(at: path.appendingPathComponent(change.path)) else {
+    func unresolvedMarkerCount(in change: FileChange) async -> Int {
+        guard case .text(let text, _) = await readConflictSource(at: path.appendingPathComponent(change.path)) else {
             return 0
         }
         return ConflictParser.parse(text).blocks.count
@@ -841,7 +846,7 @@ final class WorktreeModel: Identifiable {
     }
 
     /// 给一个冲突块定结果（nil = 撤销之前的选择），然后把整份文件重写到磁盘。
-    func resolveBlock(_ block: ConflictBlock, with resolution: ConflictResolution?) {
+    func resolveBlock(_ block: ConflictBlock, with resolution: ConflictResolution?) async {
         guard case .editor(let editor) = conflictContent else { return }
         var resolutions = editor.resolutions
         if let resolution {
@@ -849,15 +854,15 @@ final class WorktreeModel: Identifiable {
         } else {
             resolutions.removeValue(forKey: block.id)
         }
-        writeConflictEditor(editor, resolutions: resolutions)
+        await writeConflictEditor(editor, resolutions: resolutions)
     }
 
     /// 剩下的块全部按同一个选择解决。已经选过的块不动。
-    func resolveRemainingBlocks(with resolution: ConflictResolution) {
+    func resolveRemainingBlocks(with resolution: ConflictResolution) async {
         guard case .editor(let editor) = conflictContent else { return }
         var resolutions = editor.resolutions
         for block in editor.unresolvedBlocks { resolutions[block.id] = resolution }
-        writeConflictEditor(editor, resolutions: resolutions)
+        await writeConflictEditor(editor, resolutions: resolutions)
     }
 
     /// 重新从磁盘读一遍。用户在外部编辑器里改完回来时点它。
@@ -866,11 +871,11 @@ final class WorktreeModel: Identifiable {
         await loadConflictContent(for: change)
     }
 
-    private func writeConflictEditor(_ editor: ConflictEditor, resolutions: [Int: ConflictResolution]) {
+    private func writeConflictEditor(_ editor: ConflictEditor, resolutions: [Int: ConflictResolution]) async {
         let url = path.appendingPathComponent(editor.change.path)
 
         // 写之前确认磁盘上还是我们上次见到的内容。
-        if case .text(let onDisk, _) = Self.readConflictSource(at: url), onDisk != editor.lastKnownText {
+        if case .text(let onDisk, _) = await readConflictSource(at: url), onDisk != editor.lastKnownText {
             app?.report(
                 title: "文件已在外部被修改",
                 detail: "「\(editor.change.displayName)」跟 Grove 上次读到的不一样，已重新读取。这次的选择没有写入，请重新选。"
@@ -889,7 +894,7 @@ final class WorktreeModel: Identifiable {
         do {
             // 不用 atomic：原地写才能保住文件的权限位和 inode
             // （可执行脚本、正被别的程序打开着的文件）。
-            try data.write(to: url)
+            try await git.writeData(data, toPath: url.path, atomic: false)
             editor.lastKnownText = text
             conflictContent = .editor(editor)
         } catch {
@@ -898,10 +903,7 @@ final class WorktreeModel: Identifiable {
     }
 
     private func loadConflictContent(for change: FileChange) async {
-        let url = path.appendingPathComponent(change.path)
-        let source = await Task.detached(priority: .userInitiated) {
-            Self.readConflictSource(at: url)
-        }.value
+        let source = await readConflictSource(at: path.appendingPathComponent(change.path))
         guard !Task.isCancelled else { return }
 
         switch source {
@@ -938,18 +940,51 @@ final class WorktreeModel: Identifiable {
     /// 写回去文件就坏了 —— 所以解不出来的一律归为「不可改写」。
     nonisolated static func readConflictSource(at url: URL) -> ConflictSource {
         guard (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil else { return .missing }
-        guard var data = try? Data(contentsOf: url) else { return .missing }
+        guard let data = try? Data(contentsOf: url) else { return .missing }
+        return classifyConflictSource(data)
+    }
+
+    /// 字节怎么归类为冲突内容。本机和远程读到 `Data` 之后走同一套判定。
+    nonisolated static func classifyConflictSource(_ data: Data) -> ConflictSource {
+        var bytes = data
 
         // 判定二进制：前 8000 字节里出现 NUL。这也是 git 自己的启发式。
-        if data.prefix(8000).contains(0) { return .binary }
+        if bytes.prefix(8000).contains(0) { return .binary }
 
         var hasByteOrderMark = false
-        if data.starts(with: [0xEF, 0xBB, 0xBF]) {
+        if bytes.starts(with: [0xEF, 0xBB, 0xBF]) {
             hasByteOrderMark = true
-            data.removeFirst(3)
+            bytes.removeFirst(3)
         }
-        guard let text = String(data: data, encoding: .utf8) else { return .undecodable }
+        guard let text = String(data: bytes, encoding: .utf8) else { return .undecodable }
         return .text(text, hasByteOrderMark: hasByteOrderMark)
+    }
+
+    /// 实例版：远程工作树经 ssh 读，本机在后台线程读磁盘（大文件不卡主线程）。
+    private func readConflictSource(at url: URL) async -> ConflictSource {
+        if isRemote {
+            guard let data = await git.readData(atPath: url.path) else { return .missing }
+            return Self.classifyConflictSource(data)
+        }
+        return await Task.detached(priority: .userInitiated) {
+            Self.readConflictSource(at: url)
+        }.value
+    }
+
+    // MARK: - 编辑器文件 IO
+
+    /// 轻量编辑器（diff 面板）读写工作区文件走这里：本机就是磁盘，
+    /// 远程工作树经 ssh 读写服务器上的文件。
+    func readEditorFile(at url: URL) async -> Data? {
+        await git.readData(atPath: url.path)
+    }
+
+    func writeEditorFile(_ text: String, to url: URL) async throws {
+        try await git.writeData(Data(text.utf8), toPath: url.path, atomic: true)
+    }
+
+    func editorFileModificationDate(at url: URL) async -> Date? {
+        await git.modificationDate(atPath: url.path)
     }
 
     // MARK: - 提交与同步

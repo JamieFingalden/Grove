@@ -8,17 +8,45 @@ struct SidebarView: View {
         @Bindable var model = model
 
         List {
-            ForEach(model.repositories) { repository in
-                RepositorySection(repository: repository, sheet: $sheet)
+            // 以项目为单位：同一项目的本地副本和远程副本合并成一个条目，
+            // 工作树行上用位置标记区分（本机 / 服务器名）。
+            ForEach(model.projects) { project in
+                ProjectSection(project: project, sheet: $sheet)
+            }
+
+            // 底部的服务器管理区：项目在上面按 origin 合并了，
+            // 服务器的增删改和连接状态留在这里。
+            if model.remoteServers.isEmpty {
+                Button {
+                    sheet = .addRemoteServer
+                } label: {
+                    Label("连接远程服务器…", systemImage: "server.rack")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        // 与工作树行同一缩进（18），不要自成一派。
+                        .padding(.leading, 18)
+                        .frame(minHeight: SidebarMetrics.rowHeight, alignment: .center)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                // 侧栏 List 的行不套 listRowBackground 时，点按会闪系统默认的
+                // 整行高亮 —— 这行不是可选中项，给个透明背景压掉。
+                .listRowBackground(Color.clear)
+            } else {
+                ForEach(model.remoteServers) { server in
+                    RemoteServerRow(server: server, sheet: $sheet)
+                        .listRowBackground(Color.clear)
+                }
             }
         }
         .listStyle(.sidebar)
         .overlay {
-            if model.repositories.isEmpty && model.toolsReady {
+            if model.allRepositories.isEmpty && model.toolsReady {
                 ContentUnavailableView {
                     Label("还没有仓库", systemImage: "folder")
                 } description: {
-                    Text("按 ⌘O 打开一个。")
+                    Text("按 ⌘O 打开一个，或连接远程服务器。")
                 }
             }
         }
@@ -43,13 +71,14 @@ enum SidebarMetrics {
     static let rowHeight: CGFloat = 32
 }
 
-// MARK: - 仓库区块
+// MARK: - 项目区块
 
-/// 侧边栏里一个仓库的整块：主页入口置顶，工作树缩进在它下面、可收起展开。
-/// 层级语义：仓库 → 项目主页（仓库级）→ 工作树（检出级）。
-private struct RepositorySection: View {
+/// 侧边栏里一个项目的整块：主页入口置顶，本地和各服务器的**全部**工作树
+/// 缩进在它下面、可收起展开 —— 同名分支靠位置标记区分在哪台机器上。
+/// 层级语义：项目 → 项目主页（仓库级）→ 工作树（检出级）。
+private struct ProjectSection: View {
     @Environment(AppModel.self) private var model
-    let repository: RepositoryModel
+    let project: AppModel.ProjectGroup
     @Binding var sheet: RootView.ActiveSheet?
 
     @State private var worktreesExpanded = true
@@ -61,79 +90,127 @@ private struct RepositorySection: View {
     var body: some View {
         @Bindable var model = model
 
-        // 仓库行 = 主页入口 + 工作树的折叠开关（三角长在仓库行上，
-        // Finder/Xcode 的形态）。
-        let homeSelection = AppModel.Selection.repositoryHome(repository: repository.root)
-        let homeIsSelected = model.selection == homeSelection
+        // homeRepository 按构造不可能为 nil（组里至少有一个仓库），防御一下。
+        if let home = project.homeRepository {
+            // 仓库行 = 主页入口 + 工作树的折叠开关（三角长在仓库行上，
+            // Finder/Xcode 的形态）。主页入口指向本地副本（PR / CI 只在本地可用）。
+            let homeSelection = AppModel.Selection.repositoryHome(repository: home.id)
+            let homeIsSelected = model.selection == homeSelection
+            let worktreeCount = project.repositories.reduce(0) { $0 + $1.worktrees.count }
 
-        HStack(spacing: 6) {
-            Button {
-                // 动画安全的前提是拆平结构（无 Section 父节点）——已用无头脚本验证：
-                // 折叠/展开/快速连点都不再触发 NSOutlineView 断言。
-                withAnimation(.snappy(duration: 0.2)) {
-                    worktreesExpanded.toggle()
+            HStack(spacing: 6) {
+                Button {
+                    // 动画安全的前提是拆平结构（无 Section 父节点）——已用无头脚本验证：
+                    // 折叠/展开/快速连点都不再触发 NSOutlineView 断言。
+                    withAnimation(.snappy(duration: 0.2)) {
+                        worktreesExpanded.toggle()
+                    }
+                } label: {
+                    Image(systemName: worktreesExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 12, height: 32)
+                        .contentShape(Rectangle())
                 }
-            } label: {
-                Image(systemName: worktreesExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 12, height: 32)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(worktreesExpanded ? "收起工作树" : "展开工作树（\(repository.worktrees.count) 个）")
-
-            Button {
-                model.selection = homeSelection
-            } label: {
-                RepositoryHomeRow(
-                    repository: repository,
-                    isSelected: homeIsSelected,
-                    sheet: $sheet
-                )
-            }
-            .buttonStyle(.plain)
-        }
-        .listRowBackground(sidebarSelectionBackground(homeIsSelected))
-        .contextMenu {
-            Button("新建工作树…") { sheet = .newWorktree(repository) }
-            Button("在 Finder 显示") { SystemActions.revealInFinder(repository.root) }
-        }
-
-        if worktreesExpanded {
-            ForEach(repository.worktrees) { worktree in
-                let selection = AppModel.Selection.worktree(
-                    repository: repository.root,
-                    worktree: worktree.path
-                )
-                let isSelected = model.selection == selection
+                .buttonStyle(.plain)
+                .help(worktreesExpanded ? "收起工作树" : "展开工作树（\(worktreeCount) 个）")
 
                 Button {
-                    model.selection = selection
+                    model.selection = homeSelection
                 } label: {
-                    WorktreeRow(
-                        repository: repository,
-                        worktree: worktree,
-                        isSelected: isSelected
+                    RepositoryHomeRow(
+                        repository: home,
+                        isSelected: homeIsSelected,
+                        sheet: $sheet
                     )
                 }
                 .buttonStyle(.plain)
-                // 缩进到仓库行图标正下方：三角(12) + 间距(6)。
-                .padding(.leading, 18)
-                .listRowBackground(sidebarSelectionBackground(isSelected))
-                .contextMenu {
-                    worktreeMenu(repository: repository, worktree: worktree)
+            }
+            .listRowBackground(sidebarSelectionBackground(homeIsSelected))
+            .contextMenu {
+                newWorktreeMenu
+                if let local = project.local {
+                    Button("在 Finder 显示") { SystemActions.revealInFinder(local.root) }
+                }
+            }
+
+            if worktreesExpanded {
+                // 本地副本的工作树在前，各服务器的在后 —— 本地是响应最快的主场。
+                ForEach(project.repositories) { repository in
+                    let marker = locationMarker(for: repository)
+                    ForEach(repository.worktrees) { worktree in
+                        let selection = AppModel.Selection.worktree(
+                            repository: repository.id,
+                            worktree: worktree.path
+                        )
+                        let isSelected = model.selection == selection
+
+                        Button {
+                            model.selection = selection
+                        } label: {
+                            WorktreeRow(
+                                repository: repository,
+                                worktree: worktree,
+                                isSelected: isSelected,
+                                marker: marker
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        // 缩进到仓库行图标正下方：三角(12) + 间距(6)。
+                        .padding(.leading, 18)
+                        .listRowBackground(sidebarSelectionBackground(isSelected))
+                        .contextMenu {
+                            worktreeMenu(repository: repository, worktree: worktree)
+                        }
+                    }
                 }
             }
         }
     }
 
+    /// 位置标记：远程副本标服务器名；本地副本只在「混合项目」里标「本机」——
+    /// 纯本地项目里那是默认态，标了反而吵。
+    private func locationMarker(for repository: RepositoryModel) -> LocationMarker? {
+        if repository.isRemote, let server = repository.server {
+            return .server(server)
+        }
+        return project.isMixed ? .local : nil
+    }
+
+    /// 跨多台机器的项目，新建工作树要选在哪边建。
+    @ViewBuilder
+    private var newWorktreeMenu: some View {
+        if project.repositories.count > 1 {
+            Menu("新建工作树…") {
+                ForEach(project.repositories) { repository in
+                    Button(locationName(of: repository)) {
+                        sheet = .newWorktree(repository)
+                    }
+                }
+            }
+        } else if let only = project.homeRepository {
+            Button("新建工作树…") { sheet = .newWorktree(only) }
+        }
+    }
+
+    private func locationName(of repository: RepositoryModel) -> String {
+        repository.server?.displayName ?? "本机"
+    }
+
     @ViewBuilder
     private func worktreeMenu(repository: RepositoryModel, worktree: Worktree) -> some View {
-        Button("在终端打开") { SystemActions.openInTerminal(worktree.path) }
-        Button("在编辑器打开") { SystemActions.openInEditor(worktree.path) }
-        Button("在 Finder 显示") { SystemActions.revealInFinder(worktree.path) }
-        Button("复制路径") { SystemActions.copyToPasteboard(worktree.path.path) }
+        // 远程服务器上的工作树没有本机动作可给（Finder / 终端 / 编辑器都打不开），
+        // 复制路径给 `user@host:path` 形态，可以直接贴进 ssh scp 之类。
+        if repository.isRemote, let server = repository.server {
+            Button("复制远程路径") {
+                SystemActions.copyToPasteboard("\(server.destination):\(worktree.path.path)")
+            }
+        } else {
+            Button("在终端打开") { SystemActions.openInTerminal(worktree.path) }
+            Button("在编辑器打开") { SystemActions.openInEditor(worktree.path) }
+            Button("在 Finder 显示") { SystemActions.revealInFinder(worktree.path) }
+            Button("复制路径") { SystemActions.copyToPasteboard(worktree.path.path) }
+        }
 
         Divider()
 
@@ -163,6 +240,8 @@ private struct WorktreeRow: View {
     let repository: RepositoryModel
     let worktree: Worktree
     let isSelected: Bool
+    /// 这个检出在哪台机器上。混合项目里本地行也标「本机」，远程行始终标服务器名。
+    var marker: LocationMarker?
 
     /// 这一行对应的详情模型。可能还没建（没被选中过），那就只显示静态信息。
     private var detail: WorktreeModel? {
@@ -186,6 +265,11 @@ private struct WorktreeRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .foregroundStyle(isSelected ? Color.accentColor : .primary)
+
+            // 同名分支在哪台机器上，靠这个胶囊区分。
+            if let marker {
+                LocationBadge(marker: marker)
+            }
 
             if worktree.isLocked {
                 Image(systemName: "lock.fill")
@@ -329,13 +413,23 @@ private struct RepositoryHomeRow: View {
 
                 Divider()
 
-                Button("在 Finder 显示") { SystemActions.revealInFinder(repository.root) }
-                Button("复制路径") { SystemActions.copyToPasteboard(repository.root.path) }
+                if repository.isRemote, let server = repository.server {
+                    Button("复制远程路径") {
+                        SystemActions.copyToPasteboard("\(server.destination):\(repository.root.path)")
+                    }
+                } else {
+                    Button("在 Finder 显示") { SystemActions.revealInFinder(repository.root) }
+                    Button("复制路径") { SystemActions.copyToPasteboard(repository.root.path) }
+                }
 
                 Divider()
 
                 Button("从 Grove 移除", role: .destructive) {
-                    model.closeRepository(repository)
+                    if repository.isRemote {
+                        model.closeRemoteProject(repository)
+                    } else {
+                        model.closeRepository(repository)
+                    }
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -355,7 +449,147 @@ private struct RepositoryHomeRow: View {
     }
 }
 
+// MARK: - 服务器管理行
+
+/// 列表底部的服务器行：状态点 + 名字 + 菜单。项目在上面按 origin 合并了，
+/// 这里只负责增删改；点这一行直接进入「添加项目」。
+private struct RemoteServerRow: View {
+    @Environment(AppModel.self) private var model
+    let server: RemoteServer
+    @Binding var sheet: RootView.ActiveSheet?
+
+    enum ProbeState: Equatable {
+        case unknown
+        case checking
+        case ready(String)
+        case failed(String)
+    }
+
+    @State private var probe: ProbeState = .unknown
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button {
+                sheet = .addRemoteProject(server)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "server.rack")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16)
+
+                    Text(server.displayName)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.secondary)
+
+                    statusDot
+
+                    Spacer(minLength: 2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("在这台服务器上添加项目")
+
+            Menu {
+                Button("添加项目…") { sheet = .addRemoteProject(server) }
+                Divider()
+                Button("编辑服务器…") { sheet = .editRemoteServer(server) }
+                Button(role: .destructive) {
+                    model.removeRemoteServer(server)
+                } label: {
+                    Text("移除服务器")
+                }
+            } label: {
+                // 不设 secondary：灰色在菜单按钮上像禁用态。
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 13))
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+        .padding(.vertical, 3)
+        .frame(minHeight: SidebarMetrics.rowHeight, alignment: .center)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        // 配置变了（编辑过服务器）重新探一次；视图出现时探第一次。
+        .task(id: server) { await runProbe() }
+    }
+
+    private var statusDot: some View {
+        let summary = probeSummary
+        return Circle()
+            .fill(summary.color)
+            .frame(width: 6, height: 6)
+            .help(summary.text)
+    }
+
+    private var probeSummary: (text: String, color: Color) {
+        switch probe {
+        case .unknown: ("尚未检测连接", .gray.opacity(0.45))
+        case .checking: ("正在检测连接…", .gray.opacity(0.45))
+        case .ready(let version): (version, .green)
+        case .failed(let reason): ("连接失败：\(reason)", .red)
+        }
+    }
+
+    private func runProbe() async {
+        probe = .checking
+        guard let transport = model.remoteTransport(for: server) else {
+            probe = .failed("找不到 ssh")
+            return
+        }
+        do {
+            probe = .ready(try await transport.probe())
+        } catch {
+            probe = .failed(error.localizedDescription)
+        }
+    }
+}
+
 // MARK: - 小组件
+
+/// 工作树行的位置标记：这个检出在哪台机器上。
+struct LocationMarker: Equatable {
+    var text: String
+    var systemImage: String?
+
+    /// 本机。只在「混合项目」里显示 —— 纯本地项目里那是默认态，标了反而吵。
+    static let local = LocationMarker(text: "本机", systemImage: nil)
+
+    static func server(_ server: RemoteServer) -> LocationMarker {
+        LocationMarker(text: server.displayName, systemImage: "server.rack")
+    }
+}
+
+/// 位置标记的胶囊形态：跟 Badge 一个家族，但更安静 ——
+/// 它是身份信息（在哪台机器上），不是需要行动的告警。
+struct LocationBadge: View {
+    let marker: LocationMarker
+
+    var body: some View {
+        HStack(spacing: 2.5) {
+            if let systemImage = marker.systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 7.5, weight: .semibold))
+            }
+            Text(marker.text)
+                .font(.system(size: 9.5, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1.5)
+        .background(.quaternary.opacity(0.7), in: Capsule())
+        .fixedSize()
+    }
+}
 
 struct Badge: View {
     let text: String

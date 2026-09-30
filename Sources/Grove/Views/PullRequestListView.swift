@@ -207,7 +207,7 @@ struct PullRequestListView: View {
     private func menu(for pullRequest: PullRequest) -> some View {
         if let worktree = worktree(for: pullRequest) {
             Button("跳到工作树「\(worktree.name)」") {
-                appModel.selection = .worktree(repository: repository.root, worktree: worktree.path)
+                appModel.selection = .worktree(repository: repository.id, worktree: worktree.path)
             }
         } else {
             Button("检出为新工作树") {
@@ -222,7 +222,7 @@ struct PullRequestListView: View {
 
     private func checkout(_ pullRequest: PullRequest) async {
         guard let worktree = await repository.createWorktree(forPullRequest: pullRequest) else { return }
-        appModel.selection = .worktree(repository: repository.root, worktree: worktree.path)
+        appModel.selection = .worktree(repository: repository.id, worktree: worktree.path)
     }
 
     /// 切状态筛选时清掉选中项：旧选中大概率不在新列表里，
@@ -777,7 +777,7 @@ private struct PullRequestDetailView: View {
         HStack(spacing: 8) {
             if let existingWorktree {
                 Button {
-                    appModel.selection = .worktree(repository: repository.root, worktree: existingWorktree.path)
+                    appModel.selection = .worktree(repository: repository.id, worktree: existingWorktree.path)
                 } label: {
                     Label("跳到工作树", systemImage: "leaf.fill")
                 }
@@ -786,7 +786,7 @@ private struct PullRequestDetailView: View {
                 Button {
                     Task {
                         guard let worktree = await repository.createWorktree(forPullRequest: current) else { return }
-                        appModel.selection = .worktree(repository: repository.root, worktree: worktree.path)
+                        appModel.selection = .worktree(repository: repository.id, worktree: worktree.path)
                     }
                 } label: {
                     Label("检出为工作树", systemImage: "plus.rectangle.on.rectangle")

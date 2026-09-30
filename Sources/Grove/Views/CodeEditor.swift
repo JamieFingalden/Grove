@@ -227,26 +227,36 @@ struct CodeEditorSheet: View {
     }
 
     private func load() {
-        do {
-            let data = try Data(contentsOf: url)
-            // 和 git 判定二进制同思路：前 8KB 里出现 NUL 就不当文本处理。
-            if data.prefix(8192).contains(0) {
-                isBinary = true
-                return
-            }
-            guard let text = String(data: data, encoding: .utf8) else {
-                readFailure = "不是 UTF-8 编码的文本文件。为避免改坏内容，Grove 只编辑 UTF-8 文件。"
-                return
-            }
-            originalText = text
-            currentText = text
-            attributed = Self.highlighted(text, path: displayPath, font: editorFont)
-            highlightVersion += 1
-            isDirty = false
-            loadedModificationDate = modificationDate()
-        } catch {
-            readFailure = error.localizedDescription
+        Task { await loadFromDisk() }
+    }
+
+    /// 读取目标文件。远程工作树经 ssh 拉内容，本机读磁盘。
+    private func loadFromDisk() async {
+        let data: Data?
+        if let model {
+            data = await model.readEditorFile(at: url)
+        } else {
+            data = try? Data(contentsOf: url)
         }
+        guard let data else {
+            readFailure = "无法读取文件（不存在、无权限，或服务器连接失败）。"
+            return
+        }
+        // 和 git 判定二进制同思路：前 8KB 里出现 NUL 就不当文本处理。
+        if data.prefix(8192).contains(0) {
+            isBinary = true
+            return
+        }
+        guard let text = String(data: data, encoding: .utf8) else {
+            readFailure = "不是 UTF-8 编码的文本文件。为避免改坏内容，Grove 只编辑 UTF-8 文件。"
+            return
+        }
+        originalText = text
+        currentText = text
+        attributed = Self.highlighted(text, path: displayPath, font: editorFont)
+        highlightVersion += 1
+        isDirty = false
+        loadedModificationDate = await modificationDate()
     }
 
     /// 保存。磁盘版本被外部工具改过时先问一句，返回 false 表示这次没写成。
@@ -254,7 +264,7 @@ struct CodeEditorSheet: View {
     private func save() async -> Bool {
         guard isDirty else { return true }
         if let loaded = loadedModificationDate,
-           let current = modificationDate(),
+           let current = await modificationDate(),
            current > loaded {
             showsOverwriteConfirmation = true
             return false
@@ -265,12 +275,16 @@ struct CodeEditorSheet: View {
     @discardableResult
     private func write() async -> Bool {
         do {
-            try currentText.write(to: url, atomically: true, encoding: .utf8)
+            if let model {
+                try await model.writeEditorFile(currentText, to: url)
+            } else {
+                try currentText.write(to: url, atomically: true, encoding: .utf8)
+            }
         } catch {
             saveFailure = error.localizedDescription
             return false
         }
-        loadedModificationDate = modificationDate()
+        loadedModificationDate = await modificationDate()
         originalText = currentText
         isDirty = false
         // 让 diff 和冲突区立刻反映这次编辑；失败不拦用户，状态栏会自己刷新。
@@ -289,8 +303,11 @@ struct CodeEditorSheet: View {
         dismiss()
     }
 
-    private func modificationDate() -> Date? {
-        try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+    private func modificationDate() async -> Date? {
+        if let model {
+            return await model.editorFileModificationDate(at: url)
+        }
+        return try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
     }
 
     private func handleTextChange(_ new: String) {
