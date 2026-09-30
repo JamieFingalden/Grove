@@ -1249,6 +1249,51 @@ final class WorktreeModel: Identifiable {
         await refresh()
     }
 
+    // MARK: - 标签
+
+    /// 标签名是否已被占用。建标签弹窗的即时校验用。
+    func tagExists(_ name: String) async -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        return await git.tagExists(trimmed, in: path)
+    }
+
+    /// 在指定提交上打标签。返回是否建成 —— 弹窗靠它决定要不要保持打开
+    /// （重名、非法名字这类用户当场能改的问题不该把弹窗关掉）。
+    func createTag(_ name: String, message: String, on commit: CommitSummary) async -> Bool {
+        activity = "正在创建标签 \(name)…"
+        defer { activity = nil }
+        do {
+            try await git.createTag(name, message: message, at: commit.oid, in: path)
+        } catch {
+            app?.report(title: "创建标签失败", error: error)
+            return false
+        }
+        // 标签会出现在历史列表的引用角标上，刷一遍才看得见。
+        await refresh()
+        return true
+    }
+
+    /// 推送本地标签到指定远端。新建标签的弹窗和提交右键菜单共用这一条路。
+    /// 不走 `mutate`：它拼错误标题的方式会让「origin」和「失败」贴在一起。
+    func pushTag(_ name: String, to remote: NamedRemote) async {
+        activity = "正在推送标签 \(name) 到 \(remote.name)…"
+        defer { activity = nil }
+        do {
+            try await git.pushTag(name, to: remote.name, in: path)
+        } catch {
+            app?.report(title: "推送标签 \(name) 到 \(remote.name) 失败", error: error)
+        }
+        await refresh()
+    }
+
+    /// 删除本地标签。远端的同名标签不动。
+    func deleteTag(_ name: String) async {
+        await mutate("删除标签 \(name)") {
+            try await self.git.deleteTag(name, in: self.path)
+        }
+    }
+
     // MARK: - PR
 
     /// 头部那个评审按钮此刻该是什么。

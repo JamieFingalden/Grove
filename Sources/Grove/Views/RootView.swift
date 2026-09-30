@@ -16,6 +16,7 @@ struct RootView: View {
         case removeWorktree(RepositoryModel, Worktree)
         case cleanupBranches(RepositoryModel)
         case rebase(WorktreeModel)
+        case newTag(WorktreeModel, CommitSummary)
         case addRemoteServer
         case editRemoteServer(RemoteServer)
         case addRemoteProject(RemoteServer)
@@ -28,6 +29,7 @@ struct RootView: View {
             case .removeWorktree(_, let worktree): "remove-\(worktree.path.path)"
             case .cleanupBranches(let repository): "cleanup-\(repository.id.identityKey)"
             case .rebase(let worktree): "rebase-\(worktree.identity.path)"
+            case .newTag(let worktree, let commit): "tag-\(worktree.identity.path)-\(commit.oid)"
             case .addRemoteServer: "add-remote-server"
             case .editRemoteServer(let server): "edit-remote-server-\(server.id)"
             case .addRemoteProject(let server): "add-remote-project-\(server.id)"
@@ -297,6 +299,8 @@ private extension View {
                 CleanupBranchesSheet(repository: repository)
             case .rebase(let worktree):
                 RebaseSheet(model: worktree)
+            case .newTag(let worktree, let commit):
+                NewTagSheet(model: worktree, commit: commit)
             case .addRemoteServer:
                 RemoteServerSheet()
             case .editRemoteServer(let server):

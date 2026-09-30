@@ -1422,3 +1422,213 @@ struct RebaseSheet: View {
         preview = result
     }
 }
+
+// MARK: - 创建标签
+
+/// 在指定提交上打标签，可选建完立刻推到远端。
+/// 从历史列表的右键菜单或提交详情头部的「创建标签」打开。
+struct NewTagSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let model: WorktreeModel
+    let commit: CommitSummary
+
+    @State private var name = ""
+    @State private var isAnnotated = true
+    @State private var message = ""
+    @State private var shouldPush = true
+    @State private var remote: NamedRemote?
+    @State private var nameExists = false
+    @State private var isWorking = false
+
+    private var remotes: [NamedRemote] { model.repository?.remotes ?? [] }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+            form
+            Divider()
+            footer
+        }
+        .frame(width: 480, height: 420)
+        .onAppear {
+            // 打标签十有八九是为了发布，默认推上去；没配远端的仓库就只能本地建。
+            shouldPush = !remotes.isEmpty
+            remote = model.defaultRemote ?? remotes.first
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("创建标签")
+                .font(.system(size: 15, weight: .semibold))
+            HStack(spacing: 5) {
+                Text(commit.shortOID)
+                    .font(.system(size: 11, design: .monospaced))
+                Text(commit.subject)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var form: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("标签名")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+
+                    TextField("v1.0.0", text: $name)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .onSubmit { Task { await checkName() } }
+
+                    if nameExists {
+                        Label("标签 \(trimmedName) 已经存在，换一个名字。",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.orange)
+                    } else if let problem = nameProblem {
+                        Label(problem, systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                Toggle("附注标签（annotated）", isOn: $isAnnotated)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11.5))
+                    .help("附注标签是独立对象，能带说明、能被签名 —— 发布版本用这种。不勾就是轻量标签，只是个指向提交的指针。")
+
+                if isAnnotated {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("说明")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        TextEditor(text: $message)
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .scrollContentBackground(.hidden)
+                            .frame(height: 90)
+                            .padding(6)
+                            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 7).stroke(.separator, lineWidth: 0.5)
+                            }
+                    }
+                }
+
+                Divider()
+
+                Toggle("创建后推送到远端", isOn: $shouldPush)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11.5))
+                    .disabled(remotes.isEmpty)
+
+                if shouldPush && remotes.count > 1 {
+                    Picker("推送到", selection: $remote) {
+                        ForEach(remotes) { candidate in
+                            // 名字后面跟地址：origin / upstream 这种相近的名字只看名字分不清。
+                            Text("\(candidate.name) — \(candidate.summary)")
+                                .tag(candidate as NamedRemote?)
+                        }
+                    }
+                    .labelsHidden()
+                } else if shouldPush && remotes.isEmpty {
+                    Label("这个仓库没有配置远端，标签只会创建在本地。",
+                          systemImage: "info.circle")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(18)
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            if isWorking {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(model.activity ?? "处理中…")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            Button("取消") { dismiss() }
+                .keyboardShortcut(.cancelAction)
+            Button(shouldPush && remote != nil ? "创建并推送" : "创建标签") {
+                Task { await create() }
+            }
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut(.defaultAction)
+            .disabled(!canCreate || isWorking)
+        }
+        .padding(14)
+    }
+
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 名字本身的问题（空串除外 —— 那交给按钮禁用，不占提示位）。
+    /// 更冷僻的非法字符（`~ ^ : ? * [ \`）交给 git 报错，报错原文会进横幅。
+    private var nameProblem: String? {
+        guard !trimmedName.isEmpty else { return nil }
+        if trimmedName.hasPrefix("-") { return "标签名不能以 - 开头。" }
+        if trimmedName.contains(where: { $0.isWhitespace }) { return "标签名不能包含空格。" }
+        return nil
+    }
+
+    private var canCreate: Bool {
+        guard !trimmedName.isEmpty, nameProblem == nil, !nameExists else { return false }
+        if isAnnotated && message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return false
+        }
+        if shouldPush && remotes.isEmpty { return false }
+        return true
+    }
+
+    /// 重名检查。回车时和创建前各跑一次 —— 远程仓库上这是一次 ssh 往返，
+    /// 按每个字符实时查会把输入卡出顿挫感。
+    private func checkName() async {
+        guard !trimmedName.isEmpty, nameProblem == nil else {
+            nameExists = false
+            return
+        }
+        nameExists = await model.tagExists(trimmedName)
+    }
+
+    @MainActor
+    private func create() async {
+        guard !isWorking else { return }
+        isWorking = true
+        defer { isWorking = false }
+
+        // 输入之后可能被终端里刚建的标签抢了名字（或者上次检查没跑），创建前再核一次，
+        // 把「重名」留在弹窗里而不是关掉弹窗再报一条横幅。
+        await checkName()
+        guard !nameExists else { return }
+
+        let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let created = await model.createTag(
+            trimmedName,
+            message: isAnnotated ? trimmedMessage : "",
+            on: commit
+        )
+        guard created else { return }
+
+        // 弹窗先关：标签已经建出来了，推送就算失败也重开不得（会撞重名）。
+        // 失败原因走错误横幅，重推走提交右键菜单的「推送标签」。
+        dismiss()
+        if shouldPush, let remote {
+            await model.pushTag(trimmedName, to: remote)
+        }
+    }
+}

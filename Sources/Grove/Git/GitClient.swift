@@ -945,6 +945,38 @@ struct GitClient: Sendable {
     func localBranchExists(_ name: String, in directory: URL) async -> Bool {
         await succeeds(["show-ref", "--verify", "--quiet", "refs/heads/\(name)"], in: directory)
     }
+
+    // MARK: - 标签
+
+    /// 标签名是否已被占用。建标签的弹窗在输入框旁边提示重名用 ——
+    /// 让用户当场改名字，比提交时收到一句 "tag 'v1.0' already exists" 友好得多。
+    func tagExists(_ name: String, in directory: URL) async -> Bool {
+        await succeeds(["show-ref", "--verify", "--quiet", "refs/tags/\(name)"], in: directory)
+    }
+
+    /// 在某个提交上打标签。`message` 非空时建附注标签（annotated）—— 它是独立
+    /// 对象，能带说明、能被签名，发布版本用的都该是它；空串建轻量标签，只是个指针。
+    /// 附注标签的 message 不能为空（否则 git 会去起交互式编辑器），由调用方保证。
+    func createTag(_ name: String, message: String, at revision: String, in directory: URL) async throws {
+        var arguments = ["tag"]
+        if !message.isEmpty { arguments.append(contentsOf: ["--annotate", "--message", message]) }
+        // `--` 之后一律当名字 / 提交解释。git 本身也禁止 `-` 开头的 refname，
+        // 双保险，怪名字只会得到一句「不是合法标签名」，不会被当成选项。
+        arguments.append(contentsOf: ["--", name, revision])
+        try await run(arguments, in: directory)
+    }
+
+    /// 推送单个标签。标签没有「上游」一说，推送必须显式给远端。
+    /// 注意 `git push` 不支持 `--` 分隔符（会被当成 refspec），不能加。
+    func pushTag(_ name: String, to remote: String, in directory: URL) async throws {
+        try await run(["push", remote, name], in: directory, timeout: ProcessRunner.networkTimeout)
+    }
+
+    /// 删除本地标签。远端上的同名标签不受影响 —— 那需要显式的推送删除，
+    /// 风险高一个量级，不放进右键菜单里。
+    func deleteTag(_ name: String, in directory: URL) async throws {
+        try await run(["tag", "--delete", "--", name], in: directory)
+    }
 }
 
 /// Grove 自己抛出的错误，跟子进程失败区分开。

@@ -49,7 +49,7 @@ struct WorktreeDetailView: View {
             case .changes:
                 ChangesView(model: model)
             case .history:
-                HistoryView(model: model)
+                HistoryView(model: model, sheet: $sheet)
             }
         }
         // 撑满详情区。VStack 默认只占内容需要的高度，然后被父容器垂直居中，
