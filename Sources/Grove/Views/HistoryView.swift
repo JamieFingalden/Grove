@@ -2,6 +2,7 @@ import SwiftUI
 
 struct HistoryView: View {
     @Bindable var model: WorktreeModel
+    @Binding var sheet: RootView.ActiveSheet?
     @State private var selectedFileID: String?
 
     var body: some View {
@@ -233,6 +234,13 @@ struct HistoryView: View {
                                 Button("复制完整 SHA") { SystemActions.copyToPasteboard(commit.oid) }
                                 Button("复制短 SHA") { SystemActions.copyToPasteboard(commit.shortOID) }
                                 Button("复制标题") { SystemActions.copyToPasteboard(commit.subject) }
+                                Divider()
+                                Button {
+                                    sheet = .newTag(model, commit)
+                                } label: {
+                                    Label("创建标签…", systemImage: "tag")
+                                }
+                                tagActions(for: commit)
                             }
                     }
                     }
@@ -248,7 +256,9 @@ struct HistoryView: View {
         if let oid = model.selectedCommit {
             VStack(spacing: 0) {
                 if let commit = model.commits.first(where: { $0.oid == oid }) {
-                    CommitHeader(commit: commit)
+                    CommitHeader(commit: commit) {
+                        sheet = .newTag(model, commit)
+                    }
                     Divider()
                 }
 
@@ -335,6 +345,51 @@ struct HistoryView: View {
     private func selectFirstFileIfNeeded(from files: [FileDiff]) {
         guard !files.contains(where: { $0.id == selectedFileID }) else { return }
         selectedFileID = files.first?.id
+    }
+
+    /// 这个提交上已挂着的标签的快捷操作（推送 / 删除）。`%D` 里的标签就是本地
+    /// `refs/tags`：自己建的在里面，抓取时从远端带回来的也在里面 ——
+    /// 重推一个远端已有的标签只会得到 "Everything up-to-date"，无害。
+    @ViewBuilder
+    private func tagActions(for commit: CommitSummary) -> some View {
+        let tags = commit.refs.filter { $0.kind == .tag }.map(\.name)
+        let remotes = model.repository?.remotes ?? []
+
+        if !tags.isEmpty {
+            Divider()
+            if remotes.count > 1 {
+                // 多远端时不猜目标：内网 GitLab 做主、GitHub 做备份的仓库，
+                // 标签推去哪跟分支一样要用户自己挑。
+                Menu {
+                    ForEach(tags, id: \.self) { tag in
+                        Menu(tag) {
+                            ForEach(remotes) { remote in
+                                Button(remote.name) {
+                                    Task { await model.pushTag(tag, to: remote) }
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Label("推送标签到远端", systemImage: "arrow.up.circle")
+                }
+            } else if let remote = remotes.first {
+                Menu {
+                    ForEach(tags, id: \.self) { tag in
+                        Button(tag) { Task { await model.pushTag(tag, to: remote) } }
+                    }
+                } label: {
+                    Label("推送标签到 \(remote.name)", systemImage: "arrow.up.circle")
+                }
+            }
+            Menu {
+                ForEach(tags, id: \.self) { tag in
+                    Button(tag) { Task { await model.deleteTag(tag) } }
+                }
+            } label: {
+                Label("删除本地标签", systemImage: "trash")
+            }
+        }
     }
 
 }
@@ -480,6 +535,7 @@ private struct CommitGraphCell: View {
 
 private struct CommitHeader: View {
     let commit: CommitSummary
+    var onCreateTag: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -496,6 +552,17 @@ private struct CommitHeader: View {
                     Label("合并提交", systemImage: "arrow.triangle.merge")
                         .foregroundStyle(.purple)
                 }
+
+                Spacer(minLength: 8)
+
+                // 右键提交行也能建标签；这里再放一个可见的入口，
+                // 不然功能等于藏在右键菜单里，没人找得到。
+                Button(action: onCreateTag) {
+                    Label("创建标签", systemImage: "tag")
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 10.5))
+                .help("在这个提交上创建标签（也可以右键提交行）")
             }
             .font(.system(size: 10.5))
             .foregroundStyle(.secondary)

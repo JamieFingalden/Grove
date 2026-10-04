@@ -50,6 +50,8 @@ No custom secrets are needed: publishing uses the built-in `GITHUB_TOKEN`. CI pa
 
 **Push.** One click when there is a single remote. With several remotes configured (say an internal GitLab as origin and a GitHub backup), the push button becomes a split button: the main area pushes to the branch's own upstream — exactly what `git push` does in a terminal — and the chevron opens a list of the other remotes, each labelled with its destination. Pushing to a non-upstream remote never silently retargets the branch's tracking.
 
+**Tags.** Right-click any commit in the history list ("Create Tag…", or the button in the commit header) to tag it — annotated by default (with a message), or a lightweight pointer. The sheet offers to push right after creating, so the release tag never gets stranded locally. Existing tags are pushed — picking the remote when there are several — or deleted from the same context menu; deletion only touches the local copy, since removing a remote tag requires an explicit push Grove won't do behind your back.
+
 **Changes.** Per-worktree file list split into staged and unstaged, with a diff viewer that handles renames, binary files, mode-only changes, and merge-conflict combined diffs. Stage, unstage, discard, and commit. Draft commit messages survive switching between worktrees.
 
 **Line-level staging.** Changed two lines but only want to commit one? Tick individual lines in the diff (or the hunk header to take the whole block), then stage, unstage, or discard just those. It works by carving a patch containing only the selected lines out of git's own diff and feeding it to `git apply` — see `Sources/Grove/Git/PatchBuilder.swift`, where the forward and reverse rules (which use opposite base sides) are spelled out.

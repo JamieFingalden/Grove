@@ -97,13 +97,20 @@ final class LayoutRenderHarness: XCTestCase {
             VStack(spacing: 0) {
                 Text("头部占位").padding(12).frame(maxWidth: .infinity, alignment: .leading)
                 Divider()
-                HistoryView(model: model)
+                HistoryView(model: model, sheet: .constant(nil))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .environment(app)
 
         try render(historyPage, size: CGSize(width: 1280, height: 860), to: "/tmp/grove-render-history.png")
+
+        // 建标签弹窗：seed 出的两个远端正好能渲出「多远端选择器」的形态。
+        if let commit = model.commits.first {
+            let tagSheet = NewTagSheet(model: model, commit: commit)
+                .environment(app)
+            try render(tagSheet, size: CGSize(width: 480, height: 420), to: "/tmp/grove-render-new-tag.png")
+        }
     }
 
     func testRenderHistoryLongBranch() async throws {
