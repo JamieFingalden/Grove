@@ -77,6 +77,16 @@ enum ForgeKind: String, Sendable, Hashable, CaseIterable {
         self == .gitlab
     }
 
+    /// GitHub 只能下载已结束任务的日志；GitLab 还支持运行中的日志。
+    /// 未开始和跳过的任务没有日志，两个入口共用这条规则。
+    func supportsJobLog(status: CIStatus) -> Bool {
+        switch status {
+        case .pending, .manual, .skipped: false
+        case .running: self == .gitlab
+        case .success, .failed, .canceled: true
+        }
+    }
+
     /// 手动跑一条新流水线：GitLab 可以直接按 ref 跑；
     /// GitHub 的 workflow_dispatch 要指定 workflow 文件，暂不提供。
     var supportsPipelineRun: Bool {

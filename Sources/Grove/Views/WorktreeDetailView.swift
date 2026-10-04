@@ -102,6 +102,7 @@ private struct WorktreeHeader: View {
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
                                 .background(.quaternary, in: Capsule())
+                                .fixedSize()
                         }
                         // 远程服务器上的工作树：标明在哪台机器上，
                         // 免得和本地的同名项目混在一起认不出来。
@@ -112,6 +113,7 @@ private struct WorktreeHeader: View {
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
                                 .background(.quaternary, in: Capsule())
+                                .fixedSize()
                                 .help("\(server.destination):\(model.path.path)")
                         }
                         if let operation = model.status.operation {
@@ -121,11 +123,16 @@ private struct WorktreeHeader: View {
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
                                 .background(.orange.opacity(0.15), in: Capsule())
+                                .fixedSize()
                         }
                     }
 
                     branchLine
                 }
+                // 占满同步按钮以外的全部宽度：长分支名在这块里截断自己，
+                // 而不是把右侧按钮挤出可视区。没有这个约束，HStack 只会
+                // 一直向外扩张直到内容被裁 —— 名字多长都不该牵连别人。
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 Spacer(minLength: 12)
 
@@ -194,16 +201,24 @@ private struct WorktreeHeader: View {
 
     private var branchLine: some View {
         HStack(spacing: 8) {
+            // 长分支名中间截断 —— 保头保尾（`JamieFing…/dev-tag`），
+            // 完整名字看悬停或右边的复制按钮。它是这一行的主体，让位顺序排最后。
             Label(model.worktree.checkoutLabel, systemImage: "arrow.triangle.branch")
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .truncationMode(.middle)
+                .layoutPriority(1)
+                .help(model.worktree.checkoutLabel)
 
             if let upstream = model.status.upstream {
+                // 上游名先于分支名让位：分支是身份，上游只是指向。
                 Text("→ \(upstream)")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(upstream)
             } else if model.worktree.branch != nil {
                 Text("未设上游")
                     .font(.system(size: 11))
@@ -212,9 +227,11 @@ private struct WorktreeHeader: View {
 
             if model.status.ahead > 0 {
                 Badge(text: "\(model.status.ahead)", systemImage: "arrow.up", tint: .blue)
+                    .fixedSize()
             }
             if model.status.behind > 0 {
                 Badge(text: "\(model.status.behind)", systemImage: "arrow.down", tint: .purple)
+                    .fixedSize()
             }
 
             Button {

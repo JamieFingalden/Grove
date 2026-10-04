@@ -96,7 +96,7 @@ private struct ProjectSection: View {
             // Finder/Xcode 的形态）。主页入口指向本地副本（PR / CI 只在本地可用）。
             let homeSelection = AppModel.Selection.repositoryHome(repository: home.id)
             let homeIsSelected = model.selection == homeSelection
-            let worktreeCount = project.repositories.reduce(0) { $0 + $1.worktrees.count }
+            let worktreeCount = project.mergedWorktrees.count
 
             HStack(spacing: 6) {
                 Button {
@@ -135,33 +135,34 @@ private struct ProjectSection: View {
             }
 
             if worktreesExpanded {
-                // 本地副本的工作树在前，各服务器的在后 —— 本地是响应最快的主场。
-                ForEach(project.repositories) { repository in
+                // 组内按路径去重后的工作树（同一仓库的多个打开条目只出一遍）；
+                // 本地条目的在前 —— 本地是响应最快的主场。
+                ForEach(project.mergedWorktrees, id: \.worktree.id) { entry in
+                    let repository = entry.repository
+                    let worktree = entry.worktree
                     let marker = locationMarker(for: repository)
-                    ForEach(repository.worktrees) { worktree in
-                        let selection = AppModel.Selection.worktree(
-                            repository: repository.id,
-                            worktree: worktree.path
-                        )
-                        let isSelected = model.selection == selection
+                    let selection = AppModel.Selection.worktree(
+                        repository: repository.id,
+                        worktree: worktree.path
+                    )
+                    let isSelected = model.selection == selection
 
-                        Button {
-                            model.selection = selection
-                        } label: {
-                            WorktreeRow(
-                                repository: repository,
-                                worktree: worktree,
-                                isSelected: isSelected,
-                                marker: marker
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        // 缩进到仓库行图标正下方：三角(12) + 间距(6)。
-                        .padding(.leading, 18)
-                        .listRowBackground(sidebarSelectionBackground(isSelected))
-                        .contextMenu {
-                            worktreeMenu(repository: repository, worktree: worktree)
-                        }
+                    Button {
+                        model.selection = selection
+                    } label: {
+                        WorktreeRow(
+                            repository: repository,
+                            worktree: worktree,
+                            isSelected: isSelected,
+                            marker: marker
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    // 缩进到仓库行图标正下方：三角(12) + 间距(6)。
+                    .padding(.leading, 18)
+                    .listRowBackground(sidebarSelectionBackground(isSelected))
+                    .contextMenu {
+                        worktreeMenu(repository: repository, worktree: worktree)
                     }
                 }
             }

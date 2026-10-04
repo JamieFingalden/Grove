@@ -46,7 +46,13 @@ struct HistoryView: View {
                 if model.isLoadingHistory {
                     ProgressView().controlSize(.mini)
                 }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 7))
 
+            // 搜索独占一行，长分支名只压缩自己的显示，不再挤掉搜索和提交图。
+            HStack(spacing: 6) {
                 Menu {
                     Button("全部提交人") { Task { await model.clearAuthors() } }
                     Divider()
@@ -63,11 +69,21 @@ struct HistoryView: View {
                         }
                     }
                 } label: {
-                    Label(model.authorFilterLabel, systemImage: "person")
-                        .font(.system(size: 10.5))
+                    HStack(spacing: 4) {
+                        Label(model.authorFilterLabel, systemImage: "person")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8))
+                    }
+                    .font(.system(size: 10.5))
+                    .contentShape(Rectangle())
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .frame(minWidth: 0, maxWidth: 100, alignment: .leading)
+                .help(model.authorFilterLabel)
 
                 Menu {
                     Button {
@@ -104,11 +120,21 @@ struct HistoryView: View {
                         }
                     }
                 } label: {
-                    Label(model.historyBranchLabel, systemImage: "arrow.triangle.branch")
-                        .font(.system(size: 10.5))
+                    HStack(spacing: 4) {
+                        Label(model.historyBranchLabel, systemImage: "arrow.triangle.branch")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8))
+                    }
+                    .font(.system(size: 10.5))
+                    .contentShape(Rectangle())
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                .help(model.historyBranchLabel)
 
                 Menu {
                     Toggle("包含所有分支", isOn: $model.logQuery.allBranches)
@@ -167,6 +193,7 @@ struct HistoryView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
+        .frame(minWidth: 0, maxWidth: .infinity)
     }
 
     private var commitList: some View {
@@ -336,6 +363,7 @@ private struct CommitRow: View {
                 Text(commit.subject)
                     .font(.system(size: 12))
                     .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 6) {
                     Text(commit.shortOID)
@@ -517,6 +545,7 @@ private struct RefBadges: View {
                         Text(ref.name)
                             .font(.system(size: 9, weight: .medium))
                             .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                     .foregroundStyle(tint(ref.kind))
                     .padding(.horizontal, 4)
@@ -524,6 +553,7 @@ private struct RefBadges: View {
                     .background(tint(ref.kind).opacity(0.14), in: RoundedRectangle(cornerRadius: 3.5))
                 }
                 .buttonStyle(.plain)
+                .help(ref.name)
             }
             if refs.count > 4 {
                 Text("+\(refs.count - 4)")

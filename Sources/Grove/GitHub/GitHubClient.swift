@@ -322,10 +322,20 @@ struct GitHubClient: ForgeClient {
         guard let slug = await repositorySlug(in: directory) else {
             throw GroveError.noGitHubRemote
         }
-        let result = try await ghChecked([
-            "api", "repos/\(slug)/actions/jobs/\(jobID)/logs"
-        ], in: directory)
-        return String(data: result.standardOutput, encoding: .utf8) ?? ""
+        let arguments = ["api", "repos/\(slug)/actions/jobs/\(jobID)/logs"]
+        // 新版 gh 检测到正文含终端转义序列时拒绝输出，而 Actions 日志天然
+        // 带 ANSI 颜色码 —— 必须放行；App 侧本来就会剥掉 ANSI（CILog.plain）。
+        // 老版本 gh 不认识这个 flag（报 unknown flag），那时它也没有这个
+        // 检查，退回裸命令即可。
+        do {
+            let result = try await ghChecked(arguments + ["--allow-escape-sequences"], in: directory)
+            return String(data: result.standardOutput, encoding: .utf8) ?? ""
+        } catch {
+            let output = (error as? CommandFailure)?.output ?? ""
+            guard output.contains("unknown flag") || output.contains("unknown shorthand flag") else { throw error }
+            let result = try await ghChecked(arguments, in: directory)
+            return String(data: result.standardOutput, encoding: .utf8) ?? ""
+        }
     }
 
     func retryJob(jobID: Int, in directory: URL) async throws {

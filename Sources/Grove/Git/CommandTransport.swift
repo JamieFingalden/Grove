@@ -130,6 +130,10 @@ struct SSHTransport: CommandTransport {
             // 只走密钥认证。密码提示在 GUI 里没人能回答，必须立刻失败。
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=10",
+            // 保活：休眠唤醒 / 网络切换后，残留的 TCP 连接靠这两个参数在
+            // 45 秒内被判死并重建，而不是每条命令都干等 30 秒看门狗超时。
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=3",
             "-o", "ControlMaster=auto",
             "-o", "ControlPath=\(Self.controlDirectory.path)/cm-%C",
             "-o", "ControlPersist=10m",
