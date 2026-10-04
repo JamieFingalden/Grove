@@ -143,7 +143,7 @@ final class LayoutRenderHarness: XCTestCase {
             )]
             for width in [800.0, 1280.0] {
                 let hosting = try render(
-                    HistoryView(model: model)
+                    HistoryView(model: model, sheet: .constant(nil))
                         .environment(\.colorScheme, .light)
                         .background(Color.white),
                     size: CGSize(width: width, height: 500),
