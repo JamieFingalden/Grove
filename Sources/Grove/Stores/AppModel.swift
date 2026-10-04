@@ -883,6 +883,23 @@ final class AppModel {
         var homeRepository: RepositoryModel? { local ?? remotes.first }
         /// 本地和远程副本同时存在 —— 工作树行需要位置标记来区分。
         var isMixed: Bool { local != nil && !remotes.isEmpty }
+
+        /// 组内全部工作树，**按路径去重**。同一个仓库可能被打开成多个条目
+        /// （比如把各个工作树目录分别拖进 Grove），每个条目都会列出全部
+        /// 工作树 —— 不去重的话每行要出现 N 遍。本地副本和服务器副本的
+        /// 路径天然不同，不会被误并。
+        @MainActor
+        var mergedWorktrees: [(worktree: Worktree, repository: RepositoryModel)] {
+            var seen = Set<String>()
+            var merged: [(Worktree, RepositoryModel)] = []
+            for repository in repositories {
+                for worktree in repository.worktrees {
+                    guard seen.insert(worktree.path.groveResolved.path).inserted else { continue }
+                    merged.append((worktree, repository))
+                }
+            }
+            return merged
+        }
     }
 
     var projects: [ProjectGroup] {
@@ -946,6 +963,10 @@ final class AppModel {
     }
 
     func report(title: String, error: Error) {
+        // 取消不是失败：SwiftUI 的 .task 在视图切走 / 选中项变化时会取消
+        // 进行中的请求，ProcessRunner 忠实地抛 CancellationError。把它当失败
+        // 弹横幅，用户看到的就是那句莫名其妙的「未能完成操作」。
+        guard !(error is CancellationError) else { return }
         report(GroveFailure(title: title, error: error))
     }
 

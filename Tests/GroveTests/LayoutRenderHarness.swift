@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Vision
 import XCTest
 @testable import Grove
 
@@ -112,6 +113,127 @@ final class LayoutRenderHarness: XCTestCase {
         }
     }
 
+    func testRenderHistoryLongBranch() async throws {
+        try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
+        let git = try await GitClient.resolve()
+        let model = WorktreeModel(
+            worktree: Worktree(
+                path: URL(fileURLWithPath: "/tmp/grove-history-layout"), head: nil,
+                branch: nil, isBare: false, isDetached: false,
+                lockReason: nil, prunableReason: nil
+            ),
+            repository: nil, git: git, app: nil
+        )
+
+        // 同时覆盖截图里的名称和超长多级名称；不建仓库、不请求远端。
+        for (name, branch) in [
+            ("normal", "JamieFingalden/dev-tag"),
+            ("long", "feature/" + String(repeating: "very-long-branch-name/", count: 6) + "dev-tag")
+        ] {
+            model.worktree.branch = branch
+            model.commits = [CommitSummary(
+                oid: String(repeating: "a", count: 40),
+                subject: "feat: 长分支名下，提交标题应在列表内正常换行显示",
+                authorName: "测试", authorEmail: "test@example.com", date: Date(),
+                parents: [], refs: [
+                    CommitRef(name: branch, kind: .head),
+                    CommitRef(name: "origin/main", kind: .remoteBranch),
+                    CommitRef(name: "main", kind: .localBranch)
+                ]
+            )]
+            for width in [800.0, 1280.0] {
+                let hosting = try render(
+                    HistoryView(model: model)
+                        .environment(\.colorScheme, .light)
+                        .background(Color.white),
+                    size: CGSize(width: width, height: 500),
+                    to: "/tmp/grove-render-history-\(name)-\(Int(width)).png"
+                )
+                func descendants(of view: NSView) -> [NSView] {
+                    view.subviews.flatMap { [$0] + descendants(of: $0) }
+                }
+                let views = descendants(of: hosting)
+                let split = try XCTUnwrap(views.compactMap { $0 as? NSSplitView }.first)
+                let list = try XCTUnwrap(split.subviews.first)
+                let search = try XCTUnwrap(views.compactMap { $0 as? NSTextField }.first {
+                    $0.placeholderString == "搜索提交信息"
+                })
+                let searchFrame = search.convert(search.bounds, to: list)
+                XCTAssertGreaterThanOrEqual(searchFrame.minX, 0, "搜索框左侧不应被裁掉")
+                XCTAssertLessThanOrEqual(searchFrame.maxX, list.bounds.width, "搜索框应留在列表内")
+                XCTAssertGreaterThan(searchFrame.width, 180, "窄栏也应保留可用的搜索空间")
+            }
+        }
+    }
+
+    func testCITaskLoadingIgnoresCancelledRequest() async throws {
+        try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("grove-ci-loading-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        // 用本地脚本控制响应时机：第一条还在加载时切到第二条，不访问网络。
+        try #"""
+        case "$1" in
+          list) printf '%s' '[{"databaseId":1,"status":"completed","conclusion":"success","headBranch":"first"},{"databaseId":2,"status":"completed","conclusion":"success","headBranch":"second"}]' ;;
+          view)
+            touch "started-$2"
+            while [ ! -f "finish-$2" ]; do sleep 0.05; done
+            printf '{"jobs":[{"databaseId":%s,"name":"任务-%s","status":"completed","conclusion":"success"}]}' "$2" "$2"
+            ;;
+        esac
+        """#.write(to: root.appendingPathComponent("run"), atomically: true, encoding: .utf8)
+        let repository = RepositoryModel(
+            root: root, git: try await GitClient.resolve(), app: nil,
+            forge: GitHubClient(executable: URL(fileURLWithPath: "/bin/sh"),
+                                environment: ProcessInfo.processInfo.environment)
+        )
+        let hosting = NSHostingView(rootView: CIView(repository: repository)
+            .environment(\.colorScheme, .light).background(Color.white))
+        hosting.frame = CGRect(x: 0, y: 0, width: 1000, height: 600)
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1000, height: 600),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentView = hosting
+        defer { window.contentView = nil }
+        func waitUntil(_ predicate: () throws -> Bool) async throws {
+            for _ in 0..<100 {
+                hosting.layoutSubtreeIfNeeded()
+                if try predicate() { return }
+                try await Task.sleep(for: .milliseconds(30))
+            }
+            XCTFail("等待界面状态超时")
+        }
+        func labels() throws -> [String] {
+            // 离屏窗口的辅助功能树可能为空，直接检查实际渲染出的文字。
+            let bitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+            hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+            let request = VNRecognizeTextRequest()
+            request.recognitionLanguages = ["zh-Hans", "en-US"]
+            request.usesLanguageCorrection = false
+            try VNImageRequestHandler(cgImage: XCTUnwrap(bitmap.cgImage), options: [:]).perform([request])
+            return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+        }
+        func descendants(_ view: NSView) -> [NSView] {
+            view.subviews.flatMap { [$0] + descendants($0) }
+        }
+        try await waitUntil { FileManager.default.fileExists(atPath: root.appendingPathComponent("started-1").path) }
+        let table = try XCTUnwrap(descendants(hosting).compactMap { $0 as? NSTableView }.first)
+        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        try await waitUntil { FileManager.default.fileExists(atPath: root.appendingPathComponent("started-2").path) }
+        // 给旧任务的取消回调一次执行机会，加载提示仍应保留。
+        try await Task.sleep(for: .milliseconds(100))
+        let bitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+        hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+        try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "/tmp/grove-render-ci-loading.png"))
+        let loadingLabels = try labels().joined(separator: "\n")
+        XCTAssertTrue(loadingLabels.contains("正在加载任务"), loadingLabels)
+        XCTAssertFalse(loadingLabels.contains("CancellationError"), loadingLabels)
+        XCTAssertFalse(loadingLabels.contains("没有任务"), loadingLabels)
+        try Data().write(to: root.appendingPathComponent("finish-2"))
+        try await waitUntil { try labels().contains { $0.contains("任务-2") } }
+        XCTAssertFalse(try labels().contains { $0.contains("任务-1") })
+    }
+
     // MARK: -
 
     private func seedRepository(at root: URL) throws {
@@ -174,7 +296,8 @@ final class LayoutRenderHarness: XCTestCase {
                  "feature/login"])
     }
 
-    private func render(_ view: some View, size: CGSize, to path: String) throws {
+    @discardableResult
+    private func render(_ view: some View, size: CGSize, to path: String) throws -> NSHostingView<some View> {
         // 用 NSHostingView + cacheDisplay 而不是 SwiftUI 的 ImageRenderer：
         // List / HSplitView 在 macOS 上是 AppKit 控件包出来的，ImageRenderer 渲不出它们的内容。
         let hosting = NSHostingView(rootView: view)
@@ -195,14 +318,15 @@ final class LayoutRenderHarness: XCTestCase {
         hosting.layoutSubtreeIfNeeded()
 
         guard let representation = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
-            XCTFail("无法创建位图"); return
+            throw NSError(domain: "render", code: 1, userInfo: [NSLocalizedDescriptionKey: "无法创建位图"])
         }
         hosting.cacheDisplay(in: hosting.bounds, to: representation)
         guard let data = representation.representation(using: .png, properties: [:]) else {
-            XCTFail("无法编码 PNG"); return
+            throw NSError(domain: "render", code: 2, userInfo: [NSLocalizedDescriptionKey: "无法编码 PNG"])
         }
         try data.write(to: URL(fileURLWithPath: path))
         print("已渲染：\(path)")
+        return hosting
     }
 }
 

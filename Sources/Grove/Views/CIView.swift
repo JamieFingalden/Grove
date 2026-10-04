@@ -12,6 +12,8 @@ struct CIView: View {
     @State private var jobs: [CIJob] = []
     @State private var isLoading = false
     @State private var isLoadingJobs = false
+    @State private var jobsPipelineID: Int?
+    @State private var jobsRequestID: UUID?
     @State private var failureText: String?
     @State private var jobsFailureText: String?
     @State private var logJob: CIJob?
@@ -29,11 +31,11 @@ struct CIView: View {
             Group {
                 if repository.forge == nil {
                     unavailableView
-                } else if let failureText, pipelines.isEmpty {
-                    loadFailureView(failureText)
-                } else if pipelines.isEmpty && isLoading {
+                } else if pipelines.isEmpty && (isLoading || !didLoadOnce) {
                     ProgressView("正在加载流水线…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let failureText, pipelines.isEmpty {
+                    loadFailureView(failureText)
                 } else if pipelines.isEmpty && didLoadOnce {
                     ContentUnavailableView {
                         Label("没有流水线记录", systemImage: "bolt.horizontal")
@@ -182,7 +184,7 @@ struct CIView: View {
         }
         .listStyle(.inset)
         .frame(minWidth: 260, idealWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
-        .onChange(of: pipelines) { _, newValue in
+        .onChange(of: pipelines, initial: true) { _, newValue in
             // 刷新后选中的可能没了（列表变短），保住选择或回落到第一条。
             if let id = selectedPipelineID, newValue.contains(where: { $0.id == id }) { return }
             selectedPipelineID = newValue.first?.id
@@ -300,8 +302,8 @@ struct CIView: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
 
-            if isLoadingJobs && jobs.isEmpty {
-                ProgressView()
+            if jobsPipelineID != pipeline.id || (isLoadingJobs && jobs.isEmpty) {
+                ProgressView("正在加载任务…")
                     .controlSize(.small)
             } else if let jobsFailureText, jobs.isEmpty {
                 Label(jobsFailureText, systemImage: "exclamationmark.triangle")
@@ -327,7 +329,8 @@ struct CIView: View {
                         ForEach(stageJobs) { job in
                             JobRow(
                                 job: job,
-                                supportsJobControl: repository.forge?.kind.supportsJobLevelControl ?? false
+                                supportsJobControl: repository.forge?.kind.supportsJobLevelControl ?? false,
+                                supportsJobLog: repository.forge?.kind.supportsJobLog(status: job.status) ?? false
                             ) {
                                 logJob = job
                             } onRetry: {
@@ -354,19 +357,25 @@ struct CIView: View {
     private func reload(silent: Bool = false) async {
         guard let forge = repository.forge else { return }
         if !silent { isLoading = true }
+        failureText = nil
         defer {
             isLoading = false
-            didLoadOnce = true
         }
         do {
-            pipelines = try await forge.pipelines(in: repository.root, limit: 50)
-            failureText = nil
+            let loaded = try await forge.pipelines(in: repository.root, limit: 50)
+            try Task.checkCancellation()
+            pipelines = loaded
+            didLoadOnce = true
             // 分支 → 状态的索引顺手刷新：侧边栏工作树行的 CI 小点靠它。
             repository.updatePipelineStatuses(from: pipelines)
             if selectedPipelineID != nil {
                 await loadJobs(silent: true)
             }
+        } catch is CancellationError {
+            // 切换页面或流水线导致的请求取消，不是加载失败。
         } catch {
+            guard !Task.isCancelled else { return }
+            didLoadOnce = true
             failureText = error.localizedDescription
         }
     }
@@ -374,14 +383,33 @@ struct CIView: View {
     private func loadJobs(silent: Bool = false) async {
         guard let forge = repository.forge, let id = selectedPipelineID else {
             jobs = []
+            jobsPipelineID = nil
+            jobsRequestID = nil
+            jobsFailureText = nil
+            isLoadingJobs = false
             return
         }
-        if !silent { isLoadingJobs = true }
-        defer { isLoadingJobs = false }
+        let requestID = UUID()
+        jobsRequestID = requestID
+        isLoadingJobs = !silent || jobsPipelineID != id || jobs.isEmpty
+        jobsFailureText = nil
+        // 旧请求的取消、失败和收尾，都不能覆盖后启动的请求。
+        defer {
+            if jobsRequestID == requestID { isLoadingJobs = false }
+        }
         do {
-            jobs = try await forge.jobs(pipelineID: id, in: repository.root)
-            jobsFailureText = nil
+            let loaded = try await forge.jobs(pipelineID: id, in: repository.root)
+            try Task.checkCancellation()
+            guard jobsRequestID == requestID, selectedPipelineID == id else { return }
+            jobs = loaded
+            jobsPipelineID = id
+        } catch is CancellationError {
+            // SwiftUI 取消旧任务时保持等待态，新的任务会继续加载。
         } catch {
+            guard !Task.isCancelled, jobsRequestID == requestID,
+                  selectedPipelineID == id else { return }
+            if jobsPipelineID != id { jobs = [] }
+            jobsPipelineID = id
             jobsFailureText = error.localizedDescription
         }
     }
@@ -495,6 +523,7 @@ private struct StatusIcon: View {
 private struct JobRow: View {
     let job: CIJob
     let supportsJobControl: Bool
+    let supportsJobLog: Bool
     let onLog: () -> Void
     let onRetry: () -> Void
     let onCancel: () -> Void
@@ -541,7 +570,9 @@ private struct JobRow: View {
             }
 
             Menu {
-                Button("查看日志", action: onLog)
+                if supportsJobLog {
+                    Button("查看日志", action: onLog)
+                }
                 if supportsJobControl && (job.status == .failed || job.status == .canceled) {
                     Button("重试这个任务", action: onRetry)
                 }
@@ -559,11 +590,13 @@ private struct JobRow: View {
             .fixedSize()
             .frame(width: 24, height: 20)
 
-            Button(action: onLog) {
-                Label("日志", systemImage: "doc.text.magnifyingglass")
+            if supportsJobLog {
+                Button(action: onLog) {
+                    Label("日志", systemImage: "doc.text.magnifyingglass")
+                }
+                .controlSize(.small)
+                .buttonStyle(.borderless)
             }
-            .controlSize(.small)
-            .buttonStyle(.borderless)
         }
         .padding(.vertical, 3)
         .padding(.horizontal, 6)
@@ -647,11 +680,16 @@ private struct JobLogSheet: View {
         }
     }
 
-    /// 摘要区下面的主体：错误态 / 空态 / 日志正文。
+    /// 摘要区下面的主体：等待态 / 错误态 / 空态 / 日志正文。
+    /// 等待态优先于错误态 —— 正在加载时显示什么由这一次加载决定，
+    /// 上一次的报错不该抢在转圈前面。
     @ViewBuilder
     private func consoleBody(proxy: ScrollViewProxy) -> some View {
         Group {
-            if let failureText, logText.isEmpty {
+            if isLoading && logText.isEmpty {
+                ProgressView("正在读取日志…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let failureText, logText.isEmpty {
                     ContentUnavailableView {
                         Label("日志加载失败", systemImage: "exclamationmark.triangle")
                     } description: {
@@ -659,9 +697,6 @@ private struct JobLogSheet: View {
                     } actions: {
                         Button("重试") { Task { await load() } }
                     }
-                } else if logText.isEmpty && isLoading {
-                    ProgressView("正在读取日志…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if displayPairs.isEmpty {
                     ContentUnavailableView {
                         Label(filterText.isEmpty ? "还没有日志" : "没有匹配的行", systemImage: "doc")
@@ -859,13 +894,22 @@ private struct JobLogSheet: View {
     private func load(autoscroll: Bool = false) async {
         guard let forge = repository.forge else { return }
         isLoading = true
+        // 重新加载时清掉上次的报错：加载期间该显示等待态而不是旧错误 ——
+        // 日志面板会边跑边轮询，一次网络抖动不该把后面的每次加载都染成错误页。
+        failureText = nil
         defer { isLoading = false }
         do {
             let raw = try await forge.jobLog(jobID: job.id, in: repository.root)
             logText = CILog.plain(raw)
-            failureText = nil
+        } catch is CancellationError {
+            // 面板关掉 / 切走时请求被取消 —— 不是加载失败，别显示错误。
         } catch {
-            failureText = error.localizedDescription
+            // localizedDescription 有时只有一句笼统的「未能完成操作」——
+            // 把错误的完整形态（类型 + 错误域 + 错误码）一并展示，
+            // 否则没法区分是命令失败、启动失败还是系统层错误。
+            let description = error.localizedDescription
+            let details = String(reflecting: error)
+            failureText = details == description ? description : "\(description)\n\n\(details)"
         }
     }
 }

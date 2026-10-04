@@ -101,12 +101,14 @@ final class RepositoryModel: Identifiable {
         root: URL,
         git: GitClient,
         app: AppModel?,
-        server: RemoteServer? = nil
+        server: RemoteServer? = nil,
+        forge: (any ForgeClient)? = nil
     ) {
         self.root = root
         self.location = server.map(RepoLocation.remote) ?? .local
         self.git = git
         self.app = app
+        self.forge = forge
     }
 
     /// 只读查找，不会创建也不会修改任何东西。**视图里只能用这个** ——
@@ -120,6 +122,10 @@ final class RepositoryModel: Identifiable {
 
     // MARK: - 刷新
 
+    /// 远程仓库连续读取失败的标记：网络一抖动，侧边栏的周期刷新会连环失败，
+    /// 每次都弹横幅等于轰炸。失败只报一次，恢复成功后重置。
+    @ObservationIgnored private var didReportReadFailure = false
+
     func refresh(loadForgeMetadata: Bool = true) async {
         isRefreshing = true
         defer { isRefreshing = false }
@@ -132,8 +138,18 @@ final class RepositoryModel: Identifiable {
             worktrees = loaded.0
             branches = loaded.1
             remoteBranches = loaded.2
+            didReportReadFailure = false
         } catch {
-            app?.report(title: "读取 \(name) 失败", error: error)
+            if isRemote {
+                // 远程仓库连不上不算异常事件（笔记本合盖、切换网络），
+                // 报一次就够；恢复后还能再报。
+                if !didReportReadFailure {
+                    didReportReadFailure = true
+                    app?.report(title: "连接 \(server?.displayName ?? name) 失败", error: error)
+                }
+            } else {
+                app?.report(title: "读取 \(name) 失败", error: error)
+            }
             return
         }
 

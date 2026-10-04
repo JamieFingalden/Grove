@@ -168,6 +168,19 @@ final class CITests: XCTestCase {
 
     // MARK: - 平台能力
 
+    func testJobLogAvailabilityByPlatformAndStatus() {
+        for forge in ForgeKind.allCases {
+            for status in [CIStatus.pending, .manual, .skipped] {
+                XCTAssertFalse(forge.supportsJobLog(status: status))
+            }
+            for status in [CIStatus.success, .failed, .canceled] {
+                XCTAssertTrue(forge.supportsJobLog(status: status))
+            }
+        }
+        XCTAssertFalse(ForgeKind.github.supportsJobLog(status: .running))
+        XCTAssertTrue(ForgeKind.gitlab.supportsJobLog(status: .running))
+    }
+
     func testJobLevelControlCapability() {
         XCTAssertTrue(ForgeKind.gitlab.supportsJobLevelControl)
         XCTAssertFalse(ForgeKind.github.supportsJobLevelControl)
