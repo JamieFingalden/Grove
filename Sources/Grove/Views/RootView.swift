@@ -25,11 +25,11 @@ struct RootView: View {
             switch self {
             case .newWorktree(let repository): "new-\(repository.id.identityKey)"
             case .createRemoteRepository(let repository): "remote-\(repository.id.identityKey)"
-            case .createPullRequest(let worktree): "pr-\(worktree.identity.path)"
-            case .removeWorktree(_, let worktree): "remove-\(worktree.path.path)"
+            case .createPullRequest(let worktree): "pr-\(worktree.identityKey)"
+            case .removeWorktree(let repository, let worktree): "remove-\(RepoID(location: repository.location, root: worktree.path).identityKey)"
             case .cleanupBranches(let repository): "cleanup-\(repository.id.identityKey)"
-            case .rebase(let worktree): "rebase-\(worktree.identity.path)"
-            case .newTag(let worktree, let commit): "tag-\(worktree.identity.path)-\(commit.oid)"
+            case .rebase(let worktree): "rebase-\(worktree.identityKey)"
+            case .newTag(let worktree, let commit): "tag-\(worktree.identityKey)-\(commit.oid)"
             case .addRemoteServer: "add-remote-server"
             case .editRemoteServer(let server): "edit-remote-server-\(server.id)"
             case .addRemoteProject(let server): "add-remote-project-\(server.id)"
@@ -140,16 +140,16 @@ struct RootView: View {
             case .worktree:
                 if let worktree = model.selectedWorktreeModel {
                     WorktreeDetailView(model: worktree, sheet: $sheet)
-                        // path 变了就当成换了个页面，重建视图内部状态（比如滚动位置、
-                        // 展开的 hunk），否则会看到上一个工作树的残留。
-                        .id(worktree.path)
+                        // 机器或路径变了就重建页面状态，避免同路径工作树串用滚动位置和编辑草稿。
+                        .id(worktree.identityKey)
                 } else {
                     placeholder
                 }
             case .repositoryHome:
                 if let repository = model.selectedRepository {
                     ProjectHomeView(repository: repository)
-                        .id(repository.root)
+                        .id(repository.origin)
+                        .id(repository.id)
                 } else {
                     placeholder
                 }

@@ -511,6 +511,7 @@ private struct PullRequestDetailView: View {
     /// 不让体积最大的 diff 把标题和讨论也一起卡住。
     private func loadDetail() async {
         guard let forge = repository.forge else { return }
+        let expectedOrigin = repository.origin
         isLoadingThreads = true
         isLoadingDiff = true
 
@@ -529,16 +530,22 @@ private struct PullRequestDetailView: View {
 
         // 完整详情不只补正文，还包含当前用户的审批状态。即使列表接口已经
         // 带了正文也必须加载，否则批准过的 MR 仍会错误显示「批准」。
-        detailed = await loadedDetail
+        let detail = await loadedDetail
+        guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
+        detailed = detail
         // 详情里的审批/冲突状态并回列表行 —— 列表接口拿不到这些。
-        if let detail = await loadedDetail {
-            repository.mergeDetailIntoList(detail)
+        if let detail {
+            repository.mergeDetailIntoList(detail, fromOrigin: expectedOrigin)
         }
 
-        threads = await loadedThreads ?? []
+        let loadedReviewThreads = await loadedThreads
+        guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
+        threads = loadedReviewThreads ?? []
         isLoadingThreads = false
 
-        if let files = await loadedDiff {
+        let files = await loadedDiff
+        guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
+        if let files {
             diffFiles = files
             didFailDiff = false
             selectFirstDiffFileIfNeeded()
@@ -667,6 +674,7 @@ private struct PullRequestDetailView: View {
 
     private func act(_ action: ReviewAction) async {
         guard let forge = repository.forge else { return }
+        let expectedOrigin = repository.origin
         isWorking = true
 
         let text = commentText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -714,8 +722,9 @@ private struct PullRequestDetailView: View {
         // 不然行上永远亮着「未评审」。
         if action == .approve || action == .unapprove,
            let fresh = try? await forge.pullRequest(number: current.number, in: repository.root) {
+            guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
             detailed = fresh
-            repository.mergeDetailIntoList(fresh)
+            repository.mergeDetailIntoList(fresh, fromOrigin: expectedOrigin)
         }
 
         // 列表刷新不该占着操作按钮的 loading。批准状态已经在本地立即更新，

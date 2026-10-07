@@ -153,13 +153,16 @@ struct SSHTransport: CommandTransport {
     /// 远端脚本：进到工作树目录后把 git 参数原样交给远端 shell。
     func gitScript(_ arguments: [String], worktreePath: String) -> String {
         let gitArguments = arguments.map(Self.shellQuoted).joined(separator: " ")
-        // `~` 开头的路径不加引号：引号会挡住远端 shell 的波浪号展开，
-        // 用户手敲的 ~/code/… 就到不了家目录。校验通过后存下来的
-        // 都是 rev-parse 给的绝对路径，不受这条影响。
-        let cdTarget = worktreePath == "~" || worktreePath.hasPrefix("~/")
-            ? worktreePath
-            : Self.shellQuoted(worktreePath)
-        return "cd \(cdTarget) && exec git \(gitArguments)"
+        // 只展开远端家目录，余下路径仍按字面转义，空格和 shell 元字符不会执行。
+        let cdTarget: String
+        if worktreePath == "~" {
+            cdTarget = "\"$HOME\""
+        } else if worktreePath.hasPrefix("~/") {
+            cdTarget = "\"$HOME\"" + Self.shellQuoted(String(worktreePath.dropFirst()))
+        } else {
+            cdTarget = Self.shellQuoted(worktreePath)
+        }
+        return "cd -- \(cdTarget) && exec git \(gitArguments)"
     }
 
     private func fullScript(_ command: String) -> String {
@@ -212,6 +215,18 @@ struct SSHTransport: CommandTransport {
         return try await run(script: script, timeout: timeout, standardInput: standardInput)
     }
 
+    /// 表单原始输入先交给远端解析；不能先构造 URL，否则 `~/` 会展开成本机家目录。
+    func repositoryRoot(forPath path: String) async -> URL? {
+        let script = gitScript(["rev-parse", "--path-format=absolute", "--git-common-dir"], worktreePath: path)
+        guard let result = try? await run(script: script, timeout: ProcessRunner.localTimeout),
+              result.isSuccess else { return nil }
+        let commonPath = result.stdout.trimmingCharacters(in: .newlines)
+        guard commonPath.hasPrefix("/") else { return nil }
+        // 远端路径只规范化文本，不经过本机的符号链接解析。
+        let common = URL(fileURLWithPath: commonPath).standardizedFileURL
+        return common.lastPathComponent == ".git" ? common.deletingLastPathComponent() : common
+    }
+
     // MARK: - 文件原语
 
     func fileExists(atPath path: String) async -> Bool {
@@ -238,9 +253,18 @@ struct SSHTransport: CommandTransport {
         let script: String
         if atomic {
             // 先写临时文件再改名：远端读者要么看到旧内容、要么看到新内容，
-            // 不会读到半个文件。改名发生在同一目录里，跨文件系统也不会失败。
-            let temporary = path + ".grove-\(UUID().uuidString).tmp"
-            script = "cat > \(Self.shellQuoted(temporary)) && mv \(Self.shellQuoted(temporary)) \(quoted)"
+            // 同目录临时文件保留原文件权限，失败/断线清理；新文件仅允许本人读写。
+            // 原子替换链接会破坏链接语义，因此明确拒绝，保留链接及其目标内容。
+            script = """
+            target=\(quoted)
+            if [ -L "$target" ]; then printf '%s\\n' '无法原子保存符号链接，请编辑链接指向的文件。' >&2; exit 1; fi
+            umask 077
+            temporary=$(mktemp "${target}.grove-XXXXXX") || exit 1
+            trap 'rm -f -- "$temporary"' EXIT
+            trap 'exit 1' HUP INT TERM
+            if [ -e "$target" ]; then cp -p -- "$target" "$temporary" || exit 1; fi
+            cat > "$temporary" && mv -f -- "$temporary" "$target"
+            """
         } else {
             script = "cat > \(quoted)"
         }

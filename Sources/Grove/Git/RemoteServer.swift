@@ -89,14 +89,23 @@ struct RepoID: Hashable, Sendable {
 
     init(location: RepoLocation, root: URL) {
         self.location = location
-        self.rootPath = root.path
+        self.rootPath = location.isRemote ? root.path : root.groveResolved.path
     }
 
     var root: URL { URL(fileURLWithPath: rootPath) }
 
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.location.server?.id == rhs.location.server?.id && lhs.rootPath == rhs.rootPath
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(location.server?.id)
+        hasher.combine(rootPath)
+    }
+
     /// 给 `.task(id:)`、通知线程标识这类只能吃字符串的键用的稳定形态。
     var identityKey: String {
-        let owner = location.server?.destination ?? "local"
+        let owner = location.server?.id.uuidString ?? "local"
         return "\(owner):\(rootPath)"
     }
 }

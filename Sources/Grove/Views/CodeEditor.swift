@@ -24,6 +24,7 @@ struct CodeEditorSheet: View {
     @State private var currentText: String = ""
     @State private var highlightVersion = 0
     @State private var isDirty = false
+    @State private var isSaving = false
     @State private var isBinary = false
     @State private var readFailure: String?
     @State private var saveFailure: String?
@@ -77,7 +78,7 @@ struct CodeEditorSheet: View {
         .frame(minWidth: 620, idealWidth: 840, minHeight: 460, idealHeight: 640)
         .onAppear(perform: load)
         // 有未保存改动时不允许误关：Esc / 点外面都不行，必须走底栏按钮。
-        .interactiveDismissDisabled(isDirty)
+        .interactiveDismissDisabled(isDirty || isSaving)
         .confirmationDialog("文件在磁盘上被改过", isPresented: $showsOverwriteConfirmation) {
             Button("覆盖保存") { Task { await write() } }
             Button("放弃我的修改，重新加载") { load() }
@@ -161,7 +162,7 @@ struct CodeEditorSheet: View {
                     load()
                 }
             }
-            .disabled(isBinary || readFailure != nil)
+            .disabled(isSaving || isBinary || readFailure != nil)
 
             Spacer()
 
@@ -177,13 +178,14 @@ struct CodeEditorSheet: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(isSaving)
             }
 
             Button("保存") {
                 Task { await save() }
             }
             .keyboardShortcut("s", modifiers: .command)
-            .disabled(!isDirty)
+            .disabled(!isDirty || isSaving)
             .buttonStyle(.bordered)
 
             Button("完成") {
@@ -194,6 +196,7 @@ struct CodeEditorSheet: View {
                 }
             }
             .keyboardShortcut(.cancelAction)
+            .disabled(isSaving)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -227,6 +230,7 @@ struct CodeEditorSheet: View {
     }
 
     private func load() {
+        guard !isSaving else { return }
         Task { await loadFromDisk() }
     }
 
@@ -262,31 +266,37 @@ struct CodeEditorSheet: View {
     /// 保存。磁盘版本被外部工具改过时先问一句，返回 false 表示这次没写成。
     @discardableResult
     private func save() async -> Bool {
+        await write(checkExternalChanges: true)
+    }
+
+    @discardableResult
+    private func write(checkExternalChanges: Bool = false) async -> Bool {
+        guard !isSaving else { return false }
         guard isDirty else { return true }
-        if let loaded = loadedModificationDate,
+        isSaving = true
+        defer { isSaving = false }
+        if checkExternalChanges, let loaded = loadedModificationDate,
            let current = await modificationDate(),
            current > loaded {
             showsOverwriteConfirmation = true
             return false
         }
-        return await write()
-    }
-
-    @discardableResult
-    private func write() async -> Bool {
+        // 保存期间允许继续输入，但成功落盘的基线只能是这次传入的快照。
+        let savedText = currentText
+        saveFailure = nil
         do {
             if let model {
-                try await model.writeEditorFile(currentText, to: url)
+                try await model.writeEditorFile(savedText, to: url)
             } else {
-                try currentText.write(to: url, atomically: true, encoding: .utf8)
+                try savedText.write(to: url, atomically: true, encoding: .utf8)
             }
         } catch {
             saveFailure = error.localizedDescription
             return false
         }
         loadedModificationDate = await modificationDate()
-        originalText = currentText
-        isDirty = false
+        originalText = savedText
+        isDirty = currentText != savedText
         // 让 diff 和冲突区立刻反映这次编辑；失败不拦用户，状态栏会自己刷新。
         if model != nil {
             await model?.refreshStatus()
@@ -294,13 +304,17 @@ struct CodeEditorSheet: View {
                 await model?.reloadConflictContent()
             }
         }
-        return true
+        return !isDirty
     }
 
     private func markResolved() async {
+        guard !isSaving, !isDirty else { return }
         guard let change = conflictedChange else { return }
+        isSaving = true
+        defer { isSaving = false }
         await model?.markConflictResolved(change)
-        dismiss()
+        // 远程暂存期间仍能继续输入，不能关闭并丢掉这些尚未保存的文字。
+        if !isDirty { dismiss() }
     }
 
     private func modificationDate() async -> Date? {

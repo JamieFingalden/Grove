@@ -280,7 +280,7 @@ struct GitClient: Sendable {
 
     /// 工作区 diff（未暂存的改动）。传 `staged: true` 拿暂存区 diff。
     func diff(in directory: URL, paths: [String] = [], staged: Bool) async throws -> [FileDiff] {
-        var arguments = ["diff", "--no-color", "--no-ext-diff", "--find-renames"]
+        var arguments = ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--find-renames"]
         if staged { arguments.append("--cached") }
         if !paths.isEmpty {
             arguments.append("--")
@@ -478,8 +478,8 @@ struct GitClient: Sendable {
 
     func stage(paths: [String], in directory: URL) async throws {
         guard !paths.isEmpty else { return }
-        // `--` 之后的都当路径处理，避免以 `-` 开头的文件名被当成选项。
-        try await run(["add", "--"] + paths, in: directory)
+        // 状态列表里的路径是具体文件名，不能让通配符或 pathspec magic 匹配其他文件。
+        try await run(["--literal-pathspecs", "add", "--"] + paths, in: directory)
     }
 
     func stageAll(in directory: URL) async throws {
@@ -488,19 +488,18 @@ struct GitClient: Sendable {
 
     func unstage(paths: [String], in directory: URL) async throws {
         guard !paths.isEmpty else { return }
-        // 用 `restore --staged` 而不是 `reset HEAD`：空仓库（还没有 HEAD）时
-        // reset 会失败，而 restore 能正确把首次 add 的文件退回未跟踪。
-        try await run(["restore", "--staged", "--"] + paths, in: directory)
+        // 不显式传 HEAD：首次提交前 reset 会以空树为基准，只清索引、保留工作区。
+        try await run(["--literal-pathspecs", "reset", "--quiet", "--"] + paths, in: directory)
     }
 
     /// 丢弃工作区改动。未跟踪的文件要单独删，`restore` 管不着它们。
     func discard(paths: [String], untracked: [String], in directory: URL) async throws {
         if !paths.isEmpty {
-            try await run(["restore", "--worktree", "--"] + paths, in: directory)
+            try await run(["--literal-pathspecs", "restore", "--worktree", "--"] + paths, in: directory)
         }
         if !untracked.isEmpty {
             // `-d` 连空目录一起清，`-f` 是 git 的强制确认。
-            try await run(["clean", "-fd", "--"] + untracked, in: directory)
+            try await run(["--literal-pathspecs", "clean", "-fd", "--"] + untracked, in: directory)
         }
     }
 
@@ -572,23 +571,66 @@ struct GitClient: Sendable {
     /// `remote` 为 nil 时跑裸 `git push`，由分支自己配置的上游决定推去哪 ——
     /// 这跟用户在终端里敲 `git push` 的行为完全一致，不会有意外。
     /// 指定了 remote 就显式推到那个远端。
+    @discardableResult
     func push(
         in directory: URL,
         remote: String?,
         branch: String?,
         setUpstream: Bool,
         forceWithLease: Bool = false
-    ) async throws {
-        try await run(
-            Self.pushArguments(
-                remote: remote,
-                branch: branch,
-                setUpstream: setUpstream,
-                forceWithLease: forceWithLease
-            ),
+    ) async throws -> String {
+        var arguments = Self.pushArguments(
+            remote: remote,
+            branch: branch,
+            setUpstream: setUpstream,
+            forceWithLease: forceWithLease
+        )
+        arguments.insert("--porcelain", at: 1)
+        return try await run(
+            arguments,
             in: directory,
             timeout: ProcessRunner.networkTimeout
         )
+    }
+
+    /// 推送后读取实际更新的跟踪引用，不能用推送前的 HEAD 快照代表结果。
+    func pushedTrackingCommit(
+        from output: String,
+        for branch: String,
+        remote: String?,
+        in directory: URL
+    ) async -> (branch: String, sha: String, target: String)? {
+        let lines = output.components(separatedBy: .newlines)
+        let targets = lines.filter { $0.hasPrefix("To ") }
+        // 多推送地址或没有推当前分支时不猜测；porcelain 结果才是实际更新的引用。
+        guard targets.count == 1 else { return nil }
+        let refs = lines.compactMap { line -> String? in
+            let fields = line.components(separatedBy: "\t")
+            guard fields.count >= 2, fields[0] != "!", fields[0] != "-" else { return nil }
+            let pair = fields[1].components(separatedBy: ":")
+            guard pair.count == 2, pair[0] == "refs/heads/\(branch)",
+                  pair[1].hasPrefix("refs/heads/") else { return nil }
+            return String(pair[1].dropFirst("refs/heads/".count))
+        }
+        guard refs.count == 1 else { return nil }
+        let destination = refs[0]
+        let resolvedRemote: String
+        if let remote {
+            resolvedRemote = remote
+        } else {
+            guard let name = try? await run(
+                ["for-each-ref", "--format=%(push:remotename)", "refs/heads/\(branch)"], in: directory
+            ).trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return nil }
+            resolvedRemote = name
+        }
+        // ponytail: 只监控标准 fetch 映射；自定义引用映射需解析 refspec 后再读对应跟踪引用。
+        let prefix = "refs/remotes/\(resolvedRemote)/"
+        guard let fetch = try? await run(["config", "--get-all", "remote.\(resolvedRemote).fetch"], in: directory)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              fetch == "+refs/heads/*:\(prefix)*" || fetch == "refs/heads/*:\(prefix)*",
+              let sha = try? await run(["rev-parse", "--verify", "\(prefix)\(destination)^{commit}"], in: directory)
+                .trimmingCharacters(in: .whitespacesAndNewlines), !sha.isEmpty else { return nil }
+        return (destination, sha, String(targets[0].dropFirst(3)))
     }
 
     /// 在指定工作树里开始一次普通合并。服务端拒绝自动合并、需要本地
@@ -748,10 +790,10 @@ struct GitClient: Sendable {
     ) async throws {
         let sideHasContent = side == .ours ? kind.oursExists : kind.theirsExists
         if sideHasContent {
-            try await run(["checkout", side.checkoutFlag, "--", path], in: directory)
-            try await run(["add", "--", path], in: directory)
+            try await run(["--literal-pathspecs", "checkout", side.checkoutFlag, "--", path], in: directory)
+            try await stage(paths: [path], in: directory)
         } else {
-            try await run(["rm", "--quiet", "--", path], in: directory)
+            try await run(["--literal-pathspecs", "rm", "--quiet", "--", path], in: directory)
         }
     }
 
@@ -761,9 +803,9 @@ struct GitClient: Sendable {
         // 存在性语义与本地版一致：不顺着符号链接走到目标（attributesOfItem），
         // 一个指向已删目标的链接会被判成「文件没了」然后被 rm 掉。
         if await fileExists(atPath: url.path) {
-            try await run(["add", "--", path], in: directory)
+            try await stage(paths: [path], in: directory)
         } else {
-            try await run(["rm", "--quiet", "--", path], in: directory)
+            try await run(["--literal-pathspecs", "rm", "--quiet", "--", path], in: directory)
         }
     }
 
@@ -771,7 +813,7 @@ struct GitClient: Sendable {
     /// 只对索引里仍未合并的路径有效 —— 一旦 add 过，三个阶段就没了，重来只能中止整个操作。
     /// 注意重建出来的标记标签是固定的 `ours` / `theirs`，不再是分支名。
     func restoreConflictMarkers(path: String, in directory: URL) async throws {
-        try await run(["checkout", "--merge", "--", path], in: directory)
+        try await run(["--literal-pathspecs", "checkout", "--merge", "--", path], in: directory)
     }
 
     /// 冲突两侧各是谁。

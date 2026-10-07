@@ -169,8 +169,10 @@ final class AppModel {
     }
 
     private let bookmarks = RepositoryBookmarks()
-    private let remoteServerStore = RemoteServerStore()
-    private let remoteProjectStore = RemoteProjectStore()
+    private let remoteServerStore: RemoteServerStore
+    private let remoteProjectStore: RemoteProjectStore
+    /// 用户登记的项目独立于当前连接成功的模型，离线不能抹掉登记。
+    @ObservationIgnored private var registeredRemoteProjects: [String: [String]]
     /// 定位一次就够；找不到时远程功能整体禁用（系统 ssh 一定在，这只是防御）。
     @ObservationIgnored private var sshExecutable: URL?
     @ObservationIgnored private let aiGenerationSettings: AIGenerationSettings
@@ -181,6 +183,8 @@ final class AppModel {
     init(
         aiGenerationSettings: AIGenerationSettings = AIGenerationSettings(),
         aiReviewCache: AIReviewCache = AIReviewCache(),
+        remoteServerStore: RemoteServerStore = RemoteServerStore(),
+        remoteProjectStore: RemoteProjectStore = RemoteProjectStore(),
         aiReviewGenerator: @escaping AIReviewGenerator = { request in
             try await CodexPullRequestReviewGenerator.generate(
                 pullRequest: request.pullRequest,
@@ -196,6 +200,9 @@ final class AppModel {
     ) {
         self.aiGenerationSettings = aiGenerationSettings
         self.aiReviewCache = aiReviewCache
+        self.remoteServerStore = remoteServerStore
+        self.remoteProjectStore = remoteProjectStore
+        self.registeredRemoteProjects = remoteProjectStore.load()
         self.aiReviewGenerator = aiReviewGenerator
         self.isAIGenerationEnabled = aiGenerationSettings.isEnabled
         self.aiProvider = aiGenerationSettings.provider
@@ -727,7 +734,7 @@ final class AppModel {
         remoteServers[index] = server
         remoteServerStore.save(remoteServers)
 
-        let paths = remoteRepositories.filter { $0.server?.id == server.id }.map(\.root.path)
+        let paths = registeredRemoteProjects[server.id.uuidString] ?? []
         for repository in remoteRepositories where repository.server?.id == server.id {
             clearSelectionIfPointing(at: repository.id)
         }
@@ -745,6 +752,7 @@ final class AppModel {
             clearSelectionIfPointing(at: repository.id)
         }
         remoteRepositories.removeAll { $0.server?.id == server.id }
+        registeredRemoteProjects.removeValue(forKey: server.id.uuidString)
         persistRemoteProjects()
     }
 
@@ -756,19 +764,26 @@ final class AppModel {
     /// 添加远程项目。路径先用远端 git 归一化成仓库根目录，失败返回 nil 并报错。
     @discardableResult
     func addRemoteProject(_ path: String, on server: RemoteServer) async -> RepositoryModel? {
-        guard let git = remoteGitClient(for: server) else {
+        guard let git = remoteGitClient(for: server), let transport = remoteTransport(for: server) else {
             report(GroveFailure(title: "连接 \(server.displayName) 失败", error: GroveError.sshNotFound))
             return nil
         }
 
-        let entered = URL(fileURLWithPath: path.trimmingCharacters(in: .whitespaces))
-        guard let root = await git.repositoryRoot(for: entered) else {
+        let entered = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let root = await transport.repositoryRoot(forPath: entered) else {
             report(GroveFailure(
                 title: "添加失败",
-                detail: "「\(entered.path)」在 \(server.destination) 上不是一个 git 仓库（或目录不存在）。"
+                detail: "「\(entered)」在 \(server.destination) 上不是一个 git 仓库（或目录不存在）。"
             ))
             return nil
         }
+        guard remoteServers.contains(server) else { return nil }
+
+        var paths = registeredRemoteProjects[server.id.uuidString] ?? []
+        paths.removeAll { $0 == entered && $0 != root.path }
+        if !paths.contains(root.path) { paths.append(root.path) }
+        registeredRemoteProjects[server.id.uuidString] = paths
+        persistRemoteProjects()
 
         if let existing = remoteRepositories.first(where: { $0.root.path == root.path && $0.server?.id == server.id }) {
             selectDefaultWorktree(in: existing)
@@ -777,32 +792,30 @@ final class AppModel {
 
         let repository = RepositoryModel(root: root, git: git, app: self, server: server)
         remoteRepositories.append(repository)
-        persistRemoteProjects()
 
         await repository.refresh(loadForgeMetadata: false)
-        selectDefaultWorktree(in: repository)
+        if remoteRepositories.contains(where: { $0 === repository }) {
+            selectDefaultWorktree(in: repository)
+        }
         return repository
     }
 
     func closeRemoteProject(_ repository: RepositoryModel) {
         remoteRepositories.removeAll { $0.id == repository.id }
         clearSelectionIfPointing(at: repository.id)
+        if let serverID = repository.server?.id.uuidString {
+            registeredRemoteProjects[serverID]?.removeAll { $0 == repository.root.path }
+        }
         persistRemoteProjects()
     }
 
-    /// 按当前打开的远程仓库重写持久化记录。同一服务器下的重复路径只留一份 ——
-    /// 历史版本的恢复流程可能在并发交错时把同一路径写进去两次，这里兜底，
-    /// 顺带把已写坏的存储自愈。
+    /// 只写用户登记；连接成功与否不影响持久化记录。
     private func persistRemoteProjects() {
-        var byServer: [String: [String]] = [:]
-        for repository in remoteRepositories {
-            guard let serverID = repository.server?.id.uuidString else { continue }
-            var paths = byServer[serverID] ?? []
-            guard !paths.contains(repository.root.path) else { continue }
-            paths.append(repository.root.path)
-            byServer[serverID] = paths
+        registeredRemoteProjects = registeredRemoteProjects.mapValues { paths in
+            var seen = Set<String>()
+            return paths.filter { seen.insert($0).inserted }
         }
-        remoteProjectStore.save(byServer)
+        remoteProjectStore.save(registeredRemoteProjects)
     }
 
     /// 启动恢复：逐台服务器、逐个路径重建仓库模型。连不上的跳过 ——
@@ -813,7 +826,7 @@ final class AppModel {
     /// 就会出现同一仓库两份 —— 侧边栏里整个项目的工作树全部翻倍。
     private func restoreRemoteRepositories() async {
         remoteServers = remoteServerStore.load()
-        let stored = remoteProjectStore.load()
+        let stored = registeredRemoteProjects
 
         remoteRepositories.removeAll()
 
@@ -821,35 +834,43 @@ final class AppModel {
             guard let git = remoteGitClient(for: server) else { continue }
             // 先探一次连接：服务器不在线时一次探测就完事，
             // 不用每个项目都各等一次连接超时。
-            if let transport = git.transport as? SSHTransport,
-               (try? await transport.probe()) == nil {
+            guard let transport = git.transport as? SSHTransport,
+                  (try? await transport.probe()) != nil,
+                  remoteServers.contains(server) else {
                 continue
             }
             // 同一服务器下同路径只留第一份 —— 存储可能已经被写坏过；
             // 用户也可能在恢复的 SSH 往返间隙已经把同一个项目加进来了。
             var seenPaths = Set<String>()
             for path in stored[server.id.uuidString] ?? [] {
-                let root = URL(fileURLWithPath: path)
-                guard seenPaths.insert(root.path).inserted else { continue }
+                guard seenPaths.insert(path).inserted else { continue }
+                guard let root = await transport.repositoryRoot(forPath: path),
+                      remoteServers.contains(server),
+                      registeredRemoteProjects[server.id.uuidString]?.contains(path) == true else { continue }
+                if path != root.path {
+                    registeredRemoteProjects[server.id.uuidString]?.removeAll { $0 == path }
+                    registeredRemoteProjects[server.id.uuidString]?.append(root.path)
+                }
                 guard !remoteRepositories.contains(where: {
                     $0.server?.id == server.id && $0.root.path == root.path
                 }) else { continue }
-                guard await git.repositoryRoot(for: root) != nil else { continue }
                 let repository = RepositoryModel(root: root, git: git, app: self, server: server)
                 remoteRepositories.append(repository)
             }
         }
 
         guard !remoteRepositories.isEmpty else { return }
-        // 并发刷新所有远程仓库；刷新完再统一排序持久化（顺带剔除失效条目）。
+        // 并发刷新所有远程仓库；无法连接的登记留待下次恢复。
         await withTaskGroup(of: Void.self) { group in
             for repository in remoteRepositories {
                 group.addTask { await repository.refresh(loadForgeMetadata: false) }
             }
         }
         remoteRepositories.sort {
-            ($0.server?.displayName ?? "").localizedStandardCompare($1.server?.displayName ?? "") == .orderedAscending
-                && $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            let serverOrder = ($0.server?.displayName ?? "").localizedStandardCompare($1.server?.displayName ?? "")
+            return serverOrder == .orderedSame
+                ? $0.name.localizedStandardCompare($1.name) == .orderedAscending
+                : serverOrder == .orderedAscending
         }
         persistRemoteProjects()
 
@@ -873,29 +894,30 @@ final class AppModel {
     struct ProjectGroup: Identifiable {
         var key: String
         var name: String
-        var local: RepositoryModel?
+        var locals: [RepositoryModel]
         /// 各台服务器上的副本，按服务器排序。
         var remotes: [RepositoryModel]
 
         var id: String { key }
-        var repositories: [RepositoryModel] { [local].compactMap { $0 } + remotes }
+        var local: RepositoryModel? { locals.first }
+        var repositories: [RepositoryModel] { locals + remotes }
         /// 主页入口指向哪个仓库：本地优先（PR / CI 只在本地可用）。
         var homeRepository: RepositoryModel? { local ?? remotes.first }
         /// 本地和远程副本同时存在 —— 工作树行需要位置标记来区分。
         var isMixed: Bool { local != nil && !remotes.isEmpty }
 
-        /// 组内全部工作树，**按路径去重**。同一个仓库可能被打开成多个条目
+        /// 组内全部工作树，按服务器身份与路径去重。同一个仓库可能被打开成多个条目
         /// （比如把各个工作树目录分别拖进 Grove），每个条目都会列出全部
-        /// 工作树 —— 不去重的话每行要出现 N 遍。本地副本和服务器副本的
-        /// 路径天然不同，不会被误并。
+        /// 工作树 —— 不去重的话每行要出现 N 遍。远端路径不经过本机符号链接解析。
         @MainActor
-        var mergedWorktrees: [(worktree: Worktree, repository: RepositoryModel)] {
-            var seen = Set<String>()
-            var merged: [(Worktree, RepositoryModel)] = []
+        var mergedWorktrees: [(id: RepoID, worktree: Worktree, repository: RepositoryModel)] {
+            var seen = Set<RepoID>()
+            var merged: [(RepoID, Worktree, RepositoryModel)] = []
             for repository in repositories {
                 for worktree in repository.worktrees {
-                    guard seen.insert(worktree.path.groveResolved.path).inserted else { continue }
-                    merged.append((worktree, repository))
+                    let id = RepoID(location: repository.location, root: worktree.path)
+                    guard seen.insert(id).inserted else { continue }
+                    merged.append((id, worktree, repository))
                 }
             }
             return merged
@@ -917,12 +939,14 @@ final class AppModel {
 
             if groups[key] == nil {
                 order.append(key)
-                groups[key] = ProjectGroup(key: key, name: repository.name, local: nil, remotes: [])
+                groups[key] = ProjectGroup(key: key, name: repository.name, locals: [], remotes: [])
             }
             if repository.isRemote {
                 groups[key]?.remotes.append(repository)
             } else {
-                groups[key]?.local = repository
+                if groups[key]?.locals.contains(where: { $0.id == repository.id }) == false {
+                    groups[key]?.locals.append(repository)
+                }
             }
         }
 

@@ -40,7 +40,7 @@ final class SSHTransportTests: XCTestCase {
     func testGitScriptCdIntoWorktreeThenExecGit() {
         let transport = SSHTransport(sshExecutable: ssh, server: makeServer())
         let script = transport.gitScript(["status", "--porcelain=v2"], worktreePath: "/srv/app")
-        XCTAssertTrue(script.hasPrefix("cd '/srv/app' && exec git "))
+        XCTAssertTrue(script.hasPrefix("cd -- '/srv/app' && exec git "))
         XCTAssertTrue(script.contains("'status'"))
         XCTAssertTrue(script.contains("'--porcelain=v2'"))
     }
@@ -49,15 +49,15 @@ final class SSHTransportTests: XCTestCase {
         let transport = SSHTransport(sshExecutable: ssh, server: makeServer())
         let script = transport.gitScript(["commit", "--message", "fix: it's broken"],
                                          worktreePath: "/opt/my app")
-        XCTAssertTrue(script.contains("cd '/opt/my app'"))
+        XCTAssertTrue(script.contains("cd -- '/opt/my app'"))
         XCTAssertTrue(script.contains("'--message' 'fix: it'\\''s broken'"))
     }
 
-    func testGitScriptLeavesTildeUnquoted() {
-        // `~` 要交给远端 shell 展开 —— 引起来反而到不了家目录。
+    func testGitScriptExpandsOnlyRemoteHomeAndQuotesSuffix() {
+        // 家目录由远端展开，路径后缀的空格和元字符必须保留字面语义。
         let transport = SSHTransport(sshExecutable: ssh, server: makeServer())
-        let script = transport.gitScript(["status"], worktreePath: "~/code/project")
-        XCTAssertTrue(script.contains("cd ~/code/project && exec git"))
+        let script = transport.gitScript(["status"], worktreePath: "~/code/my $(project)")
+        XCTAssertTrue(script.contains("cd -- \"$HOME\"'/code/my $(project)' && exec git"))
     }
 
     // MARK: - ssh argv
@@ -168,10 +168,76 @@ final class SSHTransportTests: XCTestCase {
         XCTAssertTrue(result.isSuccess, "git init 失败：\(result.stderr)")
         return url
     }
+
+    /// 用本地 shell 代替 ssh，只执行最后一个脚本参数，不连接真实服务器。
+    private func localShellTransport(in directory: URL) throws -> SSHTransport {
+        let executable = directory.appendingPathComponent("fake-ssh")
+        try Data("""
+        #!/bin/sh
+        for argument in "$@"; do script=$argument; done
+        exec /bin/sh -c "$script"
+        """.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        return SSHTransport(sshExecutable: executable, server: makeServer())
+    }
+
+    func testAtomicWritePreservesPermissionsAndRejectsSymbolicLinks() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("grove-atomic-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let transport = try localShellTransport(in: directory)
+        for mode in [0o755, 0o600] {
+            let file = directory.appendingPathComponent("权限 '\(mode).txt")
+            try Data("旧内容".utf8).write(to: file)
+            try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: file.path)
+            try await transport.writeData(Data("新内容".utf8), toPath: file.path, atomic: true)
+            XCTAssertEqual(try Data(contentsOf: file), Data("新内容".utf8))
+            XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int, mode)
+        }
+        let target = directory.appendingPathComponent("链接目标")
+        try Data("保留内容".utf8).write(to: target)
+        let link = directory.appendingPathComponent("链接")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        do {
+            try await transport.writeData(Data("不得写入".utf8), toPath: link.path, atomic: true)
+            XCTFail("原子写符号链接应明确拒绝")
+        } catch let failure as CommandFailure {
+            XCTAssertTrue(failure.output.contains("符号链接"))
+        }
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: link.path), target.path)
+        XCTAssertEqual(try Data(contentsOf: target), Data("保留内容".utf8))
+        let folder = directory.appendingPathComponent("不是文件")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        do {
+            try await transport.writeData(Data("不得写入".utf8), toPath: folder.path, atomic: true)
+            XCTFail("失败的保存应清理临时文件")
+        } catch is CommandFailure {
+            // 目录不能当作普通文件替换，失败后仍应保留目录。
+        }
+        var isDirectory: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory))
+        XCTAssertTrue(isDirectory.boolValue)
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: directory.path).contains { $0.contains(".grove-") })
+    }
+
+    func testRemoteRepositoryRootHandlesRawTildeAndShellCharacters() async throws {
+        let directory = try await makeTemporaryRepository()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let transport = try localShellTransport(in: directory)
+        let child = directory.appendingPathComponent("子目录 ' $(touch 被执行)")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        // 从真实家目录返回根目录再到临时仓库，避免写入用户家目录。
+        let parents = String(repeating: "../", count: FileManager.default.homeDirectoryForCurrentUser.pathComponents.count - 1)
+        let rawPath = "~/" + parents + child.path.dropFirst()
+        let root = await transport.repositoryRoot(forPath: rawPath)
+        XCTAssertEqual(root?.path, directory.resolvingSymlinksInPath().path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("被执行").path))
+    }
     // MARK: - 标识
 
     func testRepoIDDistinguishesServersWithSamePath() {
-        let one = RepoID(location: .remote(makeServer(alias: "a", host: "a.example.com")),
+        let oneServer = makeServer(alias: "a", host: "a.example.com")
+        let one = RepoID(location: .remote(oneServer),
                          root: URL(fileURLWithPath: "/srv/app"))
         let two = RepoID(location: .remote(makeServer(alias: "b", host: "b.example.com")),
                          root: URL(fileURLWithPath: "/srv/app"))
@@ -179,7 +245,7 @@ final class SSHTransportTests: XCTestCase {
 
         XCTAssertNotEqual(one, two)
         XCTAssertNotEqual(one, local)
-        XCTAssertEqual(one.identityKey, "jamie@a.example.com:/srv/app")
+        XCTAssertEqual(one.identityKey, "\(oneServer.id.uuidString):/srv/app")
         XCTAssertEqual(local.identityKey, "local:/srv/app")
     }
 

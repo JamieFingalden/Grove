@@ -100,6 +100,42 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertTrue(result.stdout.contains("读到=[]"))
     }
 
+    func testLargeStdinIsDeliveredCompletely() async throws {
+        let input = Data(repeating: 65, count: 1024 * 1024)
+        let result = try await ProcessRunner.run(
+            executable: shell,
+            arguments: ["-c", "cat"],
+            standardInput: input
+        )
+        XCTAssertTrue(result.isSuccess)
+        XCTAssertEqual(result.standardOutput, input)
+    }
+
+    func testChildClosingStdinPreservesItsFailure() async throws {
+        let result = try await ProcessRunner.run(
+            executable: shell,
+            arguments: ["-c", "exec 0<&-; printf '输入被拒绝' >&2; exit 3"],
+            standardInput: Data(repeating: 65, count: 8 * 1024 * 1024)
+        )
+        XCTAssertEqual(result.exitCode, 3)
+        XCTAssertEqual(result.stderr, "输入被拒绝")
+    }
+
+    func testSuccessfulChildNotReadingInputReportsBrokenPipe() async {
+        do {
+            _ = try await ProcessRunner.run(
+                executable: shell,
+                arguments: ["-c", "exec 0<&-; exit 0"],
+                standardInput: Data(repeating: 65, count: 8 * 1024 * 1024)
+            )
+            XCTFail("输入未完整送达不应被当作成功")
+        } catch let error as POSIXError {
+            XCTAssertEqual(error.code, .EPIPE)
+        } catch {
+            XCTFail("抛出了意外的错误类型：\(error)")
+        }
+    }
+
     /// 大量并发调用不能有任何一条卡住。
     ///
     /// 这一条是有来历的：早先用 `waitUntilExit()` 等进程退出，单条命令永远正常，
@@ -159,6 +195,34 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 10)
     }
 
+    func testGrandchildContinuouslyWritingDoesNotBlockCompletion() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("grove-grandchild-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let pidFile = directory.appendingPathComponent("child.pid")
+        defer {
+            if let text = try? String(contentsOf: pidFile, encoding: .utf8),
+               let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                kill(pid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let quotedPIDPath = "'" + pidFile.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let started = Date()
+        let result = try await ProcessRunner.run(
+            executable: shell,
+            arguments: ["-c", """
+            (index=0; while [ "$index" -lt 400 ]; do printf x; index=$((index + 1)); sleep 0.01; done) &
+            printf '%s\\n' "$!" > \(quotedPIDPath)
+            exit 0
+            """],
+            timeout: 10
+        )
+        XCTAssertTrue(result.isSuccess)
+        XCTAssertFalse(result.standardOutput.isEmpty)
+        // 即使实现退化，孙进程也会自行结束；正常路径必须提前返回并由 defer 清理。
+        XCTAssertLessThan(Date().timeIntervalSince(started), 3)
+    }
+
     /// 孙进程的存在不能导致数据被提前截断。
     func testOutputIsNotTruncatedWhenGrandchildExists() async throws {
         let result = try await ProcessRunner.run(
@@ -169,14 +233,14 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertEqual(result.standardOutput.count, 30_000 * 11)
     }
 
-    func testCancellationTerminatesChildProcess() async {
+    func testCancellationForceKillsChildIgnoringSIGTERM() async {
         let started = Date()
         let executable = shell
         let task = Task {
             try await ProcessRunner.run(
                 executable: executable,
-                arguments: ["-c", "sleep 60"],
-                timeout: 120
+                arguments: ["-c", "trap '' TERM; exec sleep 60"],
+                timeout: 8
             )
         }
         try? await Task.sleep(for: .milliseconds(100))
@@ -186,7 +250,7 @@ final class ProcessRunnerTests: XCTestCase {
             _ = try await task.value
             XCTFail("取消后不应该返回成功结果")
         } catch is CancellationError {
-            XCTAssertLessThan(Date().timeIntervalSince(started), 10)
+            XCTAssertLessThan(Date().timeIntervalSince(started), 6)
         } catch {
             XCTFail("抛出了意外的错误类型：\(error)")
         }

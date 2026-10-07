@@ -9,6 +9,7 @@ final class WorktreeModel: Identifiable {
     /// 另存一份不可变的 —— `Identifiable` 的 `id` 要能从非隔离上下文读，
     /// 而且一个模型对象的身份本来就不该在生命周期内变化。
     nonisolated let identity: URL
+    nonisolated let location: RepoLocation
     var worktree: Worktree
     private(set) weak var repository: RepositoryModel?
     private let git: GitClient
@@ -126,12 +127,14 @@ final class WorktreeModel: Identifiable {
     var selectedCommit: String? {
         didSet {
             guard selectedCommit != oldValue else { return }
+            commitDiffTask?.cancel()
             commitDiff = nil
             guard let selectedCommit else { return }
-            Task { await loadCommitDiff(selectedCommit) }
+            commitDiffTask = Task { await loadCommitDiff(selectedCommit) }
         }
     }
     private(set) var commitDiff: [FileDiff]?
+    @ObservationIgnored private var commitDiffTask: Task<Void, Never>?
 
     // MARK: 冲突状态
 
@@ -177,11 +180,13 @@ final class WorktreeModel: Identifiable {
     var conflictViewMode: ConflictViewMode = .resolve
 
     nonisolated var id: URL { identity }
+    nonisolated var identityKey: String { RepoID(location: location, root: identity).identityKey }
     var path: URL { worktree.path }
     var isAICommitEnabled: Bool { app?.canUseAIGeneration == true }
 
     init(worktree: Worktree, repository: RepositoryModel?, git: GitClient, app: AppModel?) {
         self.identity = worktree.path
+        self.location = repository?.location ?? .local
         self.worktree = worktree
         self.repository = repository
         self.git = git
@@ -343,11 +348,15 @@ final class WorktreeModel: Identifiable {
         // 那份列表只有开放的 PR，所以紧接着再按完整规则查一次确认。
         linkedPullRequest = repository?.pullRequest(forBranch: branch)
 
-        linkedPullRequest = await forge.linkedPullRequest(
+        let expectedOrigin = repository?.origin
+        let loaded = await forge.linkedPullRequest(
             branch: branch,
             defaultBranch: repository?.defaultBranch,
             in: path
         )
+        guard !Task.isCancelled, repository?.origin == expectedOrigin,
+              worktree.branch == branch else { return }
+        linkedPullRequest = loaded
     }
 
     private func loadDiff() async {
@@ -408,9 +417,10 @@ final class WorktreeModel: Identifiable {
     private func loadCommitDiff(_ oid: String) async {
         do {
             let result = try await git.commitDiff(in: path, oid: oid)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, selectedCommit == oid else { return }
             commitDiff = result
         } catch {
+            guard !Task.isCancelled, selectedCommit == oid else { return }
             commitDiff = []
         }
     }
@@ -448,16 +458,22 @@ final class WorktreeModel: Identifiable {
 
     func unstage(_ change: FileChange) async {
         await mutate("取消暂存 \(change.displayName)") {
-            try await self.git.unstage(paths: [change.path], in: self.path)
+            try await self.git.unstage(paths: Self.unstagePaths(for: change), in: self.path)
         }
     }
 
     func unstageAll() async {
-        let staged = status.changes.filter(\.isStaged).map(\.path)
+        let staged = status.changes.filter(\.isStaged).flatMap(Self.unstagePaths)
         guard !staged.isEmpty else { return }
         await mutate("全部取消暂存") {
             try await self.git.unstage(paths: staged, in: self.path)
         }
+    }
+
+    private static func unstagePaths(for change: FileChange) -> [String] {
+        // 重命名要恢复旧路径删除；复制只取消新增，不能连来源文件的改动一起撤掉。
+        guard change.staged == .renamed, let originalPath = change.originalPath else { return [change.path] }
+        return [originalPath, change.path]
     }
 
     func discard(_ change: FileChange) async {
@@ -1128,8 +1144,10 @@ final class WorktreeModel: Identifiable {
     /// 也就是终端里裸 `git push` 的行为。
     func push(to remote: NamedRemote? = nil) async {
         let label = remote.map { "正在推送到 \($0.name)…" } ?? "正在推送…"
-        // 推送真正落地才启动盯梢（闭包抛错时不会置位）。
-        var didPush = false
+        // 推送真正落地后立刻读取结果，不能等界面刷新期间的其他 Git 操作改变引用。
+        var pushedCommit: (branch: String, sha: String)?
+        let branch = worktree.branch
+        let expectedOrigin = repository?.origin
         await performSync(
             .push,
             activity: label,
@@ -1151,18 +1169,24 @@ final class WorktreeModel: Identifiable {
             // 但**已经有上游**时不动它：用户显式推到另一个远端（比如备份仓库）
             // 不代表他想把分支改跟踪到那边去，悄悄改掉会让之后的 pull 拉错地方。
             let needsUpstream = self.status.upstream == nil
-            try await self.git.push(
+            let output = try await self.git.push(
                 in: self.path,
                 remote: remote?.name,
-                branch: self.worktree.branch,
+                branch: branch,
                 setUpstream: needsUpstream
             )
-            didPush = true
+            if let branch, let expectedOrigin,
+               let pushed = await self.git.pushedTrackingCommit(from: output, for: branch, remote: remote?.name, in: self.path),
+               let target = GitRemote.parse(pushed.target),
+               target.host.lowercased() == expectedOrigin.host.lowercased(),
+               target.port == expectedOrigin.port, target.path == expectedOrigin.path {
+                pushedCommit = (pushed.branch, pushed.sha)
+            }
         }
 
         // 推完自动盯这条分支的流水线：绿了/红了弹通知，不用守着网页。
-        if didPush, let branch = worktree.branch, !branch.isEmpty, remote == nil || remote?.name == "origin" {
-            repository?.watchPipeline(afterPush: branch)
+        if let pushedCommit, repository?.origin == expectedOrigin {
+            repository?.watchPipeline(afterPush: pushedCommit.branch, sha: pushedCommit.sha)
         }
     }
 

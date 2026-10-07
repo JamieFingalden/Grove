@@ -101,6 +101,13 @@ final class LogQueryTests: XCTestCase {
         XCTAssertEqual(found, ["加上登录页"])
     }
 
+    func testPathFilterRetainsUserEnteredGlobSemantics() async throws {
+        var query = LogQuery()
+        query.path = "*.swift"
+        let found = try await subjects(query)
+        XCTAssertEqual(Set(found), ["加上登录页", "修复崩溃 foo(bar)", "重构 API"])
+    }
+
     func testCombinedFiltersAreAnded() async throws {
         var query = LogQuery()
         query.authors = ["张三"]
