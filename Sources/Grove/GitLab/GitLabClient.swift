@@ -13,7 +13,6 @@ import Foundation
 struct GitLabClient: ForgeClient {
     let executable: URL
     let environment: [String: String]
-    private let projectContextCache = ProjectContextCache()
     private static let authProbeTimeout: Double = 8
 
     var kind: ForgeKind { .gitlab }
@@ -89,9 +88,7 @@ struct GitLabClient: ForgeClient {
     }
 
     private func projectContext(in directory: URL) async -> ProjectContext? {
-        let cacheKey = directory.standardizedFileURL
-        if let cached = await projectContextCache.value(for: cacheKey) { return cached }
-
+        // origin 可以在外部终端随时更换，写操作必须重新确认目标项目。
         guard let git = await ToolLocator.shared.locate("git"),
               let result = try? await ProcessRunner.run(
                   executable: git,
@@ -112,7 +109,6 @@ struct GitLabClient: ForgeClient {
             projectPath: remote.path,
             encodedProjectID: encodedProjectID
         )
-        await projectContextCache.insert(context, for: cacheKey)
         return context
     }
 
@@ -133,15 +129,6 @@ struct GitLabClient: ForgeClient {
         var hostname: String
         var projectPath: String
         var encodedProjectID: String
-    }
-
-    /// 一个仓库的 origin 和 glab 主机配置在一次运行期里基本不会变。
-    /// 缓存后，连续拉详情、审批、流水线和讨论时不用每次再启动 git/glab 探测子进程。
-    private actor ProjectContextCache {
-        private var values: [URL: ProjectContext] = [:]
-
-        func value(for directory: URL) -> ProjectContext? { values[directory] }
-        func insert(_ context: ProjectContext, for directory: URL) { values[directory] = context }
     }
 
     /// 从 glab 的 YAML 配置里只读主机名，不触发任何网络认证。
@@ -358,7 +345,7 @@ struct GitLabClient: ForgeClient {
             // 三个点跟 GitLab 的语义一致：从合并基开始算。SHA 被本地 GC 掉时会抛错，
             // 那就只标记不硬撑。
             let text = try? await git.run(
-                ["diff", "--no-color", "--no-ext-diff", "--find-renames",
+                ["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--find-renames",
                  "\(base)...\(head)", "--", change.oldPath, change.newPath],
                 in: directory
             )

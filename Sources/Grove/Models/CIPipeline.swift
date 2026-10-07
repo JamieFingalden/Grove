@@ -126,6 +126,16 @@ struct CIJob: Identifiable, Hashable, Sendable {
 /// 每个分支取第一条就是它最新一条流水线的状态。
 /// 侧边栏工作树行的 CI 小点、推送后的盯梢都用它。
 enum CIPipelineIndex {
+    /// 本次提交的所有已出现流水线结束后才返回结果，旧提交不能代表本次推送。
+    static func completedStatus(_ pipelines: [CIPipeline], ref: String, sha: String) -> CIStatus? {
+        guard !sha.isEmpty else { return nil }
+        let matching = pipelines.filter { $0.ref == ref && $0.sha == sha }
+        guard !matching.isEmpty, matching.allSatisfy({ $0.status.isFinal }) else { return nil }
+        if matching.contains(where: { $0.status == .failed }) { return .failed }
+        if matching.contains(where: { $0.status == .canceled }) { return .canceled }
+        return matching.contains(where: { $0.status == .success }) ? .success : .skipped
+    }
+
     static func latestStatusByRef(_ pipelines: [CIPipeline]) -> [String: CIStatus] {
         var result: [String: CIStatus] = [:]
         for pipeline in pipelines where !pipeline.ref.isEmpty {

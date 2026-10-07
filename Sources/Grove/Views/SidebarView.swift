@@ -91,7 +91,9 @@ private struct ProjectSection: View {
         @Bindable var model = model
 
         // homeRepository 按构造不可能为 nil（组里至少有一个仓库），防御一下。
-        if let home = project.homeRepository {
+        if let home = project.repositories.first(where: {
+            model.selection == .repositoryHome(repository: $0.id)
+        }) ?? project.homeRepository {
             // 仓库行 = 主页入口 + 工作树的折叠开关（三角长在仓库行上，
             // Finder/Xcode 的形态）。主页入口指向本地副本（PR / CI 只在本地可用）。
             let homeSelection = AppModel.Selection.repositoryHome(repository: home.id)
@@ -120,6 +122,7 @@ private struct ProjectSection: View {
                 } label: {
                     RepositoryHomeRow(
                         repository: home,
+                        copies: project.repositories,
                         isSelected: homeIsSelected,
                         sheet: $sheet
                     )
@@ -129,15 +132,21 @@ private struct ProjectSection: View {
             .listRowBackground(sidebarSelectionBackground(homeIsSelected))
             .contextMenu {
                 newWorktreeMenu
-                if let local = project.local {
+                if project.locals.count > 1 {
+                    Menu("在 Finder 显示") {
+                        ForEach(project.locals) { local in
+                            Button(local.root.path) { SystemActions.revealInFinder(local.root) }
+                        }
+                    }
+                } else if let local = project.local {
                     Button("在 Finder 显示") { SystemActions.revealInFinder(local.root) }
                 }
             }
 
             if worktreesExpanded {
-                // 组内按路径去重后的工作树（同一仓库的多个打开条目只出一遍）；
+                // 组内按机器与路径去重后的工作树（同一仓库的多个打开条目只出一遍）；
                 // 本地条目的在前 —— 本地是响应最快的主场。
-                ForEach(project.mergedWorktrees, id: \.worktree.id) { entry in
+                ForEach(project.mergedWorktrees, id: \.id) { entry in
                     let repository = entry.repository
                     let worktree = entry.worktree
                     let marker = locationMarker(for: repository)
@@ -195,7 +204,8 @@ private struct ProjectSection: View {
     }
 
     private func locationName(of repository: RepositoryModel) -> String {
-        repository.server?.displayName ?? "本机"
+        let location = repository.server?.displayName ?? "本机"
+        return "\(location) · \(repository.root.path)"
     }
 
     @ViewBuilder
@@ -373,6 +383,7 @@ private struct WorktreeRow: View {
 private struct RepositoryHomeRow: View {
     @Environment(AppModel.self) private var model
     let repository: RepositoryModel
+    let copies: [RepositoryModel]
     let isSelected: Bool
     @Binding var sheet: RootView.ActiveSheet?
 
@@ -396,41 +407,17 @@ private struct RepositoryHomeRow: View {
             Spacer(minLength: 4)
 
             Menu {
-                Button("新建工作树…") { sheet = .newWorktree(repository) }
-                Button("抓取远端") {
-                    Task { await repository.fetch() }
-                }
-                .disabled(!repository.hasRemote)
-
-                Divider()
-
-                Button("清理失效工作树") {
-                    Task { await repository.pruneWorktrees() }
-                }
-                .help("git worktree prune：清掉目录已被手工删除、但 git 还记着的工作树")
-
-                Button("清理已合并分支…") { sheet = .cleanupBranches(repository) }
-                    .disabled(repository.staleBranches.isEmpty)
-
-                Divider()
-
-                if repository.isRemote, let server = repository.server {
-                    Button("复制远程路径") {
-                        SystemActions.copyToPasteboard("\(server.destination):\(repository.root.path)")
+                if copies.count > 1 {
+                    ForEach(copies) { copy in
+                        Menu("\(copy.server?.displayName ?? "本机") · \(copy.root.path)") {
+                            Button("打开项目主页") {
+                                model.selection = .repositoryHome(repository: copy.id)
+                            }
+                            repositoryMenu(copy)
+                        }
                     }
                 } else {
-                    Button("在 Finder 显示") { SystemActions.revealInFinder(repository.root) }
-                    Button("复制路径") { SystemActions.copyToPasteboard(repository.root.path) }
-                }
-
-                Divider()
-
-                Button("从 Grove 移除", role: .destructive) {
-                    if repository.isRemote {
-                        model.closeRemoteProject(repository)
-                    } else {
-                        model.closeRepository(repository)
-                    }
+                    repositoryMenu(repository)
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -447,6 +434,46 @@ private struct RepositoryHomeRow: View {
         .frame(minHeight: SidebarMetrics.rowHeight, alignment: .center)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private func repositoryMenu(_ repository: RepositoryModel) -> some View {
+        Button("新建工作树…") { sheet = .newWorktree(repository) }
+        Button("抓取远端") {
+            Task { await repository.fetch() }
+        }
+        .disabled(!repository.hasRemote)
+
+        Divider()
+
+        Button("清理失效工作树") {
+            Task { await repository.pruneWorktrees() }
+        }
+        .help("git worktree prune：清掉目录已被手工删除、但 git 还记着的工作树")
+
+        Button("清理已合并分支…") { sheet = .cleanupBranches(repository) }
+            .disabled(repository.staleBranches.isEmpty)
+
+        Divider()
+
+        if repository.isRemote, let server = repository.server {
+            Button("复制远程路径") {
+                SystemActions.copyToPasteboard("\(server.destination):\(repository.root.path)")
+            }
+        } else {
+            Button("在 Finder 显示") { SystemActions.revealInFinder(repository.root) }
+            Button("复制路径") { SystemActions.copyToPasteboard(repository.root.path) }
+        }
+
+        Divider()
+
+        Button("从 Grove 移除", role: .destructive) {
+            if repository.isRemote {
+                model.closeRemoteProject(repository)
+            } else {
+                model.closeRepository(repository)
+            }
+        }
     }
 }
 

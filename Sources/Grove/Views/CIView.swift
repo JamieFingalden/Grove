@@ -356,6 +356,7 @@ struct CIView: View {
 
     private func reload(silent: Bool = false) async {
         guard let forge = repository.forge else { return }
+        let expectedOrigin = repository.origin
         if !silent { isLoading = true }
         failureText = nil
         defer {
@@ -364,10 +365,11 @@ struct CIView: View {
         do {
             let loaded = try await forge.pipelines(in: repository.root, limit: 50)
             try Task.checkCancellation()
+            guard repository.origin == expectedOrigin else { return }
             pipelines = loaded
             didLoadOnce = true
             // 分支 → 状态的索引顺手刷新：侧边栏工作树行的 CI 小点靠它。
-            repository.updatePipelineStatuses(from: pipelines)
+            repository.updatePipelineStatuses(from: pipelines, fromOrigin: expectedOrigin)
             if selectedPipelineID != nil {
                 await loadJobs(silent: true)
             }

@@ -131,6 +131,7 @@ enum ProcessRunner {
         timeout: Double = localTimeout,
         standardInput: Data? = nil
     ) async throws -> CommandResult {
+        try Task.checkCancellation()
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
@@ -147,6 +148,11 @@ enum ProcessRunner {
         let inputPipe = standardInput.map { _ in Pipe() }
         process.standardInput = inputPipe ?? FileHandle.nullDevice
 
+        // 只关闭这个写端的 SIGPIPE；全局忽略信号会改变其他子进程的行为。
+        if let inputPipe, fcntl(inputPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == -1 {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+
         do {
             try process.run()
         } catch {
@@ -156,17 +162,7 @@ enum ProcessRunner {
             )
         }
 
-        // 写 stdin 必须在读 stdout 之前排好：子进程可能一边读输入一边吐输出，
-        // 先写完再读的话，输出超过管道缓冲区就会双向卡死。
-        if let inputPipe, let standardInput {
-            DispatchQueue.global(qos: .userInitiated).async {
-                let handle = inputPipe.fileHandleForWriting
-                try? handle.write(contentsOf: standardInput)
-                // 必须关掉写端，否则子进程等不到 EOF，会一直读下去。
-                try? handle.close()
-            }
-        }
-
+        let terminationRequested = AtomicFlag()
         return try await withTaskCancellationHandler {
             let timedOut = AtomicFlag()
             // 进程已经退出、可以停止读管道了。见下面 `drain` 的注释。
@@ -176,14 +172,7 @@ enum ProcessRunner {
                 try? await Task.sleep(for: .seconds(timeout))
                 guard !Task.isCancelled, process.isRunning else { return }
                 timedOut.set()
-                process.terminate()
-
-                // SIGTERM 之后再给两秒体面退出的机会。还赖着不走就 SIGKILL ——
-                // 到这一步说明它连信号都不响应了，继续等下去毫无意义。
-                try? await Task.sleep(for: .seconds(2))
-                if process.isRunning {
-                    kill(process.processIdentifier, SIGKILL)
-                }
+                terminate(process, once: terminationRequested)
             }
             defer { watchdog.cancel() }
 
@@ -195,11 +184,17 @@ enum ProcessRunner {
                 noMoreWriters.set()
             }
 
+            // 输入和两个输出一起传输，避免大输入、大输出互相填满管道。
+            async let inputError = writeInput(standardInput, to: inputPipe, stopWhen: noMoreWriters)
             async let outputData = drain(outputPipe.fileHandleForReading, stopWhen: noMoreWriters)
             async let errorData = drain(errorPipe.fileHandleForReading, stopWhen: noMoreWriters)
             let (collectedOutput, collectedError) = await (outputData, errorData)
 
             _ = await exitWatcher.value
+            let writeError = await inputError
+
+            // 取消和超时碰巧同时发生时，调用方仍应收到取消语义。
+            try Task.checkCancellation()
 
             if timedOut.isSet {
                 throw CommandTimeout(
@@ -209,7 +204,8 @@ enum ProcessRunner {
                 )
             }
 
-            try Task.checkCancellation()
+            // 工具自身失败时保留它的退出码和诊断；只有成功却没读完输入时报告断管。
+            if process.terminationStatus == 0, let writeError { throw writeError }
 
             return CommandResult(
                 exitCode: process.terminationStatus,
@@ -218,7 +214,53 @@ enum ProcessRunner {
             )
         } onCancel: {
             // AI 生成等长任务的“取消”必须同时停掉真实子进程，不能只丢弃 Swift Task。
-            if process.isRunning { process.terminate() }
+            terminate(process, once: terminationRequested)
+        }
+    }
+
+    /// 取消和超时共用有界终止；升级信号不依赖已经被取消的 Swift Task。
+    private static func terminate(_ process: Process, once requested: AtomicFlag) {
+        guard requested.setIfUnset(), process.isRunning else { return }
+        process.terminate()
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2) {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
+    }
+
+    /// 非阻塞地写输入，进程退出后停止等待可能仍持有 stdin 的孙进程。
+    private static func writeInput(_ data: Data?, to pipe: Pipe?, stopWhen exited: AtomicFlag) async -> Error? {
+        guard let data, let pipe else { return nil }
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let handle = pipe.fileHandleForWriting
+                defer { try? handle.close() }
+                let descriptor = handle.fileDescriptor
+                let flags = fcntl(descriptor, F_GETFL, 0)
+                guard flags != -1, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != -1 else {
+                    continuation.resume(returning: POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO))
+                    return
+                }
+
+                let error: Error? = data.withUnsafeBytes { bytes in
+                    var offset = 0
+                    while offset < bytes.count {
+                        if exited.isSet { return POSIXError(.EPIPE) }
+                        let written = write(descriptor, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                        if written > 0 {
+                            offset += written
+                            continue
+                        }
+                        if written == -1, errno == EINTR { continue }
+                        if written == -1, errno == EAGAIN {
+                            var pending = pollfd(fd: descriptor, events: Int16(POLLOUT), revents: 0)
+                            if poll(&pending, 1, 200) >= 0 || errno == EINTR { continue }
+                        }
+                        return POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                    }
+                    return nil
+                }
+                continuation.resume(returning: error)
+            }
         }
     }
 
@@ -263,9 +305,8 @@ enum ProcessRunner {
     /// 于是 git 本身早就退出了，我们还阻塞在 read 上等一个永远不来的 EOF。
     /// （超时看门狗也救不了：它 SIGTERM 的是子进程，孙进程照样握着管道。）
     ///
-    /// 所以这里改成非阻塞 + `poll` 轮询：只有在「管道当前没数据」**并且**
-    /// 「子进程已经退出」时才收工。既不会漏读缓冲区里的残留数据，
-    /// 也不会被赖着不走的孙进程拖住。
+    /// 所以这里改成非阻塞 + `poll` 轮询：子进程退出后排空缓冲区，
+    /// 当前没有数据就收工；孙进程持续写入时最多再读一秒，避免永久等待。
     private static func drain(_ handle: FileHandle, stopWhen noMoreWriters: AtomicFlag) async -> Data {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -275,8 +316,18 @@ enum ProcessRunner {
 
                 var collected = Data()
                 var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+                let clock = ContinuousClock()
+                var exitDrainDeadline: ContinuousClock.Instant?
 
                 loop: while true {
+                    if noMoreWriters.isSet {
+                        // ponytail: 直接子进程退出后最多排空 1 秒；要完整追踪持续输出的孙进程需改为进程组管理。
+                        if let deadline = exitDrainDeadline {
+                            if clock.now >= deadline { break loop }
+                        } else {
+                            exitDrainDeadline = clock.now.advanced(by: .seconds(1))
+                        }
+                    }
                     var descriptors = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
                     // 200ms 一轮，好让我们有机会看一眼「进程退出了没」。
                     let ready = poll(&descriptors, 1, 200)

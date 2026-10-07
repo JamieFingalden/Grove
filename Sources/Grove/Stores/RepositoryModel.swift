@@ -37,7 +37,8 @@ final class RepositoryModel: Identifiable {
     private var detailKnownState: [Int: PullRequest] = [:]
 
     /// 把详情接口的已知状态并进列表行。看详情、批准/撤销后都会调。
-    func mergeDetailIntoList(_ detail: PullRequest) {
+    func mergeDetailIntoList(_ detail: PullRequest, fromOrigin expectedOrigin: GitRemote?) {
+        guard origin == expectedOrigin else { return }
         detailKnownState[detail.number] = detail
         applyDetailState()
     }
@@ -77,6 +78,7 @@ final class RepositoryModel: Identifiable {
 
     var isRefreshing = false
     var isRefreshingPullRequests = false
+    @ObservationIgnored private var pullRequestRefreshID = UUID()
     /// 正在进行的长操作描述（"正在拉取…"）。nil 表示空闲。
     var activity: String?
     var aiCommitEnabled: Bool { app?.isAIGenerationEnabled == true }
@@ -162,7 +164,11 @@ final class RepositoryModel: Identifiable {
         remotes = resolvedRemotes ?? []
         hasOrigin = originURL != nil
         hasRemote = !remotes.isEmpty
-        origin = originURL.flatMap(GitRemote.parse)
+        let resolvedOrigin = originURL.flatMap(GitRemote.parse)
+        if origin != resolvedOrigin {
+            clearForgeState()
+        }
+        origin = resolvedOrigin
         // 托管商只按 origin 认。一个仓库可能同时挂着内网 GitLab 的 origin 和
         // GitHub 备份 remote，让 CLI 自己去猜会认错到另一个仓库上。
         //
@@ -219,13 +225,26 @@ final class RepositoryModel: Identifiable {
         // 这里不设的话 PR 列表的守卫会误放行，跑出一片连接错误。
         forge = isRemote ? nil : app?.forge(for: origin)
         if previousKind != forge?.kind {
-            slug = nil
-            pullRequests = []
-            listPullRequests = []
-            listState = .open
+            clearForgeState()
         }
         guard slug == nil, let forge else { return }
-        slug = await forge.repositorySlug(in: root)
+        let expectedOrigin = origin
+        let resolvedSlug = await forge.repositorySlug(in: root)
+        guard origin == expectedOrigin, self.forge?.kind == forge.kind else { return }
+        slug = resolvedSlug
+    }
+
+    private func clearForgeState() {
+        pullRequestRefreshID = UUID()
+        isRefreshingPullRequests = false
+        slug = nil
+        pullRequests = []
+        listPullRequests = []
+        detailKnownState = [:]
+        for model in worktreeModels.values { model.linkedPullRequest = nil }
+        listState = .open
+        pipelineStatusByRef = [:]
+        pipelineWatchTask?.cancel()
     }
 
     func refreshPullRequests() async {
@@ -235,22 +254,34 @@ final class RepositoryModel: Identifiable {
             await refreshForgeMetadata()
         }
         guard let forge, slug != nil else { return }
+        let requestID = UUID()
+        pullRequestRefreshID = requestID
+        let requestedOrigin = origin
+        let requestedState = listState
         isRefreshingPullRequests = true
-        defer { isRefreshingPullRequests = false }
+        defer {
+            if pullRequestRefreshID == requestID { isRefreshingPullRequests = false }
+        }
         do {
             // 筛选到非开放状态时，开放列表（角标、工作树关联）和历史列表各取各的，
             // 两个请求并发；留在「开放」时共享同一份数据，不多发请求。
-            if listState == .open {
-                pullRequests = try await forge.pullRequests(in: root, limit: 50, state: .open)
-                listPullRequests = pullRequests
+            let loadedOpen: [PullRequest]
+            let loadedList: [PullRequest]
+            if requestedState == .open {
+                loadedOpen = try await forge.pullRequests(in: root, limit: 50, state: .open)
+                loadedList = loadedOpen
             } else {
                 async let open = try await forge.pullRequests(in: root, limit: 50, state: .open)
-                async let filtered = try await forge.pullRequests(in: root, limit: 50, state: listState)
-                pullRequests = try await open
-                listPullRequests = try await filtered
+                async let filtered = try await forge.pullRequests(in: root, limit: 50, state: requestedState)
+                (loadedOpen, loadedList) = try await (open, filtered)
             }
+            guard !Task.isCancelled, pullRequestRefreshID == requestID,
+                  origin == requestedOrigin, listState == requestedState else { return }
+            pullRequests = loadedOpen
+            listPullRequests = loadedList
             applyDetailState()
         } catch {
+            guard pullRequestRefreshID == requestID, origin == requestedOrigin else { return }
             app?.report(title: "读取 PR 列表失败", error: error)
         }
     }
@@ -291,15 +322,18 @@ final class RepositoryModel: Identifiable {
     /// 来源有三处：启动探测、抓取/刷新、CI 分栏的轮询 —— 都是拿到新列表就覆盖。
     private(set) var pipelineStatusByRef: [String: CIStatus] = [:]
 
-    func updatePipelineStatuses(from pipelines: [CIPipeline]) {
+    func updatePipelineStatuses(from pipelines: [CIPipeline], fromOrigin expectedOrigin: GitRemote?) {
+        guard origin == expectedOrigin else { return }
         pipelineStatusByRef = CIPipelineIndex.latestStatusByRef(pipelines)
     }
 
     /// 拉一份流水线列表刷新分支状态点。失败静默：这只是装饰性信息。
     func refreshPipelineStatuses() async {
         guard let forge else { return }
+        let expectedOrigin = origin
         guard let pipelines = try? await forge.pipelines(in: root, limit: 50) else { return }
-        updatePipelineStatuses(from: pipelines)
+        guard !Task.isCancelled, self.forge?.kind == forge.kind else { return }
+        updatePipelineStatuses(from: pipelines, fromOrigin: expectedOrigin)
     }
 
     // MARK: - 推送后盯流水线
@@ -309,27 +343,34 @@ final class RepositoryModel: Identifiable {
     /// 推送成功后自动盯这条分支的流水线：出现 → 跟到终态 → 弹系统通知。
     /// 这是「常驻客户端」才能给的体验：推完就可以切走干别的。
     /// 上限约 27 分钟（8 秒 × 200 轮），超时静默放弃。
-    func watchPipeline(afterPush branch: String) {
-        guard !branch.isEmpty else { return }
+    func watchPipeline(afterPush branch: String, sha: String) {
+        guard !branch.isEmpty, !sha.isEmpty else { return }
         pipelineWatchTask?.cancel()
+        let expectedOrigin = origin
         pipelineWatchTask = Task { [weak self] in
-            // 服务器时钟可能有点偏差，窗口放宽一分钟。
-            let since = Date().addingTimeInterval(-60)
+            var completedIDs: Set<Int>?
             await PipelineNotifier.requestAuthorization()
             for _ in 0..<200 {
                 guard !Task.isCancelled else { return }
                 guard let self else { return }
+                guard self.origin == expectedOrigin else { return }
                 guard let forge = self.forge else { return }
                 if let pipelines = try? await forge.pipelines(in: self.root, limit: 20) {
-                    self.updatePipelineStatuses(from: pipelines)
-                    // 找推送之后新出现的这条分支的流水线（列表最新在前）。
-                    if let pipeline = pipelines.first(where: {
-                        $0.ref == branch && ($0.createdAt ?? .distantPast) >= since
-                    }) {
-                        if pipeline.status.isFinal {
+                    guard !Task.isCancelled, self.origin == expectedOrigin else { return }
+                    self.updatePipelineStatuses(from: pipelines, fromOrigin: expectedOrigin)
+                    let matching = pipelines.filter { $0.ref == branch && $0.sha == sha }
+                    if let status = CIPipelineIndex.completedStatus(matching, ref: branch, sha: sha),
+                       var pipeline = matching.first {
+                        let ids = Set(matching.map(\.id))
+                        // ponytail: 两轮稳定覆盖常见启动延迟；更迟的工作流需平台提供预期检查集合。
+                        if completedIDs == ids {
+                            pipeline.status = status
                             self.finishWatch(pipeline)
                             return
                         }
+                        completedIDs = ids
+                    } else {
+                        completedIDs = nil
                     }
                 }
                 try? await Task.sleep(for: .seconds(8))
@@ -523,7 +564,8 @@ final class RepositoryModel: Identifiable {
         }
 
         await refresh()
-        return worktrees.first { $0.path.isSameLocation(as: path) }
+        let targetID = RepoID(location: location, root: path)
+        return worktrees.first { RepoID(location: location, root: $0.path) == targetID }
     }
 
     /// 把某个 PR 检出成一个新工作树 —— Grove 的招牌操作。
@@ -555,10 +597,13 @@ final class RepositoryModel: Identifiable {
             if isFork {
                 // `+` 前缀允许非 fast-forward 更新：PR 作者 force-push 之后
                 // 不加这个会抓取失败，而 force-push 在 PR 里太常见了。
-                try await git.fetchRefspec(
-                    pullRequest.forge.headRefspec(number: pullRequest.number, localBranch: branchName),
-                    in: root
-                )
+                // 已有分支可能包含评审时的本地提交，重新检出不能强制覆盖它。
+                if !alreadyLocal {
+                    try await git.fetchRefspec(
+                        pullRequest.forge.headRefspec(number: pullRequest.number, localBranch: branchName),
+                        in: root
+                    )
+                }
                 try await git.addWorktree(at: path, source: .existingBranch(branchName), in: root)
             } else {
                 // 必须写完整的 refspec，不能只写分支名。
@@ -591,7 +636,8 @@ final class RepositoryModel: Identifiable {
         }
 
         await refresh()
-        return worktrees.first { $0.path.isSameLocation(as: path) }
+        let targetID = RepoID(location: location, root: path)
+        return worktrees.first { RepoID(location: location, root: $0.path) == targetID }
     }
 
     /// 删除工作树。`deleteBranch` 为真时连分支一起删（PR 合并后的常规清理）。

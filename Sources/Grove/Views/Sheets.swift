@@ -444,6 +444,7 @@ struct CreatePullRequestSheet: View {
 
         let target = base.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !target.isEmpty else { return }
+        let originalBody = body_
         isGeneratingDescription = true
         generatedDiffNotice = nil
         canRetryDescriptionGeneration = false
@@ -451,6 +452,13 @@ struct CreatePullRequestSheet: View {
             do {
                 let generated = try await model.generatePullRequestDescription(base: target)
                 try Task.checkCancellation()
+                guard body_ == originalBody,
+                      base.trimmingCharacters(in: .whitespacesAndNewlines) == target else {
+                    generatedDiffNotice = "生成期间描述或目标分支已修改，已保留你的输入。"
+                    isGeneratingDescription = false
+                    descriptionTask = nil
+                    return
+                }
                 body_ = generated.body
                 generatedDiffNotice = generated.note
             } catch is CancellationError {

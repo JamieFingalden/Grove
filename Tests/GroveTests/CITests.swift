@@ -2,6 +2,19 @@ import XCTest
 @testable import Grove
 
 final class CITests: XCTestCase {
+    func testPushWatchMatchesCommitAndWaitsForAllKnownPipelines() {
+        let old = CIPipeline(id: 1, status: .success, ref: "main", sha: "old")
+        let done = CIPipeline(id: 2, status: .success, ref: "main", sha: "new")
+        var other = CIPipeline(id: 3, status: .running, ref: "main", sha: "new")
+        XCTAssertNil(CIPipelineIndex.completedStatus([old], ref: "main", sha: "new"))
+        XCTAssertNil(CIPipelineIndex.completedStatus([done, other], ref: "main", sha: "new"))
+        other.status = .failed
+        XCTAssertEqual(CIPipelineIndex.completedStatus([old, done, other], ref: "main", sha: "new"), .failed)
+        other.status = .success
+        XCTAssertEqual(CIPipelineIndex.completedStatus([done, other], ref: "main", sha: "new"), .success)
+        XCTAssertNil(CIPipelineIndex.completedStatus([done], ref: "other", sha: "new"))
+    }
+
     // MARK: - 状态规范化
 
     func testGitLabStatusVocabulary() {
