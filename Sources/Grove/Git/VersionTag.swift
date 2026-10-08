@@ -22,7 +22,12 @@ struct VersionTag: Comparable {
         let hasPrefixV = rawValue.hasPrefix("v")
         if hasPrefixV { digits.removeFirst() }
         let parts = digits.split(separator: ".", omittingEmptySubsequences: false)
-        let numbers = parts.compactMap { Int($0) }
+        // Int() 也收带符号的段（"+1"、"-1"），先验纯数字再转换 ——
+        // 否则 v2.-1 这种怪标签会抢走最高版本的位置，把候选带偏。
+        let numbers = parts.compactMap { part -> Int? in
+            guard part.allSatisfy(\.isNumber) else { return nil }
+            return Int(part)
+        }
         guard !numbers.isEmpty, numbers.count == parts.count else { return nil }
         self.numbers = numbers
         self.hasPrefixV = hasPrefixV

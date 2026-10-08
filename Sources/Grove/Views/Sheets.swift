@@ -1463,12 +1463,12 @@ struct NewTagSheet: View {
             // 打标签十有八九是为了发布，默认推上去；没配远端的仓库就只能本地建。
             shouldPush = !remotes.isEmpty
             remote = model.defaultRemote ?? remotes.first
-            // 预填下一个版本号（上一个 v0.1.1 就是 v0.1.2）。异步取，
-            // 回来时用户已经开打了就不覆盖 —— 建议是送的，不该抢输入。
+            // 预填下一个版本号（上一个 v0.1.1 就是 v0.1.2）。空不空要等
+            // 查询回来再判 —— SSH 远程仓库查询慢，期间用户可能已经开打了，
+            // 建议是送的，不该抢输入。
             Task {
-                if name.isEmpty {
-                    name = await model.suggestedTagName() ?? ""
-                }
+                guard let suggestion = await model.suggestedTagName(), name.isEmpty else { return }
+                name = suggestion
             }
         }
     }

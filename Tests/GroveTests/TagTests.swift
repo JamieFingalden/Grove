@@ -121,6 +121,15 @@ final class VersionTagTests: XCTestCase {
         }
     }
 
+    func testRejectsSignedSegments() {
+        // Int() 也认 "+1" / "-1"，但带符号的段不是纯数字 ——
+        // 否则 v2.-1 会抢走最高版本的位置，把候选从 v1.2.4 带成 v2.0。
+        XCTAssertNil(VersionTag("v2.-1"))
+        XCTAssertNil(VersionTag("+1.2"))
+        XCTAssertNil(VersionTag("1.+2"))
+        XCTAssertEqual(VersionTag.suggestedNext(after: ["v1.2.3", "v2.-1"]), "v1.2.4")
+    }
+
     func testNextBumpsLastSegmentWithoutCarry() {
         XCTAssertEqual(VersionTag("v0.1.1")?.next().rawValue, "v0.1.2")
         XCTAssertEqual(VersionTag("v0.1.9")?.next().rawValue, "v0.1.10")
