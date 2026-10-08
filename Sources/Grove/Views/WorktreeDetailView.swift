@@ -376,6 +376,24 @@ private struct WorktreeHeader: View {
         return "选一个分支，把当前分支重放到它上面"
     }
 
+    /// 标签按钮。发布的收尾动作往往是「拉一把、打个版本标签、推上去」，
+    /// 跟拉取/变基/推送是同一串动作，排在一起而不是埋进历史列表的右键菜单。
+    private var tagControl: some View {
+        Button {
+            Task {
+                // 取 HEAD 而不是历史列表的第一条 —— 列表可能被筛选过，
+                // 「最新提交」标到半截历史上就麻烦了。
+                if let head = await model.headCommit() {
+                    sheet = .newTag(model, head)
+                }
+            }
+        } label: {
+            Label("标签", systemImage: "tag")
+        }
+        .disabled(model.status.operation != nil || model.activity != nil)
+        .help("在当前分支最新提交（HEAD）上创建标签，名字自动预填下一个版本号")
+    }
+
     /// 评审按钮。不可用时**保持在原位、禁用、把原因放进 tooltip**，
     /// 而不是整个消失 —— 消失了用户只会以为功能坏了。
     @ViewBuilder
@@ -422,6 +440,8 @@ private struct WorktreeHeader: View {
             pullControl
 
             rebaseControl
+
+            tagControl
 
             pushControl
 

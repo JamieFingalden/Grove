@@ -95,4 +95,56 @@ final class TagTests: XCTestCase {
         let remoteAfterDelete = try await git.run(["tag", "--list"], in: remoteRoot)
         XCTAssertEqual(remoteAfterDelete.trimmingCharacters(in: .whitespacesAndNewlines), "v1.0.0")
     }
+
+    func testTagsListNamesForVersionSuggestion() async throws {
+        let (git, root, oid) = try await makeRepository()
+        try await git.createTag("wip", message: "", at: oid, in: root)
+        try await git.createTag("v0.1.1", message: "发布", at: oid, in: root)
+
+        let names = await git.tags(in: root)
+        XCTAssertEqual(Set(names), ["wip", "v0.1.1"])
+        XCTAssertEqual(VersionTag.suggestedNext(after: names), "v0.1.2")
+    }
+}
+
+/// 版本号候选的纯逻辑测试：解析和推进不碰仓库。
+final class VersionTagTests: XCTestCase {
+    func testParsesVersionShapedNames() {
+        XCTAssertEqual(VersionTag("v0.1.1")?.rawValue, "v0.1.1")
+        XCTAssertEqual(VersionTag("1.2.3")?.rawValue, "1.2.3")
+        XCTAssertEqual(VersionTag("v2")?.rawValue, "v2")
+    }
+
+    func testRejectsNonVersionNames() {
+        for name in ["wip", "release-1", "v1.0.0-beta", "v", "v.1", "1.2.x"] {
+            XCTAssertNil(VersionTag(name), "\(name) 不该被当成版本号")
+        }
+    }
+
+    func testRejectsSignedSegments() {
+        // Int() 也认 "+1" / "-1"，但带符号的段不是纯数字 ——
+        // 否则 v2.-1 会抢走最高版本的位置，把候选从 v1.2.4 带成 v2.0。
+        XCTAssertNil(VersionTag("v2.-1"))
+        XCTAssertNil(VersionTag("+1.2"))
+        XCTAssertNil(VersionTag("1.+2"))
+        XCTAssertEqual(VersionTag.suggestedNext(after: ["v1.2.3", "v2.-1"]), "v1.2.4")
+    }
+
+    func testNextBumpsLastSegmentWithoutCarry() {
+        XCTAssertEqual(VersionTag("v0.1.1")?.next().rawValue, "v0.1.2")
+        XCTAssertEqual(VersionTag("v0.1.9")?.next().rawValue, "v0.1.10")
+        XCTAssertEqual(VersionTag("v2")?.next().rawValue, "v3")
+        XCTAssertEqual(VersionTag("0.4")?.next().rawValue, "0.5")
+    }
+
+    func testSuggestionPicksHighestNumericallyAndKeepsStyle() {
+        XCTAssertEqual(
+            VersionTag.suggestedNext(after: ["v0.1.0", "v0.1.1", "wip", "v0.0.9"]),
+            "v0.1.2"
+        )
+        // 数值比较而不是字符串比较：1.10.1 比 1.9 新。
+        XCTAssertEqual(VersionTag.suggestedNext(after: ["1.9", "1.10.1"]), "1.10.2")
+        XCTAssertNil(VersionTag.suggestedNext(after: ["wip", "nightly"]))
+        XCTAssertNil(VersionTag.suggestedNext(after: []))
+    }
 }
