@@ -1275,6 +1275,18 @@ final class WorktreeModel: Identifiable {
 
     // MARK: - 标签
 
+    /// 当前分支的最新提交（HEAD）。工具栏的「标签」按钮用它 —— 不能用
+    /// 历史列表的第一条：列表可能正被筛选条件或别的分支过滤着。
+    func headCommit() async -> CommitSummary? {
+        (try? await git.log(in: path, limit: 1))?.first
+    }
+
+    /// 下一个版本号候选：现有标签里最高的版本号末段 +1（v0.1.1 → v0.1.2）。
+    /// 仓库里还没有版本号样子的标签时返回 nil，弹窗保持空输入。
+    func suggestedTagName() async -> String? {
+        await VersionTag.suggestedNext(after: git.tags(in: path))
+    }
+
     /// 标签名是否已被占用。建标签弹窗的即时校验用。
     func tagExists(_ name: String) async -> Bool {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)

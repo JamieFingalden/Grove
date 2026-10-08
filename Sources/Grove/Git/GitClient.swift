@@ -996,6 +996,16 @@ struct GitClient: Sendable {
         await succeeds(["show-ref", "--verify", "--quiet", "refs/tags/\(name)"], in: directory)
     }
 
+    /// 仓库里全部本地标签名。建标签弹窗用它推下一个版本号候选
+    /// （见 `VersionTag`），只需要名字，不需要它们指向哪。
+    func tags(in directory: URL) async -> [String] {
+        guard let output = try? await run(["tag", "--list"], in: directory) else { return [] }
+        return output
+            .split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
     /// 在某个提交上打标签。`message` 非空时建附注标签（annotated）—— 它是独立
     /// 对象，能带说明、能被签名，发布版本用的都该是它；空串建轻量标签，只是个指针。
     /// 附注标签的 message 不能为空（否则 git 会去起交互式编辑器），由调用方保证。

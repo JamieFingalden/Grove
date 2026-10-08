@@ -1434,7 +1434,7 @@ struct RebaseSheet: View {
 // MARK: - 创建标签
 
 /// 在指定提交上打标签，可选建完立刻推到远端。
-/// 从历史列表的右键菜单或提交详情头部的「创建标签」打开。
+/// 从工具栏的「标签」按钮、历史列表的右键菜单或提交详情头部的「创建标签」打开。
 struct NewTagSheet: View {
     @Environment(\.dismiss) private var dismiss
     let model: WorktreeModel
@@ -1463,6 +1463,13 @@ struct NewTagSheet: View {
             // 打标签十有八九是为了发布，默认推上去；没配远端的仓库就只能本地建。
             shouldPush = !remotes.isEmpty
             remote = model.defaultRemote ?? remotes.first
+            // 预填下一个版本号（上一个 v0.1.1 就是 v0.1.2）。异步取，
+            // 回来时用户已经开打了就不覆盖 —— 建议是送的，不该抢输入。
+            Task {
+                if name.isEmpty {
+                    name = await model.suggestedTagName() ?? ""
+                }
+            }
         }
     }
 
