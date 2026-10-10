@@ -23,12 +23,25 @@ enum AIReviewAutomation {
         }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    static func discussionContext(_ threads: [ReviewThread]) -> String {
-        let discussions = threads.filter { !$0.isSystemOnly }.sorted {
+    static func discussionContext(_ threads: [ReviewThread], files: [FileDiff] = []) -> String {
+        // 凭据或密钥文件上的行内讨论带着原始 diffHunk 和评论正文，整条跳过，
+        // 不让敏感内容绕过确定性排除从讨论侧混进提示词。托管平台把重命名
+        // 文件的讨论挂在某一侧路径上（GitLab 记新路径），只按名字匹配会漏掉
+        // 「.env 改名成 config.txt」这种讨论，所以要对照敏感文件 diff 的两侧。
+        let taintedPaths: Set<String> = Set(
+            files.filter(DiffBudget.isSecretFile)
+                .flatMap { [$0.oldPath, $0.newPath, $0.displayPath].compactMap { $0 } }
+        )
+        func isOnSecretPath(_ thread: ReviewThread) -> Bool {
+            guard let path = thread.filePath else { return false }
+            return DiffBudget.isSecret(path) || taintedPaths.contains(path)
+        }
+        let secretThreads = threads.filter { !$0.isSystemOnly && isOnSecretPath($0) }
+        let discussions = threads.filter { !$0.isSystemOnly && !isOnSecretPath($0) }.sorted {
             if $0.isResolved != $1.isResolved { return !$0.isResolved }
             return ($0.firstNote?.createdAt ?? .distantPast) > ($1.firstNote?.createdAt ?? .distantPast)
         }
-        guard !discussions.isEmpty else { return "（没有历史讨论。）" }
+        guard !discussions.isEmpty || !secretThreads.isEmpty else { return "（没有历史讨论。）" }
         let text = discussions.map { thread in
             let location = thread.filePath.map { "\($0):\(thread.line ?? 0)" } ?? "整体讨论"
             let notes = thread.notes.filter { !$0.isSystem }.map {
@@ -37,15 +50,32 @@ enum AIReviewAutomation {
             return "讨论 \(thread.id) · \(location) · \(thread.isResolved ? "已解决" : "未解决") · \(thread.isOutdated ? "旧版本定位" : "当前定位")\n代码片段：\n\(thread.diffHunk ?? "（无）")\n发言与回复：\n\(notes)"
         }.joined(separator: "\n\n")
         let limit = 64 * 1024
-        let bounded = CommitPromptBuilder.limited(text, byteLimit: limit)
-        return bounded + (text.utf8.count > limit ? "\n（历史讨论超出预算，已优先保留未解决讨论；省略部分不能视为已解决。）" : "")
+        var result = CommitPromptBuilder.limited(text, byteLimit: limit)
+            + (text.utf8.count > limit ? "\n（历史讨论超出预算，已优先保留未解决讨论；省略部分不能视为已解决。）" : "")
+        if !secretThreads.isEmpty {
+            result += "\n（另有 \(secretThreads.count) 条位于凭据或密钥文件上的讨论已省略，不能视为已解决或已核实。）"
+        }
+        return result
     }
+
+    /// 行号吸附容忍的最近距离。超过就不硬贴行，退化为无定位的整体评论。
+    static let maxLocationDrift = 20
 
     static func location(for assessment: PullRequestAIReview.Assessment, files: [FileDiff]) -> ReviewLocation? {
         guard let path = assessment.file, let number = assessment.line,
-              let file = files.first(where: { $0.newPath == path || $0.oldPath == path || $0.displayPath == path }),
-              let line = file.hunks.flatMap(\.lines).first(where: { $0.newNumber == number }) else { return nil }
-        return ReviewLocation(file: file, line: line, isOldSide: false)
+              let file = files.first(where: { $0.newPath == path || $0.oldPath == path || $0.displayPath == path })
+        else { return nil }
+        // 模型给的行号常有几行偏差。先找精确命中；找不到就吸附到同文件变更
+        // 范围内最近的新侧行（把评论定位当作独立环节打磨，而不是模型说什么
+        // 就贴什么），偏差太远就不硬贴。
+        let lines = file.hunks.flatMap(\.lines).filter { $0.newNumber != nil }
+        guard let nearest = lines.min(by: {
+            abs(($0.newNumber ?? 0) - number) < abs(($1.newNumber ?? 0) - number)
+        }) else { return nil }
+        guard nearest.newNumber == number || abs(nearest.newNumber! - number) <= maxLocationDrift else {
+            return nil
+        }
+        return ReviewLocation(file: file, line: nearest, isOldSide: false)
     }
 
     static func existingDiscussion(for assessment: PullRequestAIReview.Assessment, threads: [ReviewThread]) -> ReviewThread? {

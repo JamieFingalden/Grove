@@ -282,6 +282,40 @@ enum DiffBudget {
         "gemfile.lock", "flake.lock", "uv.lock", "mix.lock", "packages.lock.json"
     ]
 
+    /// 路径是不是疑似凭据或密钥（`.env`、私钥、证书、凭据文件）。
+    /// 这类文件的内容在任何预算下都不进提示词，只保留文件名 —— 借鉴
+    /// open-code-review 确定性文件选择里「凭据路径优先于一切规则」的排序。
+    /// 误伤的代价只是「这个文件不送审」，所以宁可偏保守。
+    static func isSecret(_ rawPath: String) -> Bool {
+        let path = rawPath.lowercased()
+        let segments = path.split(separator: "/").map(String.init)
+        let name = segments.last ?? path
+
+        if name == ".env" || name.hasPrefix(".env.") || name.hasSuffix(".env") {
+            return true
+        }
+        if ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"].contains(where: name.hasPrefix) {
+            return !name.hasSuffix(".pub")
+        }
+        return secretBasenames.contains(name) || secretExtensions.contains { name.hasSuffix($0) }
+    }
+
+    private static let secretBasenames: Set<String> = [
+        "credentials", "credentials.json", "client_secret.json",
+        "secrets", "secrets.json", "secrets.yaml", "secrets.yml", "secrets.toml",
+        ".npmrc", ".netrc", ".htpasswd"
+    ]
+
+    private static let secretExtensions: Set<String> = [
+        ".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".kdbx"
+    ]
+
+    /// FileDiff 级别的敏感判定：任一侧路径命中即算 —— 把 `.env` 重命名成
+    /// `config.txt` 再改几行，删除行里照样带着旧凭据内容，不能只看新路径。
+    static func isSecretFile(_ file: FileDiff) -> Bool {
+        [file.oldPath, file.newPath].compactMap { $0 }.contains { isSecret($0) }
+    }
+
     /// 按 `diff --git` 行切分成单文件段。每段都带自己的文件头。
     static func splitFileDiffs(_ diff: String) -> [String] {
         SectionSplitter.split(diff)

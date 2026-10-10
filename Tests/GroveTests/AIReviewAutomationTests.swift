@@ -327,6 +327,111 @@ final class AIReviewAutomationTests: XCTestCase {
         XCTAssertNil(AIReviewAutomation.existingDiscussion(for: different, threads: [thread]))
     }
 
+    func testDiscussionContextOmitsSecretFileThreads() {
+        let secretThread = ReviewThread(
+            id: "env-thread",
+            notes: [.init(id: "1", authorName: "作者", authorLogin: "author",
+                          body: "这是令牌轮换的说明", createdAt: nil, isSystem: false)],
+            filePath: ".env", line: 2, isResolved: false, isResolvable: true,
+            diffHunk: "-SECRET_TOKEN=abc123\n+SECRET_TOKEN=def456"
+        )
+        let normalThread = ReviewThread(
+            id: "code-thread",
+            notes: [.init(id: "2", authorName: "审查者", authorLogin: "reviewer",
+                          body: "旧接口删除影响调用方", createdAt: nil, isSystem: false)],
+            filePath: "a.swift", line: 1, isResolved: false, isResolvable: true,
+            diffHunk: "+new"
+        )
+        let context = AIReviewAutomation.discussionContext([secretThread, normalThread])
+
+        XCTAssertTrue(context.contains("旧接口删除影响调用方"))
+        XCTAssertTrue(context.contains("a.swift"))
+        XCTAssertFalse(context.contains("SECRET_TOKEN"))
+        XCTAssertFalse(context.contains("def456"))
+        XCTAssertFalse(context.contains("令牌轮换"))
+        XCTAssertTrue(context.contains("凭据或密钥文件"))
+        XCTAssertTrue(context.contains("不能视为已解决或已核实"))
+    }
+
+    func testDiscussionContextOmitsThreadsOnRenamedSecretFile() {
+        // 平台把重命名文件的讨论挂在新路径上（GitLab 记 position 新侧），
+        // 只按名字匹配会漏掉，必须对照 diff 的两侧路径。
+        let files = DiffParser.parse("""
+        diff --git a/.env b/config.txt
+        similarity index 80%
+        rename from .env
+        rename to config.txt
+        --- a/.env
+        +++ b/config.txt
+        @@ -1,1 +1,1 @@
+        -SECRET_TOKEN=abc123
+        +APP_NAME=grove
+        """)
+        let newSideThread = ReviewThread(
+            id: "new-side",
+            notes: [.init(id: "1", authorName: "作者", authorLogin: "author",
+                          body: "轮换说明", createdAt: nil, isSystem: false)],
+            filePath: "config.txt", line: 1, isResolved: false, isResolvable: true,
+            diffHunk: "-SECRET_TOKEN=abc123\n+APP_NAME=grove"
+        )
+        let oldSideThread = ReviewThread(
+            id: "old-side",
+            notes: [.init(id: "2", authorName: "审查者", authorLogin: "reviewer",
+                          body: "过期讨论", createdAt: nil, isSystem: false)],
+            filePath: ".env", line: 1, isResolved: true, isResolvable: true,
+            diffHunk: "-SECRET_TOKEN=abc123"
+        )
+        let normalThread = ReviewThread(
+            id: "code-thread",
+            notes: [.init(id: "3", authorName: "审查者", authorLogin: "reviewer",
+                          body: "旧接口删除影响调用方", createdAt: nil, isSystem: false)],
+            filePath: "a.swift", line: 1, isResolved: false, isResolvable: true,
+            diffHunk: "+new"
+        )
+        let context = AIReviewAutomation.discussionContext(
+            [newSideThread, oldSideThread, normalThread], files: files
+        )
+
+        XCTAssertTrue(context.contains("旧接口删除影响调用方"))
+        XCTAssertTrue(context.contains("a.swift"))
+        XCTAssertFalse(context.contains("SECRET_TOKEN"))
+        XCTAssertFalse(context.contains("APP_NAME=grove"))
+        XCTAssertFalse(context.contains("轮换说明"))
+        XCTAssertFalse(context.contains("过期讨论"))
+        XCTAssertTrue(context.contains("凭据或密钥文件"))
+    }
+
+    func testLocationSnapsToNearestChangedLineWithinTolerance() {
+        let additions = (1...10).map { "+line \($0)" }.joined(separator: "\n")
+        let files = DiffParser.parse("""
+        diff --git a/a.swift b/a.swift
+        --- a/a.swift
+        +++ b/a.swift
+        @@ -1,3 +10,12 @@
+         context one
+         context two
+        -removed
+        \(additions)
+        """)
+
+        func assessment(line: Int) -> PullRequestAIReview.Assessment {
+            .init(area: .compilation, status: .risk, summary: "调用方会编译失败",
+                  evidence: nil, file: "a.swift", line: line)
+        }
+        // 精确命中变更范围（新侧 10..21）内的行号。
+        XCTAssertEqual(AIReviewAutomation.location(for: assessment(line: 13), files: files)?.newLine, 13)
+        XCTAssertEqual(AIReviewAutomation.location(for: assessment(line: 21), files: files)?.newLine, 21)
+        // 上下文行（新侧 10、11）同样可作为锚点。
+        XCTAssertEqual(AIReviewAutomation.location(for: assessment(line: 10), files: files)?.newLine, 10)
+        // 小偏差吸附到最近的变更行。
+        XCTAssertEqual(AIReviewAutomation.location(for: assessment(line: 23), files: files)?.newLine, 21)
+        // 大偏差不硬贴，退化为无定位评论。
+        XCTAssertNil(AIReviewAutomation.location(for: assessment(line: 50), files: files))
+        // 文件不在 diff 里也拿不到定位。
+        XCTAssertNil(AIReviewAutomation.location(for: .init(area: .compilation, status: .risk,
+            summary: "另一处风险", evidence: nil, file: "b.swift", line: 1), files: files))
+    }
+
     private func waitForReview(_ model: AppModel) async throws {
         for _ in 0..<500 where model.activeAIReviewCount > 0 {
             try await Task.sleep(for: .milliseconds(10))
