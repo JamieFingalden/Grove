@@ -23,8 +23,12 @@ struct GroveApp: App {
                 model.selection = .repositoryHome(repository: RepoID(location: .local, root: root))
             }
         }
+        router.reviewPullRequest = { root, number in
+            model.startRequestedAIReview(for: root, pullRequestNumber: number)
+        }
         UNUserNotificationCenter.current().delegate = router
         notificationRouter = router
+        Task { await AIReviewNotifier.registerActions() }
     }
 
     var body: some Scene {

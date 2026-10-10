@@ -108,30 +108,62 @@ enum AIGenerationService: Sendable {
 }
 
 enum AIGenerationRunner {
-    static func run(
+    static func run<Output: Sendable>(
         prompt: String,
         schema: String,
         service: AIGenerationService,
         timeout: Double = ProcessRunner.networkTimeout,
-        in directory: URL
-    ) async throws -> Data {
+        in directory: URL,
+        operation: String = "AI生成",
+        context: AIUsageLog.Context = .init(),
+        log: AIUsageLog = .shared,
+        session: URLSession = .shared,
+        decode: @Sendable (Data) throws -> Output
+    ) async throws -> Output {
+        let provider: String
+        let thinking: String?
         switch service {
-        case .codex(let model, let reasoningEffort):
-            try await CodexRunner.run(
-                prompt: prompt,
-                schema: schema,
-                model: model,
-                reasoningEffort: reasoningEffort,
-                timeout: timeout,
-                in: directory
-            )
+        case .codex(_, let effort):
+            provider = "Codex登录"
+            thinking = effort?.rawValue
         case .api(let configuration):
-            try await OpenAICompatibleRunner.run(
-                prompt: prompt,
-                schema: schema,
-                configuration: configuration,
-                timeout: timeout
-            )
+            provider = "兼容API"
+            thinking = configuration.thinking.name
+        }
+        let id = await log.begin(.init(startedAt: Date(), operation: operation, context: context,
+                                      repository: directory.path, provider: provider,
+                                      model: service.displayName, thinking: thinking,
+                                      promptBytes: prompt.utf8.count, schemaBytes: schema.utf8.count))
+        do {
+            let data: Data
+            switch service {
+            case .codex(let model, let reasoningEffort):
+                data = try await CodexRunner.run(
+                    prompt: prompt,
+                    schema: schema,
+                    model: model,
+                    reasoningEffort: reasoningEffort,
+                    timeout: timeout,
+                    in: directory
+                )
+            case .api(let configuration):
+                data = try await OpenAICompatibleRunner.run(
+                    prompt: prompt,
+                    schema: schema,
+                    configuration: configuration,
+                    timeout: timeout,
+                    log: log,
+                    requestID: id,
+                    session: session
+                )
+            }
+            try Task.checkCancellation()
+            let result = try decode(data)
+            await log.finish(id)
+            return result
+        } catch {
+            await log.finish(id, error: error)
+            throw error
         }
     }
 }
@@ -169,7 +201,10 @@ enum OpenAICompatibleRunner {
         prompt: String,
         schema: String,
         configuration: AIAPIConfiguration,
-        timeout: Double
+        timeout: Double,
+        log: AIUsageLog = .shared,
+        requestID: UUID? = nil,
+        session: URLSession = .shared
     ) async throws -> Data {
         let request = try makeRequest(
             prompt: prompt,
@@ -177,11 +212,13 @@ enum OpenAICompatibleRunner {
             configuration: configuration,
             timeout: timeout
         )
+        if let requestID { await log.sent(requestID, bytes: request.httpBody?.count ?? 0) }
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw AIAPIError.invalidResponse
             }
+            if let requestID { await log.response(requestID, data: data, status: http.statusCode) }
             guard (200..<300).contains(http.statusCode) else {
                 throw AIAPIError.requestFailed(
                     statusCode: http.statusCode,
@@ -198,6 +235,8 @@ enum OpenAICompatibleRunner {
             throw CancellationError()
         } catch let error as AIAPIError {
             throw error
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch let error as URLError where error.code == .timedOut {
             throw AIAPIError.timeout(seconds: Int(timeout.rounded()))
         } catch {

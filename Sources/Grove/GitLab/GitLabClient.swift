@@ -272,15 +272,21 @@ struct GitLabClient: ForgeClient {
     // MARK: - 查询
 
     func pullRequests(in directory: URL, limit: Int, state: PullRequestListState) async throws -> [PullRequest] {
-        var query = "projects/:id/merge_requests?per_page=\(limit)&order_by=updated_at"
-        query += "&with_labels_details=true"
-        // GitLab 的「开放」拼 opened，其余状态两个平台的叫法一致。
+        guard limit > 0 else { return [] }
+        let pageSize = min(limit, 100)
+        var query = "projects/:id/merge_requests?per_page=\(pageSize)&order_by=updated_at&with_labels_details=true"
         query += state == .open ? "&state=opened" : "&state=\(state.rawValue)"
-
-        let data = try await api(query, in: directory)
-        let merges = try Self.decoder.decode([GitLabMergeRequest].self, from: data)
-        // 列表视图不逐个去拉审批和任务列表 —— 那会变成几十个串行请求。
-        return merges.map { $0.asPullRequest() }
+        var requests: [PullRequest] = []
+        var page = 1
+        while requests.count < limit {
+            try Task.checkCancellation()
+            let data = try await api(query + "&page=\(page)", in: directory)
+            let merges = try Self.decoder.decode([GitLabMergeRequest].self, from: data)
+            requests.append(contentsOf: merges.map { $0.asPullRequest() })
+            if merges.count < pageSize { break }
+            page += 1
+        }
+        return Array(requests.prefix(limit))
     }
 
     func pullRequest(number: Int, in directory: URL) async throws -> PullRequest {
@@ -398,12 +404,75 @@ struct GitLabClient: ForgeClient {
     }
 
     func reviewThreads(number: Int, in directory: URL) async throws -> [ReviewThread] {
-        let data = try await api(
-            "projects/:id/merge_requests/\(number)/discussions?per_page=100",
-            in: directory
-        )
-        let discussions = try Self.decoder.decode([GitLabDiscussion].self, from: data)
-        return discussions.compactMap { $0.asReviewThread() }
+        let head = try await reviewHead(number: number, in: directory)
+        var threads: [ReviewThread] = []
+        var page = 1
+        while true {
+            let data = try await api(
+                "projects/:id/merge_requests/\(number)/discussions?per_page=100&page=\(page)", in: directory
+            )
+            let discussions = try Self.decoder.decode([GitLabDiscussion].self, from: data)
+            threads.append(contentsOf: discussions.compactMap { $0.asReviewThread(currentHead: head) })
+            if discussions.count < 100 { break }
+            page += 1
+        }
+        return threads.sorted { ($0.firstNote?.createdAt ?? .distantPast) < ($1.firstNote?.createdAt ?? .distantPast) }
+    }
+
+    private struct ReviewRevision: Decodable {
+        var sha: String
+        var diffRefs: Refs?
+        struct Refs: Decodable { var baseSha: String; var headSha: String; var startSha: String }
+    }
+
+    private func reviewRevision(number: Int, in directory: URL) async throws -> ReviewRevision {
+        let data = try await api("projects/:id/merge_requests/\(number)", in: directory)
+        return try Self.decoder.decode(ReviewRevision.self, from: data)
+    }
+
+    func reviewHead(number: Int, in directory: URL) async throws -> String {
+        let revision = try await reviewRevision(number: number, in: directory)
+        guard !revision.sha.isEmpty else { throw ReviewDiscussionError.unavailable }
+        return revision.sha
+    }
+
+    func createDiscussion(number: Int, body: String, location: ReviewLocation?, expectedHead: String, in directory: URL) async throws {
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ReviewDiscussionError.emptyBody }
+        var fields = ["body": body]
+        if let location {
+            let revision = try await reviewRevision(number: number, in: directory)
+            guard !expectedHead.isEmpty, revision.sha == expectedHead,
+                  let refs = revision.diffRefs, refs.headSha == expectedHead else {
+                throw ReviewDiscussionError.changedHead
+            }
+            fields["position[position_type]"] = "text"
+            fields["position[base_sha]"] = refs.baseSha
+            fields["position[head_sha]"] = refs.headSha
+            fields["position[start_sha]"] = refs.startSha
+            fields["position[old_path]"] = location.oldPath
+            fields["position[new_path]"] = location.newPath
+            if let oldLine = location.oldLine { fields["position[old_line]"] = String(oldLine) }
+            if let newLine = location.newLine { fields["position[new_line]"] = String(newLine) }
+        }
+        _ = try await api("projects/:id/merge_requests/\(number)/discussions", in: directory, method: "POST", fields: fields)
+    }
+
+    func reply(number: Int, thread: ReviewThread, body: String, in directory: URL) async throws {
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ReviewDiscussionError.emptyBody }
+        guard let id = thread.id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else {
+            throw ReviewDiscussionError.unavailable
+        }
+        _ = try await api("projects/:id/merge_requests/\(number)/discussions/\(id)/notes", in: directory,
+                          method: "POST", fields: ["body": body])
+    }
+
+    func setResolved(number: Int, thread: ReviewThread, resolved: Bool, in directory: URL) async throws {
+        guard thread.isResolvable,
+              let id = thread.id.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else {
+            throw ReviewDiscussionError.unavailable
+        }
+        _ = try await api("projects/:id/merge_requests/\(number)/discussions/\(id)", in: directory,
+                          method: "PUT", fields: ["resolved": String(resolved)])
     }
 
     // MARK: - 操作

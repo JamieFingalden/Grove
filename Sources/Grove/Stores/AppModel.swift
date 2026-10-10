@@ -10,9 +10,12 @@ struct AIReviewGenerationRequest: Sendable {
     var reasoningEffort: AIReviewReasoningEffort
     var service: AIGenerationService
     var repositoryRoot: URL
+    var threads: [ReviewThread] = []
+    var logContext: AIUsageLog.Context = .init()
 }
 
 typealias AIReviewGenerator = @Sendable (AIReviewGenerationRequest) async throws -> PullRequestAIReview
+typealias AIReviewUpdateNotifier = @Sendable (URL, PullRequest, String) async -> Void
 
 /// 一次操作失败的记录，用来在界面上显示横幅。
 struct GroveFailure: Identifiable, Sendable {
@@ -121,6 +124,9 @@ final class AppModel {
     private struct AIReviewJob {
         var id: UUID
         var serviceName: String
+        var head: String?
+        var automatic: Bool
+        var requestURL: String
     }
 
     private(set) var git: GitClient?
@@ -157,7 +163,9 @@ final class AppModel {
     private(set) var isLoadingCodexModels = false
     private(set) var isLoadingAPIModels = false
     private(set) var aiReviewResultsRevision = 0
+    private(set) var automaticAIReviewSettingsRevision = 0
     private var aiReviewJobs: [AIReviewJobKey: AIReviewJob] = [:]
+    private var pendingAIReviewHeads: [AIReviewJobKey: String] = [:]
 
     /// 侧边栏选中项。仓库和工作树用同一个枚举，`NavigationSplitView` 的选择才好绑。
     /// 仓库用 `RepoID`（位置 + 路径）做键：不同服务器上可以有同形路径。
@@ -178,13 +186,21 @@ final class AppModel {
     @ObservationIgnored private let aiGenerationSettings: AIGenerationSettings
     @ObservationIgnored private let aiReviewCache: AIReviewCache
     @ObservationIgnored private let aiReviewGenerator: AIReviewGenerator
+    @ObservationIgnored private let aiReviewUpdateNotifier: AIReviewUpdateNotifier
     @ObservationIgnored private var aiReviewTasks: [AIReviewJobKey: Task<Void, Never>] = [:]
+
+    @ObservationIgnored private var automaticAIReviewTask: Task<Void, Never>?
+    @ObservationIgnored private var automaticAIReviewRetryAfter: [String: Date] = [:]
+    @ObservationIgnored private var cancelledAutomaticHeads: [String: String] = [:]
 
     init(
         aiGenerationSettings: AIGenerationSettings = AIGenerationSettings(),
         aiReviewCache: AIReviewCache = AIReviewCache(),
         remoteServerStore: RemoteServerStore = RemoteServerStore(),
         remoteProjectStore: RemoteProjectStore = RemoteProjectStore(),
+        aiReviewUpdateNotifier: @escaping AIReviewUpdateNotifier = { root, request, head in
+            await AIReviewNotifier.notify(repositoryRoot: root, request: request, head: head)
+        },
         aiReviewGenerator: @escaping AIReviewGenerator = { request in
             try await CodexPullRequestReviewGenerator.generate(
                 pullRequest: request.pullRequest,
@@ -194,11 +210,14 @@ final class AppModel {
                 model: request.model,
                 reasoningEffort: request.reasoningEffort,
                 service: request.service,
+                threads: request.threads,
+                context: request.logContext,
                 in: request.repositoryRoot
             )
         }
     ) {
         self.aiGenerationSettings = aiGenerationSettings
+        self.aiReviewUpdateNotifier = aiReviewUpdateNotifier
         self.aiReviewCache = aiReviewCache
         self.remoteServerStore = remoteServerStore
         self.remoteProjectStore = remoteProjectStore
@@ -218,6 +237,7 @@ final class AppModel {
     func setAIGenerationEnabled(_ enabled: Bool) {
         aiGenerationSettings.setEnabled(enabled)
         isAIGenerationEnabled = enabled
+        if !enabled { cancelAutomaticAIReviews() }
     }
 
     /// 提交信息与 PR 描述沿用提交模型；Codex 的 Review 则必须保留单独的模型和思考深度。
@@ -368,13 +388,17 @@ final class AppModel {
         _ review: PullRequestAIReview,
         diffFingerprint: String,
         for repository: URL,
-        pullRequestNumber: Int
+        pullRequestNumber: Int,
+        head: String? = nil,
+        requestURL: String? = nil
     ) {
         aiReviewCache.save(
             review,
             diffFingerprint: diffFingerprint,
             for: repository,
-            pullRequestNumber: pullRequestNumber
+            pullRequestNumber: pullRequestNumber,
+            head: head,
+            requestURL: requestURL
         )
         aiReviewResultsRevision &+= 1
     }
@@ -401,39 +425,225 @@ final class AppModel {
 
     var activeAIReviewCount: Int { aiReviewJobs.count }
 
-    func startAIReview(_ request: AIReviewGenerationRequest) {
-        let key = AIReviewJobKey(
-            repository: request.repositoryRoot,
-            pullRequestNumber: request.pullRequest.number
-        )
-        cancelAIReview(for: request.repositoryRoot, pullRequestNumber: request.pullRequest.number)
+    func hasPendingAIReview(for repository: URL, pullRequestNumber: Int) -> Bool {
+        pendingAIReviewHeads[AIReviewJobKey(repository: repository, pullRequestNumber: pullRequestNumber)] != nil
+    }
 
+    /// 用户点击通知里的按钮才进入这条路径，重新读取最新提交与历史讨论。
+    func startRequestedAIReview(for root: URL, pullRequestNumber: Int) {
+        guard canUseAIGeneration, !isAIReviewing(for: root, pullRequestNumber: pullRequestNumber), let service = aiReviewService,
+              let repository = repositories.first(where: { $0.root == root }),
+              let request = repository.pullRequests.first(where: { $0.number == pullRequestNumber && $0.isActive }) else { return }
+        startAIReview(.init(pullRequest: request, files: [], customInstructions: aiReviewInstructions(for: root),
+                            selectedAreas: aiReviewAreas(for: root), model: aiReviewModel,
+                            reasoningEffort: aiReviewReasoningEffort, service: service, repositoryRoot: root))
+    }
+
+    func automaticAIReviewEnabled(for repository: URL) -> Bool {
+        _ = automaticAIReviewSettingsRevision
+        return aiGenerationSettings.automaticReviewEnabled(for: repository)
+    }
+
+    func setAutomaticAIReviewEnabled(_ enabled: Bool, for repository: URL) {
+        aiGenerationSettings.setAutomaticReviewEnabled(enabled, for: repository)
+        automaticAIReviewSettingsRevision &+= 1
+        if !enabled { cancelAutomaticAIReviews(for: repository) }
+    }
+
+    private func cancelAutomaticAIReviews(for repository: URL? = nil) {
+        for (key, job) in aiReviewJobs where job.automatic {
+            if let repository, key.repositoryPath != repository.standardizedFileURL.path { continue }
+            aiReviewTasks.removeValue(forKey: key)?.cancel()
+            aiReviewJobs.removeValue(forKey: key)
+        }
+    }
+
+    private func startAutomaticAIReviewMonitoring() {
+        guard automaticAIReviewTask == nil else { return }
+        automaticAIReviewTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                await self?.pollAutomaticAIReviews()
+                do { try await Task.sleep(for: .seconds(60)) } catch { return }
+            }
+        }
+    }
+
+    func pollAutomaticAIReviews() async {
+        guard canUseAIGeneration, let service = aiReviewService else { return }
+        for repository in repositories where !repository.isRemote && automaticAIReviewEnabled(for: repository.root) {
+            guard !Task.isCancelled else { return }
+            guard let forge = repository.forge else { continue }
+            let expectedOrigin = repository.origin
+            let retryKey = repository.root.path
+            guard (automaticAIReviewRetryAfter[retryKey] ?? .distantPast) <= Date() else { continue }
+            do {
+                // ponytail: 每轮最多检查 1000 个开放请求；超大仓库可改为平台事件订阅。
+                let requests = try await forge.pullRequests(in: repository.root, limit: 1000, state: .open)
+                guard repository.origin == expectedOrigin, repositories.contains(where: { $0 === repository }) else { continue }
+                repository.updateOpenPullRequests(requests, fromOrigin: expectedOrigin)
+                let activeNumbers = Set(requests.filter(\.isActive).map(\.number))
+                pendingAIReviewHeads = pendingAIReviewHeads.filter {
+                    $0.key.repositoryPath != repository.root.standardizedFileURL.path || activeNumbers.contains($0.key.pullRequestNumber)
+                }
+                for (key, job) in aiReviewJobs where job.automatic && key.repositoryPath == repository.root.standardizedFileURL.path {
+                    if !activeNumbers.contains(key.pullRequestNumber) {
+                        aiReviewTasks.removeValue(forKey: key)?.cancel()
+                        aiReviewJobs.removeValue(forKey: key)
+                    }
+                }
+                for request in requests where request.isActive {
+                    guard !Task.isCancelled, canUseAIGeneration, automaticAIReviewEnabled(for: repository.root),
+                          repository.origin == expectedOrigin else { break }
+                    let head = try await forge.reviewHead(number: request.number, in: repository.root)
+                    guard !Task.isCancelled, repository.origin == expectedOrigin else { break }
+                    guard !head.isEmpty else { continue }
+                    let key = AIReviewJobKey(repository: repository.root, pullRequestNumber: request.number)
+                    if let job = aiReviewJobs[key], !job.automatic || job.head == head { continue }
+                    if let job = aiReviewJobs[key], job.automatic {
+                        cancelAIReview(for: repository.root, pullRequestNumber: request.number, suppressAutomatic: false)
+                    }
+                    let reviewedHead = aiGenerationSettings.automaticReviewHead(for: request.url)
+                    if reviewedHead == head {
+                        pendingAIReviewHeads.removeValue(forKey: key)
+                        continue
+                    }
+                    let initialHead = aiGenerationSettings.initialReviewHead(for: request.url)
+                    let cached = cachedAIReview(for: repository.root, pullRequestNumber: request.number)
+                    let previous = cached.flatMap { $0.requestURL == nil || $0.requestURL == request.url ? $0 : nil }
+                    let hasNewCommit = reviewedHead != nil
+                        || (initialHead.map { $0 != head } ?? (previous != nil && previous?.head != head))
+                    if hasNewCommit {
+                        pendingAIReviewHeads[key] = head
+                        if !aiGenerationSettings.hasNotifiedReviewHead(head, for: request.url) {
+                            aiGenerationSettings.setNotifiedReviewHead(head, for: request.url)
+                            await aiReviewUpdateNotifier(repository.root, request, head)
+                        }
+                        continue
+                    }
+                    guard cancelledAutomaticHeads[request.url] != head,
+                          (automaticAIReviewRetryAfter["\(request.url):\(head)"] ?? .distantPast) <= Date(),
+                          activeAIReviewCount < 2 else { continue }
+                    if initialHead == nil { aiGenerationSettings.setInitialReviewHead(head, for: request.url) }
+                    startAIReview(.init(
+                        pullRequest: request, files: [],
+                        customInstructions: aiReviewInstructions(for: repository.root),
+                        selectedAreas: aiReviewAreas(for: repository.root), model: aiReviewModel,
+                        reasoningEffort: aiReviewReasoningEffort, service: service,
+                        repositoryRoot: repository.root
+                    ), automatic: true, expectedHead: head)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                automaticAIReviewRetryAfter[retryKey] = Date().addingTimeInterval(300)
+                report(title: "自动 AI Review 检查失败", error: error)
+            }
+        }
+    }
+
+    func startAIReview(_ request: AIReviewGenerationRequest, automatic: Bool = false, expectedHead: String? = nil) {
+        let key = AIReviewJobKey(repository: request.repositoryRoot, pullRequestNumber: request.pullRequest.number)
+        cancelAIReview(for: request.repositoryRoot, pullRequestNumber: request.pullRequest.number, suppressAutomatic: false)
+        pendingAIReviewHeads.removeValue(forKey: key)
+        let repository = repositories.first { $0.root == request.repositoryRoot }
+        let forge = repository?.forge
+        let expectedOrigin = repository?.origin
         let jobID = UUID()
-        aiReviewJobs[key] = AIReviewJob(id: jobID, serviceName: request.service.displayName)
+        aiReviewJobs[key] = AIReviewJob(id: jobID, serviceName: request.service.displayName, head: expectedHead, automatic: automatic, requestURL: request.pullRequest.url)
         aiReviewTasks[key] = Task { @MainActor [weak self] in
             guard let self else { return }
-            do {
-                let result = try await aiReviewGenerator(request)
+            var input = request
+            var head = expectedHead
+            @MainActor func validate() async throws {
                 try Task.checkCancellation()
-                guard aiReviewJobs[key]?.id == jobID else { return }
-                saveAIReview(
-                    result,
-                    diffFingerprint: AIReviewCache.diffFingerprint(request.files),
-                    for: request.repositoryRoot,
-                    pullRequestNumber: request.pullRequest.number
-                )
+                guard aiReviewJobs[key]?.id == jobID else { throw CancellationError() }
+                if automatic {
+                    guard canUseAIGeneration, automaticAIReviewEnabled(for: input.repositoryRoot) else { throw CancellationError() }
+                }
+                if let repository, let forge {
+                    guard repository.origin == expectedOrigin,
+                          repositories.contains(where: { $0 === repository }) else { throw CancellationError() }
+                    let fresh = try await forge.pullRequest(number: input.pullRequest.number, in: input.repositoryRoot)
+                    guard fresh.isActive, fresh.url == request.pullRequest.url else { throw CancellationError() }
+                    guard try await forge.reviewHead(number: fresh.number, in: input.repositoryRoot) == head else {
+                        throw ReviewDiscussionError.changedHead
+                    }
+                    try Task.checkCancellation()
+                    guard repository.origin == expectedOrigin, aiReviewJobs[key]?.id == jobID else { throw CancellationError() }
+                }
+            }
+            do {
+                if let forge {
+                    head = try await forge.reviewHead(number: input.pullRequest.number, in: input.repositoryRoot)
+                    if let expectedHead, head != expectedHead { throw ReviewDiscussionError.changedHead }
+                    try Task.checkCancellation()
+                    guard aiReviewJobs[key]?.id == jobID else { throw CancellationError() }
+                    aiReviewJobs[key]?.head = head
+                    if let head, aiGenerationSettings.initialReviewHead(for: input.pullRequest.url) == nil {
+                        aiGenerationSettings.setInitialReviewHead(head, for: input.pullRequest.url)
+                    }
+                    input.pullRequest = try await forge.pullRequest(number: input.pullRequest.number, in: input.repositoryRoot)
+                    input.files = try await forge.pullRequestDiff(number: input.pullRequest.number, in: input.repositoryRoot)
+                    input.threads = try await forge.reviewThreads(number: input.pullRequest.number, in: input.repositoryRoot)
+                } else if automatic { throw ReviewDiscussionError.unavailable }
+                try await validate()
+                if automatic, let head, AIReviewAutomation.contains(AIReviewAutomation.marker(head: head, area: "complete"), in: input.threads) {
+                    aiGenerationSettings.setAutomaticReviewHead(head, for: input.pullRequest.url)
+                    finishAIReview(key: key, jobID: jobID)
+                    return
+                }
+                let cached = cachedAIReview(for: input.repositoryRoot, pullRequestNumber: input.pullRequest.number)
+                let fingerprint = AIReviewCache.diffFingerprint(input.files)
+                let result: PullRequestAIReview
+                if automatic, let cached, cached.head == head, cached.requestURL == input.pullRequest.url, cached.diffFingerprint == fingerprint {
+                    result = cached.review
+                } else {
+                    input.logContext = .init(trigger: automatic ? "自动" : "手动",
+                                             pullRequestNumber: input.pullRequest.number, head: head)
+                    result = try await aiReviewGenerator(input)
+                }
+                try await validate()
+                saveAIReview(result, diffFingerprint: fingerprint, for: input.repositoryRoot,
+                             pullRequestNumber: input.pullRequest.number, head: head, requestURL: input.pullRequest.url)
+                if let forge, let head {
+                    for assessment in result.discussionFindings {
+                        let marker = AIReviewAutomation.marker(head: head, area: AIReviewAutomation.issueKey(assessment))
+                        if AIReviewAutomation.contains(marker, in: input.threads) { continue }
+                        try await validate()
+                        let body = AIReviewAutomation.body(for: assessment, head: head)
+                        if let thread = AIReviewAutomation.existingDiscussion(for: assessment, threads: input.threads) {
+                            try await forge.reply(number: input.pullRequest.number, thread: thread, body: body, in: input.repositoryRoot)
+                        } else {
+                            try await forge.createDiscussion(number: input.pullRequest.number, body: body,
+                                location: AIReviewAutomation.location(for: assessment, files: input.files),
+                                expectedHead: head, in: input.repositoryRoot)
+                        }
+                    }
+                    try await validate()
+                    try Task.checkCancellation()
+                    aiGenerationSettings.setAutomaticReviewHead(head, for: input.pullRequest.url)
+                    pendingAIReviewHeads.removeValue(forKey: key)
+                    aiReviewResultsRevision &+= 1
+                }
             } catch is CancellationError {
-                // 用户取消或请求已经合并时静默结束，不生成失败提醒。
+                // 用户取消、请求结束或设置关闭时静默停止。
+            } catch ReviewDiscussionError.changedHead {
+                // 下一轮仅提醒新提交，旧版本的结果不能继续发布。
             } catch {
-                guard aiReviewJobs[key]?.id == jobID else { return }
-                report(title: "AI Review 失败", error: error)
+                if aiReviewJobs[key]?.id == jobID {
+                    if automatic { automaticAIReviewRetryAfter["\(input.pullRequest.url):\(head ?? "")"] = Date().addingTimeInterval(300) }
+                    report(title: automatic ? "自动 AI Review 失败" : "AI Review 失败", error: error)
+                }
             }
             finishAIReview(key: key, jobID: jobID)
         }
     }
 
-    func cancelAIReview(for repository: URL, pullRequestNumber: Int) {
+    func cancelAIReview(for repository: URL, pullRequestNumber: Int, suppressAutomatic: Bool = true) {
         let key = AIReviewJobKey(repository: repository, pullRequestNumber: pullRequestNumber)
+        if suppressAutomatic, let job = aiReviewJobs[key], job.automatic, let head = job.head {
+            cancelledAutomaticHeads[job.requestURL] = head
+        }
         aiReviewTasks.removeValue(forKey: key)?.cancel()
         aiReviewJobs.removeValue(forKey: key)
     }
@@ -453,6 +663,7 @@ final class AppModel {
     func bootstrap() async {
         guard !didBootstrap else { return }
         didBootstrap = true
+        Task { await AIUsageLog.shared.startMaintenance() }
 
         do {
             git = try await GitClient.resolve()
@@ -486,6 +697,8 @@ final class AppModel {
         if case .repositoryHome(let id) = selection, let repository = repository(matching: id) {
             await repository.refreshPullRequests()
         }
+
+        startAutomaticAIReviewMonitoring()
 
         // CI 状态点（工作树行的绿红点）也在这个时候首次拉取；
         // 之后靠抓取/刷新和 CI 分栏的轮询续命。

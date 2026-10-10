@@ -45,19 +45,21 @@ struct CodexCommitGenerator {
         service: AIGenerationService? = nil
     ) async throws -> GeneratedMessage {
         let input = try await prepare(in: directory, git: git)
-        let data = try await AIGenerationRunner.run(
+        return try await AIGenerationRunner.run(
             prompt: input.prompt,
             schema: outputSchema,
             service: service ?? .codex(model: model, reasoningEffort: nil),
-            in: directory
-        )
-        guard let output = try? JSONDecoder().decode(StructuredOutput.self, from: data) else {
-            throw CodexGenerationError.invalidOutput
+            in: directory,
+            operation: "提交信息"
+        ) { data in
+            guard let output = try? JSONDecoder().decode(StructuredOutput.self, from: data) else {
+                throw CodexGenerationError.invalidOutput
+            }
+            let subject = CommitMessageCleaner.clean(output.subject)
+            let body = CommitMessageCleaner.clean(output.body ?? "")
+            guard !subject.isEmpty else { throw CodexGenerationError.emptyOutput }
+            let message = body.isEmpty ? subject : "\(subject)\n\n\(body)"
+            return GeneratedMessage(text: message, wasTruncated: input.wasTruncated, note: input.note)
         }
-        let subject = CommitMessageCleaner.clean(output.subject)
-        let body = CommitMessageCleaner.clean(output.body ?? "")
-        guard !subject.isEmpty else { throw CodexGenerationError.emptyOutput }
-        let message = body.isEmpty ? subject : "\(subject)\n\n\(body)"
-        return GeneratedMessage(text: message, wasTruncated: input.wasTruncated, note: input.note)
     }
 }

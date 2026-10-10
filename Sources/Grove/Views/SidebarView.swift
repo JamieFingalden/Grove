@@ -269,6 +269,7 @@ private struct WorktreeRow: View {
                 .font(.system(size: 13))
                 .foregroundStyle(isSelected ? Color.accentColor : .secondary)
                 .frame(width: 16)
+                .help(tooltip)
 
             // 单行。显示分支名 —— 这是工作树的身份；目录名与完整路径进悬停提示。
             // 以前目录名+分支名两行叠着，目录名还常与分支名重复，行行都像双倍行距的墙。
@@ -276,6 +277,7 @@ private struct WorktreeRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .foregroundStyle(isSelected ? Color.accentColor : .primary)
+                .help(tooltip)
 
             // 同名分支在哪台机器上，靠这个胶囊区分。
             if let marker {
@@ -286,6 +288,7 @@ private struct WorktreeRow: View {
                 Image(systemName: "lock.fill")
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
+                    .help("已锁定的检出：git 清理时会被跳过")
             }
             if worktree.isPrunable {
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -311,7 +314,6 @@ private struct WorktreeRow: View {
         // 让整条侧栏行（包括中间空白）都能点击。
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .help(tooltip)
     }
 
     /// 行上显示的名字：分支优先（目录名常常就是分支名，两行叠着反而重复）。
@@ -321,6 +323,8 @@ private struct WorktreeRow: View {
     }
 
     /// 悬停提示把完整信息补齐：检出状态 + 目录名 + 完整路径。
+    /// 只挂在图标和名称上，不能挂整行 —— 挂整行会盖住右侧徽章自己的提示，
+    /// 「N 个文件有改动」这类含义就永远显示不出来。
     private var tooltip: String {
         var lines = ["检出：\(worktree.checkoutLabel)"]
         if worktree.name != displayLabel {
@@ -616,6 +620,7 @@ struct LocationBadge: View {
         .padding(.vertical, 1.5)
         .background(.quaternary.opacity(0.7), in: Capsule())
         .fixedSize()
+        .help("这份工作树检出在：\(marker.text)")
     }
 }
 

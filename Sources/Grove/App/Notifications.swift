@@ -51,11 +51,45 @@ enum PipelineNotifier {
     }
 }
 
-/// 通知点击的路由：把对应仓库的项目主页打开。
+/// 新提交只提醒用户；确认后才重新调用模型。
+enum AIReviewNotifier {
+    static let category = "grove-ai-review-update"
+    static let reviewAction = "grove-ai-review-again"
+
+    static func registerActions() async {
+        let center = UNUserNotificationCenter.current()
+        var categories = await center.notificationCategories()
+        let review = UNNotificationAction(identifier: reviewAction, title: "重新审查", options: [.foreground])
+        let later = UNNotificationAction(identifier: "grove-ai-review-later", title: "稍后", options: [])
+        categories.insert(UNNotificationCategory(identifier: category, actions: [review, later],
+                                                   intentIdentifiers: [], options: []))
+        center.setNotificationCategories(categories)
+    }
+
+    static func notify(repositoryRoot: URL, request: PullRequest, head: String) async {
+        await registerActions()
+        await PipelineNotifier.requestAuthorization()
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "\(request.displayNumber) 有新提交"
+        content.body = "\(repositoryRoot.lastPathComponent) · \(request.title)\n尚未重新审查，由你决定是否继续。"
+        content.sound = .default
+        content.categoryIdentifier = category
+        content.userInfo = ["repositoryRoot": repositoryRoot.path, "pullRequestNumber": request.number]
+        content.threadIdentifier = "ai-review-\(request.url)"
+        _ = try? await center.add(UNNotificationRequest(identifier: "ai-review-\(request.url)-\(head)",
+                                                       content: content, trigger: nil))
+    }
+}
+
+/// 通知点击的路由：打开项目，或者执行用户明确点击的重新审查。
 /// delegate 必须是个长命的 NSObject，挂在 GroveApp 上。
 @MainActor
 final class PipelineNotificationRouter: NSObject, @preconcurrency UNUserNotificationCenterDelegate {
     var openRepository: ((URL) -> Void)?
+    var reviewPullRequest: ((URL, Int) -> Void)?
 
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
@@ -72,7 +106,14 @@ final class PipelineNotificationRouter: NSObject, @preconcurrency UNUserNotifica
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         if let path = response.notification.request.content.userInfo["repositoryRoot"] as? String {
-            openRepository?(URL(fileURLWithPath: path))
+            let root = URL(fileURLWithPath: path)
+            if response.actionIdentifier == AIReviewNotifier.reviewAction,
+               let number = response.notification.request.content.userInfo["pullRequestNumber"] as? Int {
+                openRepository?(root)
+                reviewPullRequest?(root, number)
+            } else if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+                openRepository?(root)
+            }
         }
         completionHandler()
     }

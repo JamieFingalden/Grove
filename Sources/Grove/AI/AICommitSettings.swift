@@ -130,6 +130,48 @@ struct AIGenerationSettings {
         defaults.set(enabled, forKey: enabledKey)
     }
 
+    func automaticReviewEnabled(for repository: URL) -> Bool {
+        let values = defaults.dictionary(forKey: "grove.aiReview.automaticByRepository.v1") as? [String: Bool] ?? [:]
+        return values[repository.standardizedFileURL.path] ?? true
+    }
+
+    func setAutomaticReviewEnabled(_ enabled: Bool, for repository: URL) {
+        var values = defaults.dictionary(forKey: "grove.aiReview.automaticByRepository.v1") as? [String: Bool] ?? [:]
+        values[repository.standardizedFileURL.path] = enabled
+        defaults.set(values, forKey: "grove.aiReview.automaticByRepository.v1")
+    }
+
+    func automaticReviewHead(for requestURL: String) -> String? {
+        (defaults.dictionary(forKey: "grove.aiReview.publishedHeads.v1") as? [String: String])?[requestURL]
+    }
+
+    func setAutomaticReviewHead(_ head: String, for requestURL: String) {
+        var values = defaults.dictionary(forKey: "grove.aiReview.publishedHeads.v1") as? [String: String] ?? [:]
+        values[requestURL] = head
+        defaults.set(values, forKey: "grove.aiReview.publishedHeads.v1")
+    }
+
+    func initialReviewHead(for requestURL: String) -> String? {
+        (defaults.dictionary(forKey: "grove.aiReview.initialHeads.v1") as? [String: String])?[requestURL]
+    }
+
+    func setInitialReviewHead(_ head: String, for requestURL: String) {
+        var values = defaults.dictionary(forKey: "grove.aiReview.initialHeads.v1") as? [String: String] ?? [:]
+        values[requestURL] = head
+        defaults.set(values, forKey: "grove.aiReview.initialHeads.v1")
+    }
+
+    func hasNotifiedReviewHead(_ head: String, for requestURL: String) -> Bool {
+        let values = defaults.dictionary(forKey: "grove.aiReview.notifiedHeads.v1") as? [String: [String]] ?? [:]
+        return values[requestURL]?.contains(head) == true
+    }
+
+    func setNotifiedReviewHead(_ head: String, for requestURL: String) {
+        var values = defaults.dictionary(forKey: "grove.aiReview.notifiedHeads.v1") as? [String: [String]] ?? [:]
+        if values[requestURL]?.contains(head) != true { values[requestURL, default: []].append(head) }
+        defaults.set(values, forKey: "grove.aiReview.notifiedHeads.v1")
+    }
+
     var provider: AIGenerationProvider {
         defaults.string(forKey: providerKey)
             .flatMap(AIGenerationProvider.init(rawValue:)) ?? .codex

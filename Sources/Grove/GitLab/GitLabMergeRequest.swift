@@ -143,6 +143,7 @@ struct GitLabDiscussion: Decodable, Sendable {
         var position: Position?
 
         struct Position: Decodable, Sendable {
+            var headSha: String?
             var newPath: String?
             var oldPath: String?
             var newLine: Int?
@@ -291,7 +292,7 @@ extension GitLabMergeRequest {
 }
 
 extension GitLabDiscussion {
-    func asReviewThread() -> ReviewThread? {
+    func asReviewThread(currentHead: String? = nil) -> ReviewThread? {
         guard let notes, !notes.isEmpty else { return nil }
         let first = notes[0]
         return ReviewThread(
@@ -309,7 +310,9 @@ extension GitLabDiscussion {
             filePath: first.position?.newPath ?? first.position?.oldPath,
             line: first.position?.newLine ?? first.position?.oldLine,
             isResolved: first.resolved ?? false,
-            isResolvable: first.resolvable ?? false
+            isResolvable: first.resolvable ?? false,
+            isOutdated: currentHead.map { head in first.position?.headSha.map { $0 != head } ?? false } ?? false,
+            isOldSide: first.position?.newLine == nil && first.position?.oldLine != nil
         )
     }
 }

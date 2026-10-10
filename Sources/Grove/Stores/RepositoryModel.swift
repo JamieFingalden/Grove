@@ -277,13 +277,20 @@ final class RepositoryModel: Identifiable {
             }
             guard !Task.isCancelled, pullRequestRefreshID == requestID,
                   origin == requestedOrigin, listState == requestedState else { return }
-            pullRequests = loadedOpen
             listPullRequests = loadedList
-            applyDetailState()
+            updateOpenPullRequests(loadedOpen, fromOrigin: requestedOrigin)
         } catch {
             guard pullRequestRefreshID == requestID, origin == requestedOrigin else { return }
             app?.report(title: "读取 PR 列表失败", error: error)
         }
+    }
+
+    /// 后台监测与手动刷新共用列表状态，更新时仍保留详情接口的审批结果。
+    func updateOpenPullRequests(_ requests: [PullRequest], fromOrigin expectedOrigin: GitRemote?) {
+        guard origin == expectedOrigin else { return }
+        pullRequests = requests
+        if listState == .open { listPullRequests = requests }
+        applyDetailState()
     }
 
     /// 切换列表的状态筛选并重新加载。

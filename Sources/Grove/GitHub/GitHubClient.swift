@@ -387,15 +387,108 @@ struct GitHubClient: ForgeClient {
         async let general = fetchComments(
             "repos/{owner}/{repo}/issues/\(number)/comments?per_page=100", in: directory
         )
-        let threads = await (inline + general)
+        async let states = reviewThreadStates(number: number, in: directory)
+        var threads = try await (inline + general)
+        let metadata = try await states
+        for index in threads.indices where threads[index].isInline {
+            guard let root = threads[index].firstNote?.id, let state = metadata[root] else { continue }
+            threads[index].id = state.id
+            threads[index].isResolved = state.isResolved
+            threads[index].isResolvable = true
+            threads[index].canResolve = state.isResolved ? state.viewerCanUnresolve : state.viewerCanResolve
+            threads[index].isOutdated = state.isOutdated
+        }
         return threads.sorted { ($0.firstNote?.createdAt ?? .distantPast) < ($1.firstNote?.createdAt ?? .distantPast) }
     }
 
-    private func fetchComments(_ path: String, in directory: URL) async -> [ReviewThread] {
-        guard let result = try? await gh(["api", path], in: directory), result.isSuccess,
-              let comments = try? Self.decoder.decode([GitHubComment].self, from: result.standardOutput)
-        else { return [] }
-        return Self.threads(from: comments, source: path)
+    private func fetchComments(_ path: String, in directory: URL) async throws -> [ReviewThread] {
+        let result = try await ghChecked(["api", path, "--paginate", "--slurp"], in: directory)
+        let pages = try Self.decoder.decode([[GitHubComment]].self, from: result.standardOutput)
+        return Self.threads(from: pages.flatMap { $0 }, source: path)
+    }
+
+    private func reviewThreadStates(number: Int, in directory: URL) async throws -> [String: GitHubReviewThreadState] {
+        guard let slug = await repositorySlug(in: directory) else { throw GroveError.noGitHubRemote }
+        let parts = slug.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { throw GroveError.noGitHubRemote }
+        let query = """
+        query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+          repository(owner: $owner, name: $repo) {
+            pullRequest(number: $number) {
+              reviewThreads(first: 100, after: $cursor) {
+                nodes { id isResolved isOutdated viewerCanResolve viewerCanUnresolve comments(first: 1) { nodes { databaseId } } }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }
+        """
+        var states: [String: GitHubReviewThreadState] = [:]
+        var cursor: String?
+        repeat {
+            var args = ["api", "graphql", "-f", "query=\(query)", "-f", "owner=\(parts[0])",
+                        "-f", "repo=\(parts[1])", "-F", "number=\(number)"]
+            if let cursor { args.append(contentsOf: ["-f", "cursor=\(cursor)"]) }
+            let result = try await ghChecked(args, in: directory)
+            let response = try Self.decoder.decode(GitHubReviewThreadPage.self, from: result.standardOutput)
+            guard response.errors?.isEmpty != false,
+                  let page = response.data?.repository?.pullRequest?.reviewThreads else {
+                throw ReviewDiscussionError.unavailable
+            }
+            for state in page.nodes {
+                if let root = state.comments.nodes.first?.databaseId { states[String(root)] = state }
+            }
+            if page.pageInfo.hasNextPage {
+                guard let next = page.pageInfo.endCursor, next != cursor else { throw ReviewDiscussionError.unavailable }
+                cursor = next
+            } else { cursor = nil }
+        } while cursor != nil
+        return states
+    }
+
+    func reviewHead(number: Int, in directory: URL) async throws -> String {
+        let result = try await ghChecked(["pr", "view", String(number), "--json", "headRefOid", "--jq", ".headRefOid"], in: directory)
+        guard !result.trimmedStdout.isEmpty else { throw ReviewDiscussionError.unavailable }
+        return result.trimmedStdout
+    }
+
+    func createDiscussion(number: Int, body: String, location: ReviewLocation?, expectedHead: String, in directory: URL) async throws {
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ReviewDiscussionError.emptyBody }
+        guard let location else {
+            try await comment(number: number, body: body, in: directory)
+            return
+        }
+        guard !expectedHead.isEmpty, try await reviewHead(number: number, in: directory) == expectedHead else {
+            throw ReviewDiscussionError.changedHead
+        }
+        try await ghChecked([
+            "api", "repos/{owner}/{repo}/pulls/\(number)/comments", "--method", "POST",
+            "-f", "body=\(body)", "-f", "commit_id=\(expectedHead)", "-f", "path=\(location.newPath)",
+            "-F", "line=\(location.line)", "-f", "side=\(location.isOldSide ? "LEFT" : "RIGHT")"
+        ], in: directory)
+    }
+
+    func reply(number: Int, thread: ReviewThread, body: String, in directory: URL) async throws {
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ReviewDiscussionError.emptyBody }
+        guard let root = thread.firstNote else { throw ReviewDiscussionError.unavailable }
+        if thread.isInline {
+            try await ghChecked(["api", "repos/{owner}/{repo}/pulls/\(number)/comments/\(root.id)/replies",
+                                 "--method", "POST", "-f", "body=\(body)"], in: directory)
+        } else {
+            // GitHub 整体评论没有回复线程接口，用引用保留讨论关系。
+            let quote = root.body.components(separatedBy: "\n").map { "> \($0)" }.joined(separator: "\n")
+            let mention = root.authorLogin.isEmpty ? "" : "@\(root.authorLogin)\n\n"
+            try await comment(number: number, body: "\(mention)\(quote)\n\n\(body)", in: directory)
+        }
+    }
+
+    func setResolved(number: Int, thread: ReviewThread, resolved: Bool, in directory: URL) async throws {
+        guard thread.isResolvable && thread.canResolve else { throw ReviewDiscussionError.unavailable }
+        let mutation = resolved ? "resolveReviewThread" : "unresolveReviewThread"
+        let query = "mutation($id: ID!) { \(mutation)(input: {threadId: $id}) { thread { id } } }"
+        let result = try await ghChecked(["api", "graphql", "-f", "query=\(query)", "-f", "id=\(thread.id)"], in: directory)
+        let response = try JSONSerialization.jsonObject(with: result.standardOutput) as? [String: Any]
+        guard response?["errors"] == nil, response?["data"] is [String: Any] else { throw ReviewDiscussionError.unavailable }
     }
 
     /// 把评论按「回复关系」归成线程。
@@ -412,10 +505,17 @@ struct GitHubClient: ForgeClient {
         }
 
         return order.compactMap { key in
-            guard let group = roots[key], let first = group.first else { return nil }
+            guard let group = roots[key] else { return nil }
+            let ordered = group.sorted {
+                if $0.id == $1.id { return false }
+                if $0.id == key { return true }
+                if $1.id == key { return false }
+                return ($0.created_at ?? .distantPast) < ($1.created_at ?? .distantPast)
+            }
+            guard let first = ordered.first else { return nil }
             return ReviewThread(
                 id: "\(source)-\(key)",
-                notes: group.map { comment in
+                notes: ordered.map { comment in
                     ReviewNote(
                         id: String(comment.id),
                         authorName: comment.user?.login ?? "未知",
@@ -430,7 +530,9 @@ struct GitHubClient: ForgeClient {
                 // 这时退回 `original_line`（评论刚发时的行号）总比不显示行号好。
                 line: first.line ?? first.original_line,
                 isResolved: false,
-                isResolvable: false
+                isResolvable: false,
+                isOldSide: first.side == "LEFT",
+                diffHunk: first.diff_hunk
             )
         }
     }
@@ -458,8 +560,43 @@ struct GitHubComment: Decodable, Sendable {
     var original_line: Int?
     /// 行内回复指向它所回复的那条评论。
     var in_reply_to_id: Int?
+    var side: String?
+    var diff_hunk: String?
 
     struct User: Decodable, Sendable {
         var login: String
+    }
+}
+
+private struct GitHubReviewThreadState: Decodable {
+    var id: String
+    var isResolved: Bool
+    var isOutdated: Bool
+    var viewerCanResolve: Bool
+    var viewerCanUnresolve: Bool
+    var comments: Comments
+    struct Comments: Decodable {
+        var nodes: [Comment]
+        struct Comment: Decodable { var databaseId: Int? }
+    }
+}
+
+private struct GitHubReviewThreadPage: Decodable {
+    var data: DataPayload?
+    var errors: [GraphError]?
+    struct GraphError: Decodable { var message: String }
+    struct DataPayload: Decodable {
+        var repository: Repository?
+        struct Repository: Decodable {
+            var pullRequest: Request?
+            struct Request: Decodable {
+                var reviewThreads: Page
+                struct Page: Decodable {
+                    var nodes: [GitHubReviewThreadState]
+                    var pageInfo: PageInfo
+                    struct PageInfo: Decodable { var hasNextPage: Bool; var endCursor: String? }
+                }
+            }
+        }
     }
 }

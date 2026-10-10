@@ -117,6 +117,11 @@ struct ReviewThread: Identifiable, Hashable, Sendable {
     var isResolved: Bool
     /// 这条线程是否支持「已解决」标记。普通评论不支持。
     var isResolvable: Bool
+    var isOutdated = false
+    var isOldSide = false
+    /// 服务端保存的原始代码片段，过期讨论仍能保留上下文。
+    var diffHunk: String? = nil
+    var canResolve = true
 
     var firstNote: ReviewNote? { notes.first }
     var isInline: Bool { filePath != nil }
@@ -181,8 +186,12 @@ protocol ForgeClient: Sendable {
     /// 请求相对目标分支的完整代码改动。不需要先把请求检出成本地工作树。
     func pullRequestDiff(number: Int, in directory: URL) async throws -> [FileDiff]
 
-    /// 评论线程。用于在 Grove 里读别人的评审意见。
+    /// 评论线程及其回复、解决状态。
     func reviewThreads(number: Int, in directory: URL) async throws -> [ReviewThread]
+    func reviewHead(number: Int, in directory: URL) async throws -> String
+    func createDiscussion(number: Int, body: String, location: ReviewLocation?, expectedHead: String, in directory: URL) async throws
+    func reply(number: Int, thread: ReviewThread, body: String, in directory: URL) async throws
+    func setResolved(number: Int, thread: ReviewThread, resolved: Bool, in directory: URL) async throws
 
     func createPullRequest(_ request: NewPullRequest, in directory: URL) async throws -> String
     func merge(number: Int, strategy: MergeStrategy, deleteBranch: Bool, in directory: URL) async throws

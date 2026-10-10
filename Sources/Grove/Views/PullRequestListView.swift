@@ -436,6 +436,28 @@ private struct PullRequestDetailView: View {
     @State private var aiReviewInstructions = ""
     @State private var aiReviewAreas = Set(PullRequestAIReview.Assessment.Area.allCases)
     @State private var showsAIReviewOptions = false
+    @State private var diffHead = ""
+    @State private var focusedDiffLineID: Int?
+    @State private var discussionFilter = DiscussionFilter.all
+    @State private var scrollTarget: String?
+    @State private var threadsError: String?
+    @State private var showsDiscussionComposer = false
+    @State private var draftLocation: ReviewLocation?
+    @State private var draftBody = ""
+    @State private var draftHead = ""
+    @State private var draftError: String?
+    @State private var isPostingDiscussion = false
+
+    private enum DiscussionFilter: String, CaseIterable {
+        case all = "全部讨论", unresolved = "待解决", resolved = "已解决"
+    }
+
+    private var visibleThreads: [ReviewThread] {
+        threads.filter {
+            !$0.isSystemOnly && (discussionFilter == .all
+                || (discussionFilter == .resolved ? $0.isResolved : $0.isResolvable && !$0.isResolved))
+        }
+    }
 
     /// 详情页要显示正文，而列表查询刻意没带 `body`（太大）。所以进来之后单独补一次。
     private var current: PullRequest { detailed ?? pullRequest }
@@ -446,7 +468,8 @@ private struct PullRequestDetailView: View {
             // 在对话和代码之间来回切时，标题栏一直在原位。
             VStack(alignment: .leading, spacing: 14) {
                 titleBlock
-                actionBar
+                ScrollView(.horizontal) { actionBar.fixedSize(horizontal: true, vertical: false) }
+                    .scrollIndicators(.hidden)
                 if !current.labels.isEmpty { labelRow }
                 statsRow
             }
@@ -469,19 +492,7 @@ private struct PullRequestDetailView: View {
 
             Group {
                 if activeDetailTab == .conversation {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 16) {
-                            if let checks = current.statusCheckRollup, !checks.isEmpty {
-                                checksSection(checks)
-                            }
-                            bodySection
-                            if isReviewingAI || aiReview != nil { aiReviewSection }
-                            reviewSection
-                        }
-                        .padding(.horizontal, 18)
-                        .padding(.bottom, 18)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                    conversationSection
                 } else {
                     codeSection
                 }
@@ -496,6 +507,7 @@ private struct PullRequestDetailView: View {
         }
         .onChange(of: appModel.aiReviewResultsRevision) { _, _ in
             restoreCachedAIReview(for: diffFiles.isEmpty ? nil : diffFiles)
+            Task { await reloadThreads() }
         }
         .alert("关闭 \(current.displayNumber)？", isPresented: $showsCloseConfirmation) {
             Button("取消", role: .cancel) {}
@@ -504,6 +516,89 @@ private struct PullRequestDetailView: View {
             }
         } message: {
             Text("关闭后不会合并这批改动；如需继续处理，可以在托管平台重新打开该请求。")
+        }
+        .sheet(isPresented: $showsDiscussionComposer) { discussionComposer }
+    }
+
+    private var conversationSection: some View {
+        GeometryReader { geometry in
+            ScrollViewReader { proxy in
+                HStack(alignment: .top, spacing: 24) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 24) {
+                            bodySection
+                            if geometry.size.width < 920 {
+                                DisclosureGroup("审查状态与讨论导航") { reviewStatusSidebar.padding(.top, 12) }
+                                    .font(.system(size: 12))
+                            }
+                            if isReviewingAI || aiReview != nil || appModel.hasPendingAIReview(for: repository.root, pullRequestNumber: current.number) {
+                                aiReviewSection
+                            }
+                            reviewSection
+                        }
+                        .padding(24)
+                        .frame(maxWidth: 780, alignment: .leading)
+                        .frame(maxWidth: .infinity)
+                    }
+                    if geometry.size.width >= 920 {
+                        ScrollView { reviewStatusSidebar.padding(.vertical, 24).padding(.trailing, 20) }
+                            .frame(width: 260)
+                    }
+                }
+                .frame(maxWidth: 1120)
+                .frame(maxWidth: .infinity)
+                .onChange(of: scrollTarget) { _, target in
+                    if let target { withAnimation { proxy.scrollTo(target, anchor: .top) }; scrollTarget = nil }
+                }
+            }
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private var reviewStatusSidebar: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("合并状态").font(.system(size: 11)).foregroundStyle(.secondary)
+                Label(current.mergeable.map(mergeableLabel) ?? "计算中", systemImage: current.mergeable?.uppercased() == "MERGEABLE" ? "checkmark.circle.fill" : "exclamationmark.circle")
+                    .foregroundStyle(current.mergeable?.uppercased() == "MERGEABLE" ? Color.green : .orange)
+                    .font(.system(size: 12))
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("讨论").foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(threads.filter { $0.isResolvable && !$0.isResolved }.count) 待解决").foregroundStyle(.secondary)
+                }
+                .font(.system(size: 11))
+                ForEach(threads.filter { !$0.isSystemOnly }) { thread in
+                    Button {
+                        discussionFilter = .all
+                        scrollTarget = thread.id
+                    } label: {
+                        HStack(alignment: .top, spacing: 7) {
+                            Image(systemName: thread.isResolved ? "checkmark.circle.fill" : "bubble.left")
+                                .foregroundStyle(thread.isResolved ? Color.green : .secondary)
+                            Text(.init(thread.firstNote.map { AIReviewAutomation.visibleBody($0.body) }?.components(separatedBy: "\n").first ?? "讨论")).lineLimit(2)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .font(.system(size: 11))
+                    }
+                    .buttonStyle(.plain)
+                }
+                if let aiReview {
+                    ForEach(Array(aiReview.discussionFindings.enumerated()), id: \.offset) { _, assessment in
+                        Button { scrollTarget = "ai-\(AIReviewAutomation.issueKey(assessment))" } label: {
+                            Label(assessment.summary, systemImage: "sparkles").lineLimit(2).font(.system(size: 11))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            if let checks = current.statusCheckRollup, !checks.isEmpty {
+                Divider()
+                checksSection(checks)
+            }
         }
     }
 
@@ -523,10 +618,7 @@ private struct PullRequestDetailView: View {
             number: pullRequest.number,
             in: repository.root
         )
-        async let loadedDiff = try? await forge.pullRequestDiff(
-            number: pullRequest.number,
-            in: repository.root
-        )
+        async let loadedDiff = try? await loadReviewDiff(using: forge)
 
         // 完整详情不只补正文，还包含当前用户的审批状态。即使列表接口已经
         // 带了正文也必须加载，否则批准过的 MR 仍会错误显示「批准」。
@@ -540,16 +632,18 @@ private struct PullRequestDetailView: View {
 
         let loadedReviewThreads = await loadedThreads
         guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
-        threads = loadedReviewThreads ?? []
+        if let loadedReviewThreads { threads = loadedReviewThreads; threadsError = nil }
+        else { threadsError = "讨论加载失败，请重试。" }
         isLoadingThreads = false
 
         let files = await loadedDiff
         guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
         if let files {
-            diffFiles = files
+            diffFiles = files.files
+            diffHead = files.head
             didFailDiff = false
             selectFirstDiffFileIfNeeded()
-            restoreCachedAIReview(for: files)
+            restoreCachedAIReview(for: files.files)
         } else {
             diffFiles = []
             didFailDiff = true
@@ -560,15 +654,32 @@ private struct PullRequestDetailView: View {
     private func reloadThreads() async {
         guard let forge = repository.forge else { return }
         isLoadingThreads = true
-        threads = (try? await forge.reviewThreads(number: pullRequest.number, in: repository.root)) ?? []
-        isLoadingThreads = false
+        let expectedOrigin = repository.origin
+        defer { isLoadingThreads = false }
+        do {
+            let loaded = try await forge.reviewThreads(number: pullRequest.number, in: repository.root)
+            guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
+            threads = loaded
+            threadsError = nil
+        } catch { threadsError = "讨论加载失败，请重试。" }
+    }
+
+    private func loadReviewDiff(using forge: any ForgeClient) async throws -> (files: [FileDiff], head: String) {
+        let head = try await forge.reviewHead(number: pullRequest.number, in: repository.root)
+        let files = try await forge.pullRequestDiff(number: pullRequest.number, in: repository.root)
+        guard try await forge.reviewHead(number: pullRequest.number, in: repository.root) == head else {
+            throw ReviewDiscussionError.changedHead
+        }
+        return (files, head)
     }
 
     private func reloadDiff() async {
         guard let forge = repository.forge else { return }
         isLoadingDiff = true
         do {
-            diffFiles = try await forge.pullRequestDiff(number: pullRequest.number, in: repository.root)
+            let loaded = try await loadReviewDiff(using: forge)
+            diffFiles = loaded.files
+            diffHead = loaded.head
             didFailDiff = false
             selectFirstDiffFileIfNeeded()
             restoreCachedAIReview(for: diffFiles)
@@ -581,27 +692,140 @@ private struct PullRequestDetailView: View {
 
     // MARK: - 评审
 
+    private func openDiscussion(location: ReviewLocation? = nil, body: String = "") {
+        draftLocation = location
+        draftBody = body
+        draftHead = diffHead
+        draftError = nil
+        showsDiscussionComposer = true
+    }
+
+    private var discussionComposer: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("添加讨论").font(.title3).fontWeight(.semibold)
+            if let location = draftLocation {
+                Label("\(location.path):\(location.line) · \(location.isOldSide ? "旧代码" : "新代码")", systemImage: "chevron.left.forwardslash.chevron.right")
+                    .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                Text("基于提交 \(draftHead.prefix(8))").font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("针对整个请求提出意见，支持 Markdown。")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            TextEditor(text: $draftBody)
+                .font(.system(size: 13)).frame(minHeight: 160).padding(8)
+                .overlay { RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5) }
+                .disabled(isPostingDiscussion)
+            if let draftError {
+                Label(draftError, systemImage: "exclamationmark.triangle").font(.system(size: 12)).foregroundStyle(.red)
+            }
+            HStack {
+                Button("取消") { showsDiscussionComposer = false }.keyboardShortcut(.cancelAction)
+                Spacer()
+                if isPostingDiscussion { ProgressView().controlSize(.small) }
+                Button("发布讨论") { Task { await postDiscussion() } }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: .command)
+                    .disabled(draftBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .disabled(isPostingDiscussion)
+        }
+        .padding(24).frame(width: 580)
+        .interactiveDismissDisabled(isPostingDiscussion)
+    }
+
+    private func postDiscussion() async {
+        guard let forge = repository.forge, !isPostingDiscussion else { return }
+        isPostingDiscussion = true
+        defer { isPostingDiscussion = false }
+        do {
+            try await forge.createDiscussion(number: current.number, body: draftBody, location: draftLocation,
+                                             expectedHead: draftHead, in: repository.root)
+            showsDiscussionComposer = false
+            discussionFilter = .all
+            activeDetailTab = .conversation
+            await reloadThreads()
+        } catch { draftError = error.localizedDescription }
+    }
+
+    private func reply(to thread: ReviewThread, body: String) async -> Bool {
+        guard let forge = repository.forge else { return false }
+        do {
+            try await forge.reply(number: current.number, thread: thread, body: body, in: repository.root)
+            await reloadThreads()
+            return true
+        } catch {
+            appModel.report(title: "回复失败", error: error)
+            return false
+        }
+    }
+
+    private func resolve(_ thread: ReviewThread) async {
+        guard let forge = repository.forge else { return }
+        do {
+            try await forge.setResolved(number: current.number, thread: thread, resolved: !thread.isResolved, in: repository.root)
+            if let index = threads.firstIndex(where: { $0.id == thread.id }) {
+                threads[index].isResolved.toggle()
+            }
+            await reloadThreads()
+        } catch { appModel.report(title: "更新讨论状态失败", error: error) }
+    }
+
+    private func locate(path: String, line: Int?, isOldSide: Bool = false) {
+        guard let file = diffFiles.first(where: { $0.newPath == path || $0.oldPath == path || $0.displayPath == path }) else { return }
+        selectedDiffFileID = file.id
+        focusedDiffLineID = file.hunks.flatMap(\.lines).first { (isOldSide ? $0.oldNumber : $0.newNumber) == line }?.id
+        activeDetailTab = .code
+    }
+
+    private func assessmentLocation(_ assessment: PullRequestAIReview.Assessment) -> ReviewLocation? {
+        guard let path = assessment.file, let number = assessment.line,
+              let file = diffFiles.first(where: { $0.newPath == path || $0.oldPath == path || $0.displayPath == path }),
+              let line = file.hunks.flatMap(\.lines).first(where: { $0.newNumber == number }) else { return nil }
+        return ReviewLocation(file: file, line: line, isOldSide: false)
+    }
+
     @ViewBuilder
     private var reviewSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Text("讨论")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                Text("活动与讨论").font(.system(size: 14, weight: .semibold))
                 if isLoadingThreads { ProgressView().controlSize(.mini) }
                 Spacer()
+                Picker("筛选讨论", selection: $discussionFilter) {
+                    ForEach(DiscussionFilter.allCases, id: \.self) { filter in Text(filter.rawValue).tag(filter) }
+                }
+                .labelsHidden().fixedSize().controlSize(.small)
+                Button { Task { await reloadThreads() } } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless).disabled(isLoadingThreads)
+                Button("添加讨论") { openDiscussion() }.controlSize(.small)
+            }
+
+            if let aiReview {
+                ForEach(Array(aiReview.discussionFindings.enumerated()), id: \.offset) { _, assessment in
+                    aiReviewAssessment(assessment).id("ai-\(AIReviewAutomation.issueKey(assessment))")
+                }
+            }
+            if let threadsError {
+                HStack {
+                    Label(threadsError, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                    Button("重试") { Task { await reloadThreads() } }.disabled(isLoadingThreads)
+                }
+                .font(.system(size: 12))
             }
 
             // 系统自动生成的记录（"assigned to @x"、"changed title"）数量很大
             // 且没有讨论价值，默认藏起来 —— 不然真正的评审意见会被淹掉。
-            let visible = threads.filter { !$0.isSystemOnly }
-            if visible.isEmpty && !isLoadingThreads {
-                Text("还没有讨论。")
+            if visibleThreads.isEmpty && !isLoadingThreads && threadsError == nil {
+                Text(discussionFilter == .all ? "还没有讨论。" : "没有符合筛选条件的讨论。")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             } else {
-                ForEach(visible) { thread in
-                    ReviewThreadView(thread: thread)
+                ForEach(visibleThreads) { thread in
+                    ReviewThreadView(thread: thread, files: diffFiles,
+                                     replyLabel: current.forge == .github && !thread.isInline ? "引用回复" : "回复",
+                                     onReply: { body in await reply(to: thread, body: body) },
+                                     onResolve: { await resolve(thread) },
+                                     onLocate: thread.filePath.map { path in { locate(path: path, line: thread.line, isOldSide: thread.isOldSide) } })
+                        .id(thread.id)
                 }
             }
 
@@ -1072,6 +1296,8 @@ private struct PullRequestDetailView: View {
     private var codeSection: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
+                Text("点击代码行旁的讨论按钮，针对具体改动提出意见。")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
                 if isLoadingDiff { ProgressView().controlSize(.mini) }
                 Spacer()
                 if !diffFiles.isEmpty {
@@ -1119,7 +1345,12 @@ private struct PullRequestDetailView: View {
                             )
 
                             if let file = selectedDiffFile {
-                                DiffContentView(files: [file], showsFileHeaders: true)
+                                DiffContentView(files: [file], showsFileHeaders: true,
+                                                onDiscussLine: { file, line, oldSide in
+                                                    if let location = ReviewLocation(file: file, line: line, isOldSide: oldSide) {
+                                                        openDiscussion(location: location)
+                                                    }
+                                                }, focusedLineID: focusedDiffLineID)
                                     .frame(
                                         minWidth: 320,
                                         idealWidth: geometry.size.width * 0.7,
@@ -1160,6 +1391,18 @@ private struct PullRequestDetailView: View {
                 }
             }
 
+            if appModel.hasPendingAIReview(for: repository.root, pullRequestNumber: current.number) {
+                HStack {
+                    Label("检测到新提交，等待你决定是否重新审查。", systemImage: "bell.badge")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Button("重新审查") { startAIReview() }
+                        .controlSize(.small)
+                        .disabled(isReviewingAI || !appModel.canUseAIGeneration)
+                }
+            }
+
             if let aiReview {
                 if aiReviewIsStale {
                     Label("PR 代码已更新，这份结果基于旧 diff；建议重新 Review。",
@@ -1186,11 +1429,15 @@ private struct PullRequestDetailView: View {
                 }
 
                 VStack(spacing: 7) {
-                    ForEach(aiReview.assessments) { assessment in
+                    ForEach(aiReview.assessments.filter { $0.status != .risk }) { assessment in
                         aiReviewAssessment(assessment)
                     }
                 }
 
+                if !aiReview.discussionFindings.isEmpty {
+                    Text("风险意见已列入下方讨论区，可以检查内容后逐条发布。")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
                 Text("AI Review 根据 PR diff 和仓库只读上下文判断合并风险，不能代替实际构建与测试。")
                     .font(.system(size: 9.5))
                     .foregroundStyle(.tertiary)
@@ -1210,6 +1457,14 @@ private struct PullRequestDetailView: View {
     }
 
     private func aiReviewAssessment(_ assessment: PullRequestAIReview.Assessment) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+        if assessment.status == .risk, let path = assessment.file {
+            let context = ReviewThread(id: assessment.area.rawValue, notes: [], filePath: path,
+                                       line: assessment.line, isResolved: false, isResolvable: false,
+                                       isOutdated: aiReviewIsStale)
+            let excerpt = context.excerpt(in: diffFiles)
+            if !excerpt.isEmpty { ReviewCodeExcerpt(lines: excerpt, selectedLine: assessment.line) }
+        }
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: assessmentIcon(assessment.status))
                 .foregroundStyle(assessmentTint(assessment.status))
@@ -1238,11 +1493,7 @@ private struct PullRequestDetailView: View {
                 }
                 if let file = assessment.file {
                     Button {
-                        if let match = diffFiles.first(where: {
-                            $0.newPath == file || $0.oldPath == file || $0.displayPath == file
-                        }) {
-                            selectedDiffFileID = match.id
-                        }
+                        locate(path: file, line: assessment.line)
                     } label: {
                         Text(file + (assessment.line.map { ":\($0)" } ?? ""))
                             .font(.system(size: 9.5, design: .monospaced))
@@ -1250,13 +1501,38 @@ private struct PullRequestDetailView: View {
                             .truncationMode(.middle)
                     }
                     .buttonStyle(.borderless)
+                    .disabled(aiReviewIsStale)
                     .help("在代码变更中选择这个文件")
                 }
             }
             Spacer(minLength: 0)
         }
-        .padding(9)
-        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+        if assessment.status == .risk {
+            HStack {
+                let published = AIReviewAutomation.contains(
+                    AIReviewAutomation.marker(head: diffHead, area: AIReviewAutomation.issueKey(assessment)), in: threads
+                )
+                Label(published ? "AI 审查意见 · 已发布" : "AI 审查意见 · 尚未发布", systemImage: "sparkles")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                Spacer()
+                if !published {
+                Button("添加讨论…") {
+                    var body = "**AI Review · \(assessment.area.displayName)**\n\n\(assessment.summary)"
+                    if let evidence = assessment.evidence, !evidence.isEmpty { body += "\n\n\(evidence)" }
+                    if assessmentLocation(assessment) == nil, let file = assessment.file {
+                        body += "\n\n位置：`\(file)\(assessment.line.map { ":\($0)" } ?? "")`"
+                    }
+                    openDiscussion(location: assessmentLocation(assessment), body: body)
+                }
+                .controlSize(.small).disabled(aiReviewIsStale || isReviewingAI)
+                .help(assessmentLocation(assessment) == nil ? "没有可定位的代码行，将发布为整体讨论" : "检查内容后发布到对应代码行")
+                }
+            }
+        }
+        }
+        .padding(14)
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .overlay { RoundedRectangle(cornerRadius: 10).stroke(.separator, lineWidth: 0.5) }
     }
 
     private func verdictLabel(_ verdict: PullRequestAIReview.Verdict) -> String {
@@ -1430,12 +1706,7 @@ private struct PullRequestDetailView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
 
-                // PR 正文是 Markdown。这里不做完整渲染 —— SwiftUI 的 `Text(markdown:)`
-                // 不支持标题、列表、代码块，硬套只会渲染得更乱。原样等宽展示反而更可读，
-                // 需要好看的排版就点「在浏览器打开」。
-                Text(body)
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .textSelection(.enabled)
+                ReviewMarkdownView(text: body)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
                     .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
@@ -1497,62 +1768,6 @@ extension Color {
             + 0.587 * components.greenComponent
             + 0.114 * components.blueComponent
         return luminance > 0.6 ? .black : .white
-    }
-}
-
-// MARK: - 评论线程
-
-struct ReviewThreadView: View {
-    let thread: ReviewThread
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            if let filePath = thread.filePath {
-                HStack(spacing: 5) {
-                    Image(systemName: "text.alignleft").font(.system(size: 9))
-                    Text(filePath)
-                        .font(.system(size: 10, design: .monospaced))
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                    if let line = thread.line {
-                        Text("第 \(line) 行").font(.system(size: 9.5))
-                    }
-                    if thread.isResolved {
-                        MiniBadge(text: "已解决", systemImage: "checkmark", tint: .green)
-                    }
-                }
-                .foregroundStyle(.secondary)
-            }
-
-            ForEach(thread.notes.filter { !$0.isSystem }) { note in
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(note.authorName)
-                            .font(.system(size: 11, weight: .semibold))
-                        if let date = note.createdAt {
-                            Text(RelativeDate.format(date))
-                                .font(.system(size: 9.5))
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    Text(note.body)
-                        .font(.system(size: 11.5))
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
-        // 行内评论跟整体评论视觉上要能区分 —— review 时最要紧的就是那些指着
-        // 具体某一行说话的意见。
-        .overlay(alignment: .leading) {
-            if thread.isInline {
-                Rectangle().fill(Color.accentColor.opacity(0.5)).frame(width: 2)
-            }
-        }
     }
 }
 

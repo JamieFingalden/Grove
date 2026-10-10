@@ -91,17 +91,19 @@ struct CodexPullRequestGenerator {
         let schema = """
         {"type":"object","properties":{"body":{"type":"string"}},"required":["body"],"additionalProperties":false}
         """
-        let data = try await AIGenerationRunner.run(
+        return try await AIGenerationRunner.run(
             prompt: input.prompt,
             schema: schema,
             service: service ?? .codex(model: model, reasoningEffort: nil),
-            in: directory
-        )
-        guard let output = try? JSONDecoder().decode(StructuredOutput.self, from: data) else {
-            throw CodexGenerationError.invalidOutput
+            in: directory,
+            operation: "PR描述"
+        ) { data in
+            guard let output = try? JSONDecoder().decode(StructuredOutput.self, from: data) else {
+                throw CodexGenerationError.invalidOutput
+            }
+            let body = CommitMessageCleaner.clean(output.body)
+            guard !body.isEmpty else { throw CodexGenerationError.emptyOutput }
+            return GeneratedDescription(body: body, wasTruncated: input.wasTruncated, note: input.note)
         }
-        let body = CommitMessageCleaner.clean(output.body)
-        guard !body.isEmpty else { throw CodexGenerationError.emptyOutput }
-        return GeneratedDescription(body: body, wasTruncated: input.wasTruncated, note: input.note)
     }
 }

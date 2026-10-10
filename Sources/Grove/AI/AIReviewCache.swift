@@ -4,6 +4,8 @@ struct CachedPullRequestAIReview: Codable, Sendable, Equatable {
     var review: PullRequestAIReview
     var diffFingerprint: String
     var createdAt: Date
+    var head: String? = nil
+    var requestURL: String? = nil
 }
 
 /// AI Review 按仓库和请求编号落盘。切换页面或重启应用都不会丢，
@@ -35,7 +37,9 @@ struct AIReviewCache {
         diffFingerprint: String,
         for repository: URL,
         pullRequestNumber: Int,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        head: String? = nil,
+        requestURL: String? = nil
     ) {
         var updated = entries
         let path = repositoryKey(repository)
@@ -45,7 +49,9 @@ struct AIReviewCache {
             value: CachedPullRequestAIReview(
                 review: review,
                 diffFingerprint: diffFingerprint,
-                createdAt: createdAt
+                createdAt: createdAt,
+                head: head,
+                requestURL: requestURL
             )
         )
         if let index = updated.firstIndex(where: {

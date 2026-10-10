@@ -1044,6 +1044,23 @@ struct PreferencesView: View {
                 }
             }
 
+            Section("AI 调用日志") {
+                Text("保留最近 3 天的调用记录，包括模型、触发方式、耗时、结果和服务返回的 token 用量。未返回的用量标记为未知，不保存密钥、提示词或源码正文。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("打开 AI 日志目录") {
+                    Task {
+                        do {
+                            let directory = try await AIUsageLog.shared.openDirectory()
+                            NSWorkspace.shared.open(directory)
+                        } catch {
+                            model.report(title: "打开 AI 日志目录失败", error: error)
+                        }
+                    }
+                }
+            }
+
             Section("AI Review 默认提示词") {
                 if model.repositories.isEmpty {
                     Text("打开一个仓库后，可以在这里查看和修改 Grove 提供的默认 Review 提示词。")
@@ -1076,6 +1093,18 @@ struct PreferencesView: View {
                             selectedRepositoryInstructions.wrappedValue = PullRequestReviewPromptBuilder.defaultInstructions
                         }
                     }
+
+                    Toggle("自动审查新 PR，新推送通知我", isOn: Binding(
+                        get: { selectedReviewRepository.map { model.automaticAIReviewEnabled(for: $0.root) } ?? false },
+                        set: { enabled in
+                            if let repository = selectedReviewRepository {
+                                model.setAutomaticAIReviewEnabled(enabled, for: repository.root)
+                            }
+                        }
+                    ))
+                    Text("Grove 运行期间每分钟检查此项目。新 PR 自动审查；后续推送仅通知，由你决定是否重新审查。确认重审后会参考已有讨论、回复和解决状态。")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
 
                     Text("PR 详情里的滑杆按钮还能为单次 Review 临时调整，不会覆盖这里的项目默认值。")
                         .font(.system(size: 10.5))

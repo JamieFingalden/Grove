@@ -117,6 +117,42 @@ final class PullRequestReviewPromptBuilderTests: XCTestCase {
         XCTAssertEqual(review.assessments.map(\.area), [.compilation, .performance])
     }
 
+    func testFindingsKeepMultipleIssuesInSameAreaSeparateAndRejectPassingComments() throws {
+        let areas: Set<PullRequestAIReview.Assessment.Area> = [.compilation, .performance]
+        let assessment: [String: Any] = ["status": "risk", "summary": "两处接口存在兼容问题",
+            "evidence": NSNull(), "file": NSNull(), "line": NSNull()]
+        var clear = assessment
+        clear["status"] = "clear"
+        clear["summary"] = "性能没有退化"
+        let first: [String: Any] = ["area": "compilation_integration", "status": "risk", "summary": "旧调用方会编译失败",
+            "evidence": "参数已经删除", "file": "a.swift", "line": 1, "discussionID": NSNull()]
+        var second = first
+        second["line"] = 2
+        second["summary"] = "另一调用方返回类型不兼容"
+        var output: [String: Any] = ["verdict": "ready", "summary": "接口需要修改",
+            "assessments": ["compilation_integration": assessment, "performance_complexity": clear], "findings": [first, second]]
+        let review = try CodexPullRequestReviewGenerator.decode(JSONSerialization.data(withJSONObject: output),
+            wasTruncated: false, selectedAreas: areas)
+        XCTAssertEqual(review.verdict, .needsChanges)
+        XCTAssertEqual(review.discussionFindings.map(\.line), [1, 2])
+        XCTAssertEqual(review.assessments.last?.status, .clear)
+        XCTAssertEqual(try JSONDecoder().decode(PullRequestAIReview.self, from: JSONEncoder().encode(review)), review)
+
+        var passingComment = second
+        passingComment["area"] = "performance_complexity"
+        passingComment["status"] = "clear"
+        output["findings"] = [first, passingComment]
+        XCTAssertThrowsError(try CodexPullRequestReviewGenerator.decode(JSONSerialization.data(withJSONObject: output),
+            wasTruncated: false, selectedAreas: areas))
+        var linkedFirst = first
+        var linkedSecond = second
+        linkedFirst["discussionID"] = "same-thread"
+        linkedSecond["discussionID"] = "same-thread"
+        output["findings"] = [linkedFirst, linkedSecond]
+        XCTAssertThrowsError(try CodexPullRequestReviewGenerator.decode(JSONSerialization.data(withJSONObject: output),
+            wasTruncated: false, selectedAreas: areas))
+    }
+
     private func makePullRequest(title: String = "修复边界条件") -> PullRequest {
         PullRequest(
             number: 1,

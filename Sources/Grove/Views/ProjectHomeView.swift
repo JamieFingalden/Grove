@@ -16,6 +16,7 @@ enum ProjectHomeTab: Hashable {
 /// 看起来像没做完。落地就直接是拉取请求列表。
 struct ProjectHomeView: View {
     let repository: RepositoryModel
+    @Environment(AppModel.self) private var appModel
 
     @State private var tab: ProjectHomeTab = .pullRequests
 
@@ -63,6 +64,30 @@ struct ProjectHomeView: View {
             }
 
             Spacer(minLength: 12)
+
+            if repository.forge != nil {
+                let enabled = appModel.automaticAIReviewEnabled(for: repository.root)
+                let status = !enabled ? "已关闭" : appModel.canUseAIGeneration ? "已开启" : "已暂停"
+                Toggle(isOn: Binding(
+                    get: { appModel.automaticAIReviewEnabled(for: repository.root) },
+                    set: { appModel.setAutomaticAIReviewEnabled($0, for: repository.root) }
+                )) {
+                    HStack(spacing: 6) {
+                        Label("自动审查", systemImage: "sparkles")
+                        Text(status)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .fixedSize()
+                .disabled(!appModel.canUseAIGeneration)
+                .accessibilityValue(status)
+                .help(appModel.canUseAIGeneration
+                      ? "Grove 运行期间自动审查新 PR；后续推送只通知你，由你决定是否重新审查。"
+                      : "AI 功能当前不可用，自动审查已暂停。请在设置中启用 AI 并配置服务。")
+            }
 
             if let remote = remoteURL {
                 Button {

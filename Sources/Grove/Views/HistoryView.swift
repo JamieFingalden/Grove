@@ -4,6 +4,7 @@ struct HistoryView: View {
     @Bindable var model: WorktreeModel
     @Binding var sheet: RootView.ActiveSheet?
     @State private var selectedFileID: String?
+    @State private var isLegendShown = false
 
     var body: some View {
         // 跟 ChangesView 同理：HSplitView 不会自己撑满父容器，得显式声明。
@@ -157,6 +158,20 @@ struct HistoryView: View {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
+
+                // 标记的含义第一次见谁都猜不出来；悬停提示之外再给个常驻图例入口。
+                Button {
+                    isLegendShown.toggle()
+                } label: {
+                    Image(systemName: "questionmark.circle")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .fixedSize()
+                .help("图例：圆点、连线和徽章的含义")
+                .popover(isPresented: $isLegendShown, arrowEdge: .bottom) {
+                    HistoryLegend()
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -521,7 +536,54 @@ private struct CommitGraphCell: View {
             width: CGFloat(max(laneCount, 1)) * laneWidth + (row.showsOverflowArea ? 58 : 0),
             height: Self.rowHeight
         )
+        .overlay { hitStrips }
         .onHover { isHovering = $0 }
+    }
+
+    /// 悬停提示按 lane 拆开：光标指着哪个标记，就只讲那个标记的含义。
+    /// 整格共用一段图例的话，悬停哪儿都是同一段话，等于没有提示。
+    /// 热区必须靠布局切（HStack 固定宽度切片），不能用 .position 摆 ——
+    /// position 的视图会占满整个提案空间，几个提示的响应区就全变成整格，
+    /// 一悬停所有 tooltip 同时弹出来。
+    private var hitStrips: some View {
+        HStack(spacing: 0) {
+            ForEach(0..<max(laneCount, 1), id: \.self) { lane in
+                Color.clear
+                    .frame(width: laneWidth, height: Self.rowHeight)
+                    .help(laneHelp(lane))
+            }
+            if row.showsOverflowArea {
+                if row.overflowCount > 0 {
+                    Color.clear
+                        .frame(width: 58, height: Self.rowHeight)
+                        .help("+\(row.overflowCount) branches：图列宽度不够，还有 \(row.overflowCount) 条分支线没画出来")
+                } else {
+                    Color.clear.frame(width: 58, height: Self.rowHeight)
+                }
+            }
+        }
+    }
+
+    private func laneHelp(_ lane: Int) -> String {
+        // 圆点只画在本行提交自己的 lane 上；悬停到它时讲的是“这个提交在哪条线上”。
+        if !row.isCollapsed, lane == row.commitLane {
+            let merge = row.isMerge ? "；空心环表示合并提交" : ""
+            let base = switch row.color {
+            case 0: "蓝色圆点：主分支（默认分支）上的提交"
+            case 1: "青色圆点：当前检出分支上的提交"
+            default: "灰色圆点：其他分支上的提交"
+            }
+            return base + merge
+        }
+        // 否则悬停的是一条连线；线的颜色挂在经过该 lane 的 Link 上。
+        let linkColor = (row.incoming + row.outgoing)
+            .first { $0.from == lane || $0.to == lane }?
+            .color
+        return switch linkColor {
+        case 0: "蓝色连线：主分支（默认分支）"
+        case 1: "青色连线：当前检出分支"
+        default: "灰色连线：其他分支；悬停或选中时变紫加粗"
+        }
     }
 
     nonisolated private static func color(_ index: Int, emphasized: Bool) -> Color {
@@ -620,12 +682,13 @@ private struct RefBadges: View {
                     .background(tint(ref.kind).opacity(0.14), in: RoundedRectangle(cornerRadius: 3.5))
                 }
                 .buttonStyle(.plain)
-                .help(ref.name)
+                .help(helpText(for: ref))
             }
             if refs.count > 4 {
                 Text("+\(refs.count - 4)")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
+                    .help("还有 \(refs.count - 4) 个引用指向此提交，空间不够没有全部显示")
             }
         }
     }
@@ -646,5 +709,76 @@ private struct RefBadges: View {
         case .remoteBranch: .purple
         case .tag: .orange
         }
+    }
+
+    /// 徽章上只印了名字；颜色和图标分别指哪类引用，不写出来没人猜得到。
+    private func helpText(for ref: CommitRef) -> String {
+        switch ref.kind {
+        case .head:
+            ref.name == "HEAD"
+                ? "HEAD（绿色 · 定位图标）：当前检出的提交，处于分离状态，不在任何分支上"
+                : "HEAD（绿色 · 定位图标）：当前检出的分支是 \(ref.name)"
+        case .localBranch:
+            "本地分支（蓝色 · 分支图标）：\(ref.name) 的最新提交在这里"
+        case .remoteBranch:
+            "远程分支（紫色 · 云朵图标）：\(ref.name) 的最新提交在这里"
+        case .tag:
+            "标签（橙色 · 标签图标）：\(ref.name) 打在这个提交上"
+        }
+    }
+}
+
+/// 标记图例。圆点、连线和徽章的颜色含义不在界面上落成文字，用户就永远只能靠猜。
+private struct HistoryLegend: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("历史列表标记含义")
+                .font(.system(size: 12, weight: .semibold))
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("左侧提交图")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                dotRow(Color.blue, "主分支（默认分支，如 main）上的提交")
+                dotRow(Color.teal, "当前检出分支上的提交")
+                dotRow(Color.secondary.opacity(0.65), "其他分支上的提交；悬停或选中时变紫加粗")
+                HStack(spacing: 8) {
+                    Circle().strokeBorder(Color.blue, lineWidth: 2).frame(width: 9, height: 9)
+                    Text("合并提交（有两个及以上父提交）")
+                }
+                .font(.system(size: 11))
+                Text("“+N branches”：图列宽度不够，还有 N 条分支线没画出来")
+                    .font(.system(size: 11))
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("提交上方的徽章")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                badgeRow(CommitRef(name: "main", kind: .head), "HEAD 在这里：当前检出的是这个分支")
+                badgeRow(CommitRef(name: "feature/x", kind: .localBranch), "本地分支的最新提交")
+                badgeRow(CommitRef(name: "origin/main", kind: .remoteBranch), "远程分支的最新提交")
+                badgeRow(CommitRef(name: "v1.0", kind: .tag), "标签指向的提交")
+            }
+        }
+        .padding(14)
+        .frame(width: 340, alignment: .leading)
+    }
+
+    private func dotRow(_ color: Color, _ text: String) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(color).frame(width: 9, height: 9)
+            Text(text)
+        }
+        .font(.system(size: 11))
+    }
+
+    /// 徽章样例直接复用 RefBadges 渲染，图例里看到的就是列表里长的同一个东西。
+    private func badgeRow(_ ref: CommitRef, _ text: String) -> some View {
+        HStack(spacing: 8) {
+            RefBadges(refs: [ref], onFocus: {})
+            Text(text)
+        }
+        .font(.system(size: 11))
     }
 }

@@ -170,6 +170,7 @@ struct SplitHunkView: View {
     var model: WorktreeModel?
     var filePath: String?
     var highlights: [Int: [Range<String.Index>]]
+    var onDiscussLine: ((DiffLine, Bool) -> Void)?
 
     private var pairs: [SplitLayout.Pair] { SplitLayout.pairs(for: hunk.lines) }
 
@@ -209,7 +210,8 @@ struct SplitHunkView: View {
                         pair: pair,
                         model: model,
                         filePath: filePath,
-                        highlights: highlights
+                        highlights: highlights,
+                        onDiscussLine: onDiscussLine
                     )
                 }
             }
@@ -226,7 +228,8 @@ struct SplitHunkView: View {
             side: side,
             model: model,
             filePath: filePath,
-            highlights: line.map { highlights[$0.id] ?? [] } ?? []
+            highlights: line.map { highlights[$0.id] ?? [] } ?? [],
+            onDiscussLine: onDiscussLine
         )
     }
 
@@ -246,6 +249,7 @@ private struct SplitPairRow: View {
     var model: WorktreeModel?
     var filePath: String?
     var highlights: [Int: [Range<String.Index>]]
+    var onDiscussLine: ((DiffLine, Bool) -> Void)?
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -255,7 +259,8 @@ private struct SplitPairRow: View {
                 side: .old,
                 model: model,
                 filePath: filePath,
-                highlights: pair.left.map { highlights[$0.id] ?? [] } ?? []
+                highlights: pair.left.map { highlights[$0.id] ?? [] } ?? [],
+                onDiscussLine: onDiscussLine
             )
 
             Rectangle()
@@ -268,7 +273,8 @@ private struct SplitPairRow: View {
                 side: .new,
                 model: model,
                 filePath: filePath,
-                highlights: pair.right.map { highlights[$0.id] ?? [] } ?? []
+                highlights: pair.right.map { highlights[$0.id] ?? [] } ?? [],
+                onDiscussLine: onDiscussLine
             )
         }
     }
@@ -282,6 +288,7 @@ private struct SplitSideCell: View {
     var model: WorktreeModel?
     var filePath: String?
     var highlights: [Range<String.Index>]
+    var onDiscussLine: ((DiffLine, Bool) -> Void)?
 
     @State private var isGutterHovered = false
     @AppStorage(DiffReading.fontSizeKey) private var fontSize = DiffReading.defaultFontSize
@@ -301,6 +308,14 @@ private struct SplitSideCell: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 0) {
+                if let line, let onDiscussLine {
+                    Button { onDiscussLine(line, side == .old) } label: {
+                        Image(systemName: "plus.bubble").font(.system(size: 10))
+                    }
+                    .buttonStyle(.borderless)
+                    .frame(width: 24)
+                    .help("在这一行添加讨论")
+                }
                 gutter
                     .padding(.top, 1)
                 Text(marker)

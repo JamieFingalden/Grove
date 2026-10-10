@@ -270,6 +270,9 @@ struct DiffContentView: View {
     /// 为 nil（比如 PR 评审没有本地文件可读）时不显示折叠条。
     typealias GapLoader = (_ path: String, _ startLine: Int, _ count: Int) async -> [String]?
     var gapLoader: GapLoader?
+    /// PR 审查专用：点击行号添加讨论，定位意见时滚到对应代码块。
+    var onDiscussLine: ((FileDiff, DiffLine, Bool) -> Void)?
+    var focusedLineID: Int?
 
     /// 展开过的未更改区域（原始文本行）。key = "文件#hunk"。
     @State private var expandedGapKeys: Set<String> = []
@@ -289,12 +292,15 @@ struct DiffContentView: View {
     private static let readingColumnWidth: CGFloat = 920
 
     init(files: [FileDiff], model: WorktreeModel? = nil, showsFileHeaders: Bool = false,
-         allowSplit: Bool = true, gapLoader: GapLoader? = nil) {
+         allowSplit: Bool = true, gapLoader: GapLoader? = nil,
+         onDiscussLine: ((FileDiff, DiffLine, Bool) -> Void)? = nil, focusedLineID: Int? = nil) {
         self.files = files
         self.model = model
         self.showsFileHeaders = showsFileHeaders
         self.allowSplit = allowSplit
         self.gapLoader = gapLoader
+        self.onDiscussLine = onDiscussLine
+        self.focusedLineID = focusedLineID
 
         var highlights: [Int: [Range<String.Index>]] = [:]
         for file in files {
@@ -313,6 +319,7 @@ struct DiffContentView: View {
         // 阅读栏限宽 + 居中（GitHub 同款）：超宽窗口下内容像一页居中的文档，
         // 两侧留白对称、读作「边距」；内容左贴边、右侧一大片空背景，
         // 观感上则像布局坏了 —— 短行为主的文件尤其明显。
+        ScrollViewReader { proxy in
         ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                 ForEach(files) { file in
@@ -340,6 +347,7 @@ struct DiffContentView: View {
                             ForEach(file.hunks) { hunk in
                                 gapBefore(file: file, hunk: hunk)
                                 hunkBody(file: file, hunk: hunk)
+                                    .id(hunk.id)
                             }
                         }
                     } header: {
@@ -366,6 +374,13 @@ struct DiffContentView: View {
         .id("\(files.map(\.id).hashValue)-\(layoutRaw)")
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
+        .task(id: focusedLineID) {
+            if let focusedLineID,
+               let hunk = files.flatMap(\.hunks).first(where: { $0.lines.contains { $0.id == focusedLineID } }) {
+                proxy.scrollTo(hunk.id, anchor: .center)
+            }
+        }
+        }
     }
 
     // MARK: - hunk 与折叠区渲染
@@ -378,10 +393,12 @@ struct DiffContentView: View {
                 hunk: hunk,
                 model: model,
                 filePath: path,
-                highlights: wordHighlights
+                highlights: wordHighlights,
+                onDiscussLine: onDiscussLine.map { action in { line, oldSide in action(file, line, oldSide) } }
             )
         } else {
-            HunkView(hunk: hunk, model: model, filePath: path, highlights: wordHighlights)
+            HunkView(hunk: hunk, model: model, filePath: path, highlights: wordHighlights,
+                     onDiscussLine: onDiscussLine.map { action in { line, oldSide in action(file, line, oldSide) } })
         }
     }
 
@@ -621,6 +638,7 @@ private struct HunkView: View {
     var highlights: [Int: [Range<String.Index>]] = [:]
     /// 合成的展开 hunk 没有文件头可显示。
     var showsHeader = true
+    var onDiscussLine: ((DiffLine, Bool) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -652,7 +670,16 @@ private struct HunkView: View {
             }
 
             ForEach(hunk.lines) { line in
-                DiffLineView(
+                HStack(alignment: .top, spacing: 0) {
+                    if let onDiscussLine, line.kind != .noNewline {
+                        Button { onDiscussLine(line, line.newNumber == nil) } label: {
+                            Image(systemName: "plus.bubble").font(.system(size: 10))
+                        }
+                        .buttonStyle(.borderless)
+                        .frame(width: 24)
+                        .help("在第 \(line.newNumber ?? line.oldNumber ?? 0) 行添加讨论")
+                    }
+                    DiffLineView(
                     line: line,
                     model: model,
                     filePath: filePath,
@@ -662,6 +689,7 @@ private struct HunkView: View {
                     showsOldNumber: hunk.hasOldNumbers,
                     showsNewNumber: hunk.hasNewNumbers
                 )
+                }
             }
         }
     }
