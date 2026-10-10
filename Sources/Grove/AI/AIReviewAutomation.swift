@@ -41,11 +41,24 @@ enum AIReviewAutomation {
         return bounded + (text.utf8.count > limit ? "\n（历史讨论超出预算，已优先保留未解决讨论；省略部分不能视为已解决。）" : "")
     }
 
+    /// 行号吸附容忍的最近距离。超过就不硬贴行，退化为无定位的整体评论。
+    static let maxLocationDrift = 20
+
     static func location(for assessment: PullRequestAIReview.Assessment, files: [FileDiff]) -> ReviewLocation? {
         guard let path = assessment.file, let number = assessment.line,
-              let file = files.first(where: { $0.newPath == path || $0.oldPath == path || $0.displayPath == path }),
-              let line = file.hunks.flatMap(\.lines).first(where: { $0.newNumber == number }) else { return nil }
-        return ReviewLocation(file: file, line: line, isOldSide: false)
+              let file = files.first(where: { $0.newPath == path || $0.oldPath == path || $0.displayPath == path })
+        else { return nil }
+        // 模型给的行号常有几行偏差。先找精确命中；找不到就吸附到同文件变更
+        // 范围内最近的新侧行（把评论定位当作独立环节打磨，而不是模型说什么
+        // 就贴什么），偏差太远就不硬贴。
+        let lines = file.hunks.flatMap(\.lines).filter { $0.newNumber != nil }
+        guard let nearest = lines.min(by: {
+            abs(($0.newNumber ?? 0) - number) < abs(($1.newNumber ?? 0) - number)
+        }) else { return nil }
+        guard nearest.newNumber == number || abs(nearest.newNumber! - number) <= maxLocationDrift else {
+            return nil
+        }
+        return ReviewLocation(file: file, line: nearest, isOldSide: false)
     }
 
     static func existingDiscussion(for assessment: PullRequestAIReview.Assessment, threads: [ReviewThread]) -> ReviewThread? {

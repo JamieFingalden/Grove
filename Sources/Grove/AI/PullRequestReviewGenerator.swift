@@ -96,9 +96,20 @@ enum PullRequestReviewPromptBuilder {
     只要任一所选评估项存在确定的 risk，verdict 必须是 needs_changes；没有 risk 且上下文充分才是 ready。summary 只给维护者一句简洁的合并建议，并概括所选检查中是否存在风险，不要总结 PR 做了什么。请使用简体中文，不要声称运行过测试。
     """
 
+    /// 分组审查中的一组。`files` 是本组送审的文件；文件摘要仍列出全部文件，
+    /// 但 diff 只包含本组，让每组模型专注自己的切片。
+    struct GroupScope: Sendable, Equatable {
+        /// 1-based，供提示词与用量日志展示。
+        var index: Int
+        var count: Int
+        var files: [FileDiff]
+    }
+
     struct Input: Sendable {
         var pullRequest: PullRequest
         var files: [FileDiff]
+        /// 非 nil 时表示这是分组审查中的一组（见 `DiffGroupPlanner`）。
+        var group: GroupScope? = nil
         var customInstructions: String = PullRequestReviewPromptBuilder.defaultInstructions
         var selectedAreas: Set<PullRequestAIReview.Assessment.Area> = Set(
             PullRequestAIReview.Assessment.Area.allCases
@@ -115,7 +126,13 @@ enum PullRequestReviewPromptBuilder {
     }
 
     static func build(_ input: Input) -> Result {
-        let completeDiff = unifiedDiff(input.files)
+        // 疑似凭据或密钥的文件内容在任何预算下都不进提示词，只保留文件名，
+        // 让模型知道它们变了但不臆测内容。
+        let scopeFiles = input.group?.files ?? input.files
+        let diffFiles = scopeFiles.filter { !DiffBudget.isSecret($0.displayPath) }
+        let secretNames = scopeFiles.filter { DiffBudget.isSecret($0.displayPath) }
+            .map(\.displayPath)
+        let completeDiff = unifiedDiff(diffFiles)
         let limit = max(0, input.maxDiffBytes)
         let plan = DiffBudget.plan(diff: completeDiff, byteLimit: limit)
         let diff = plan.diff
@@ -127,14 +144,33 @@ enum PullRequestReviewPromptBuilder {
         let checks = input.pullRequest.statusCheckRollup?.prefix(50).map {
             "- \($0.displayName)：\(outcomeLabel($0.outcome))"
         }.joined(separator: "\n") ?? "（没有检查数据。）"
-        let rawFileSummary = input.files.map { file in
-            let kind = file.isBinary ? "，二进制" : ""
-            return "- \(file.displayPath)：+\(file.additions) −\(file.deletions)\(kind)"
+        let rawFileSummary = input.files.map { file -> String in
+            var suffix = file.isBinary ? "，二进制" : ""
+            if DiffBudget.isSecret(file.displayPath) { suffix += "，内容已排除（疑似凭据）" }
+            return "- \(file.displayPath)：+\(file.additions) −\(file.deletions)\(suffix)"
         }.joined(separator: "\n")
         let files = CommitPromptBuilder.limited(rawFileSummary, byteLimit: 16 * 1024)
+        let secretNotice = secretNames.isEmpty ? "" : """
+        \n（另有 \(secretNames.count) 个疑似凭据或密钥的文件改动只保留文件名，内容不会出现在本次提示词里：\(secretNames.prefix(10).joined(separator: "、"))\(secretNames.count > 10 ? " 等" : "")。不要臆测其内容。）
+        """
+        let groupNotice: String
+        if let group = input.group {
+            let names = CommitPromptBuilder.limited(
+                group.files.filter { !DiffBudget.isSecret($0.displayPath) }
+                    .map(\.displayPath).joined(separator: "、"),
+                byteLimit: 4 * 1024
+            )
+            groupNotice = """
+            \n本 PR 的 diff 较大，已按文件相关性分为 \(group.count) 组分别审查，本组是第 \(group.index) 组，只包含以下文件的 diff：\(names)。其余文件由其他分组分别审查；本组仍要结合仓库上下文评估整批改动的合并影响，但 findings 只报告能定位到本组文件的问题；本组没有发现风险不代表整个 PR 没有风险。
+            """
+        } else {
+            groupNotice = ""
+        }
         let truncationNotice: String
         if let notice = plan.notice {
             truncationNotice = "警告：\(notice)不得给出 ready；被省略或截断的内容可能影响结论时必须返回 uncertain。"
+        } else if input.group != nil {
+            truncationNotice = "下面是本组文件的完整 diff；其余文件由其他分组分别审查。"
         } else {
             truncationNotice = "下面是这个请求的完整 diff。"
         }
@@ -171,7 +207,7 @@ enum PullRequestReviewPromptBuilder {
         重审时逐一核实历史问题是否仍存在，结合回复中的解释和解决状态判断；已解决或定位过期不代表代码一定正确。不要重复提出已被新 diff 修复的问题；仍存在的问题可以继续指出，并引用对应讨论。历史评论的结论必须用最新 diff 独立验证。
 
         文件摘要：
-        \(files.isEmpty ? "（没有文件。）" : files)
+        \(files.isEmpty ? "（没有文件。）" : files)\(secretNotice)\(groupNotice)
 
         \(truncationNotice)
 
@@ -319,9 +355,70 @@ struct CodexPullRequestReviewGenerator {
         context: AIUsageLog.Context? = nil,
         in directory: URL
     ) async throws -> PullRequestAIReview {
+        // diff 放得下就保持单次调用；放不下时分组独立审查再合并，
+        // 不再靠截断换 uncertain 结论（借鉴 open-code-review 的分组策略）。
+        let plan = DiffGroupPlanner.plan(
+            files: files,
+            byteLimit: PullRequestReviewPromptBuilder.defaultMaxDiffBytes
+        )
+        guard plan.isSplit else {
+            return try await generateReview(
+                pullRequest: pullRequest,
+                files: files,
+                group: nil,
+                customInstructions: customInstructions,
+                selectedAreas: selectedAreas,
+                model: model,
+                reasoningEffort: reasoningEffort,
+                service: service,
+                threads: threads,
+                context: context,
+                in: directory
+            )
+        }
+        var reviews: [PullRequestAIReview] = []
+        for (offset, groupFiles) in plan.groups.enumerated() {
+            try Task.checkCancellation()
+            reviews.append(try await generateReview(
+                pullRequest: pullRequest,
+                files: files,
+                group: .init(index: offset + 1, count: plan.groups.count, files: groupFiles),
+                customInstructions: customInstructions,
+                selectedAreas: selectedAreas,
+                model: model,
+                reasoningEffort: reasoningEffort,
+                service: service,
+                threads: threads,
+                context: context,
+                in: directory
+            ))
+        }
+        return mergeReviews(
+            reviews,
+            groupCount: plan.groups.count,
+            uncoveredFiles: plan.uncoveredFiles,
+            secretFiles: plan.secretFiles,
+            selectedAreas: selectedAreas
+        )
+    }
+
+    private static func generateReview(
+        pullRequest: PullRequest,
+        files: [FileDiff],
+        group: PullRequestReviewPromptBuilder.GroupScope?,
+        customInstructions: String,
+        selectedAreas: Set<PullRequestAIReview.Assessment.Area>,
+        model: AIGenerationModel,
+        reasoningEffort: AIReviewReasoningEffort,
+        service: AIGenerationService?,
+        threads: [ReviewThread],
+        context: AIUsageLog.Context?,
+        in directory: URL
+    ) async throws -> PullRequestAIReview {
         let input = PullRequestReviewPromptBuilder.build(.init(
             pullRequest: pullRequest,
             files: files,
+            group: group,
             customInstructions: customInstructions,
             selectedAreas: selectedAreas,
             threads: threads
@@ -332,11 +429,116 @@ struct CodexPullRequestReviewGenerator {
             service: service ?? .codex(model: model, reasoningEffort: reasoningEffort),
             timeout: reviewTimeout,
             in: directory,
-            operation: "PR审查",
+            operation: group.map { "PR审查（第 \($0.index)/\($0.count) 组）" } ?? "PR审查",
             context: context ?? .init(pullRequestNumber: pullRequest.number)
         ) { data in
             try decode(data, wasTruncated: input.wasTruncated, note: input.note, selectedAreas: selectedAreas)
         }
+    }
+
+    /// 把各组的审查结果确定性合并成一份：verdict 取最坏，评估项按
+    /// risk > unknown > clear 归并，findings 按问题指纹去重后拼接。
+    /// 未覆盖的文件按「内容丢失」处理 —— 全部 ready 也要降级为 uncertain。
+    static func mergeReviews(
+        _ reviews: [PullRequestAIReview],
+        groupCount: Int,
+        uncoveredFiles: [String],
+        secretFiles: [String],
+        selectedAreas: Set<PullRequestAIReview.Assessment.Area>
+    ) -> PullRequestAIReview {
+        func verdictRank(_ verdict: PullRequestAIReview.Verdict) -> Int {
+            switch verdict {
+            case .needsChanges: 0
+            case .uncertain: 1
+            case .ready: 2
+            }
+        }
+        func statusRank(_ status: PullRequestAIReview.Assessment.Status) -> Int {
+            switch status {
+            case .risk: 0
+            case .unknown: 1
+            case .clear: 2
+            }
+        }
+        let worstRank = reviews.map { verdictRank($0.verdict) }.min() ?? verdictRank(.ready)
+        var verdict: PullRequestAIReview.Verdict
+        switch worstRank {
+        case 0: verdict = .needsChanges
+        case 1: verdict = .uncertain
+        default: verdict = .ready
+        }
+
+        var assessments: [PullRequestAIReview.Assessment] = []
+        for area in PullRequestAIReview.Assessment.Area.allCases.filter(selectedAreas.contains) {
+            let perGroup = reviews.compactMap { review in
+                review.assessments.first { $0.area == area }
+            }
+            guard let worst = perGroup.map({ statusRank($0.status) }).min() else { continue }
+            let driving = perGroup.filter { statusRank($0.status) == worst }
+            let lead = driving[0]
+            assessments.append(.init(
+                area: area,
+                status: lead.status,
+                summary: CommitPromptBuilder.limited(
+                    CommitMessageCleaner.clean(driving.map(\.summary).joined(separator: "；")),
+                    byteLimit: 1500
+                ),
+                evidence: lead.evidence,
+                file: lead.file,
+                line: lead.line
+            ))
+        }
+
+        var findings: [PullRequestAIReview.Assessment] = []
+        var seenIssues: Set<String> = []
+        // 某组 findings 缺失时沿用该组的风险评估项（与单次审查的
+        // discussionFindings 回退一致），不让风险悄悄从讨论发布里消失。
+        for review in reviews {
+            for finding in review.discussionFindings
+            where seenIssues.insert(AIReviewAutomation.issueKey(finding)).inserted {
+                findings.append(finding)
+            }
+        }
+
+        let wasTruncated = reviews.contains { $0.wasTruncated } || !uncoveredFiles.isEmpty
+        if wasTruncated, verdict == .ready {
+            verdict = .uncertain
+        }
+
+        let summarySource = reviews.filter { verdictRank($0.verdict) == worstRank }
+        let summary = CommitPromptBuilder.limited(
+            CommitMessageCleaner.clean(
+                (groupCount > 1 ? "分 \(groupCount) 组审查：" : "")
+                    + summarySource.map(\.summary).joined(separator: "；")
+            ),
+            byteLimit: 2000
+        )
+
+        var noteSegments: [String] = []
+        if !uncoveredFiles.isEmpty {
+            noteSegments.append(
+                "另有 \(uncoveredFiles.count) 个文件未覆盖审查（\(uncoveredFiles.prefix(10).joined(separator: "、"))\(uncoveredFiles.count > 10 ? " 等" : "")）"
+            )
+        }
+        if !secretFiles.isEmpty {
+            noteSegments.append(
+                "\(secretFiles.count) 个疑似凭据文件的内容已排除（\(secretFiles.prefix(10).joined(separator: "、"))\(secretFiles.count > 10 ? " 等" : "")）"
+            )
+        }
+        for (offset, review) in reviews.enumerated() {
+            if let note = review.truncationNote {
+                noteSegments.append("第 \(offset + 1) 组：\(note)")
+            }
+        }
+
+        return PullRequestAIReview(
+            verdict: verdict,
+            summary: summary,
+            assessments: assessments,
+            wasTruncated: wasTruncated,
+            truncationNote: noteSegments.isEmpty ? nil : noteSegments.joined(separator: "；"),
+            findings: findings
+        )
     }
 
     static func decode(

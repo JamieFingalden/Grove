@@ -327,6 +327,37 @@ final class AIReviewAutomationTests: XCTestCase {
         XCTAssertNil(AIReviewAutomation.existingDiscussion(for: different, threads: [thread]))
     }
 
+    func testLocationSnapsToNearestChangedLineWithinTolerance() {
+        let additions = (1...10).map { "+line \($0)" }.joined(separator: "\n")
+        let files = DiffParser.parse("""
+        diff --git a/a.swift b/a.swift
+        --- a/a.swift
+        +++ b/a.swift
+        @@ -1,3 +10,12 @@
+         context one
+         context two
+        -removed
+        \(additions)
+        """)
+
+        func assessment(line: Int) -> PullRequestAIReview.Assessment {
+            .init(area: .compilation, status: .risk, summary: "调用方会编译失败",
+                  evidence: nil, file: "a.swift", line: line)
+        }
+        // 精确命中变更范围（新侧 10..21）内的行号。
+        XCTAssertEqual(AIReviewAutomation.location(for: assessment(line: 13), files: files)?.newLine, 13)
+        XCTAssertEqual(AIReviewAutomation.location(for: assessment(line: 21), files: files)?.newLine, 21)
+        // 上下文行（新侧 10、11）同样可作为锚点。
+        XCTAssertEqual(AIReviewAutomation.location(for: assessment(line: 10), files: files)?.newLine, 10)
+        // 小偏差吸附到最近的变更行。
+        XCTAssertEqual(AIReviewAutomation.location(for: assessment(line: 23), files: files)?.newLine, 21)
+        // 大偏差不硬贴，退化为无定位评论。
+        XCTAssertNil(AIReviewAutomation.location(for: assessment(line: 50), files: files))
+        // 文件不在 diff 里也拿不到定位。
+        XCTAssertNil(AIReviewAutomation.location(for: .init(area: .compilation, status: .risk,
+            summary: "另一处风险", evidence: nil, file: "b.swift", line: 1), files: files))
+    }
+
     private func waitForReview(_ model: AppModel) async throws {
         for _ in 0..<500 where model.activeAIReviewCount > 0 {
             try await Task.sleep(for: .milliseconds(10))
