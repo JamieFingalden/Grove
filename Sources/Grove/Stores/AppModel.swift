@@ -21,6 +21,8 @@ typealias AIReviewUpdateNotifier = @Sendable (URL, PullRequest, String) async ->
 struct GroveFailure: Identifiable, Sendable {
     let id = UUID()
     var title: String
+    var context: String? = nil
+    var repositoryID: RepoID? = nil
     var detail: String
     /// 面向开发者的原始输出默认收起来，避免一整屏 stderr 冒充用户提示。
     var technicalDetail: String?
@@ -1193,22 +1195,31 @@ final class AppModel {
 
     // MARK: - 错误
 
-    func report(_ failure: GroveFailure) {
+    func report(_ failure: GroveFailure, repository: RepositoryModel? = nil) {
+        var failure = failure
+        if let repository {
+            failure.repositoryID = repository.id
+            failure.context = "\(repository.name) · \(repository.server?.displayName ?? "本机") · \(repository.root.path)"
+        }
+        guard !failures.contains(where: {
+            $0.title == failure.title && $0.repositoryID == failure.repositoryID && $0.context == failure.context
+                && $0.detail == failure.detail && $0.technicalDetail == failure.technicalDetail
+        }) else { return }
         failures.append(failure)
         // 只留最近几条。错误横幅堆到十几条就把界面挤没了，而旧的那些用户早就不看了。
         if failures.count > 4 { failures.removeFirst(failures.count - 4) }
     }
 
-    func report(title: String, error: Error) {
+    func report(title: String, error: Error, repository: RepositoryModel? = nil) {
         // 取消不是失败：SwiftUI 的 .task 在视图切走 / 选中项变化时会取消
         // 进行中的请求，ProcessRunner 忠实地抛 CancellationError。把它当失败
         // 弹横幅，用户看到的就是那句莫名其妙的「未能完成操作」。
         guard !(error is CancellationError) else { return }
-        report(GroveFailure(title: title, error: error))
+        report(GroveFailure(title: title, error: error), repository: repository)
     }
 
-    func report(title: String, detail: String) {
-        report(GroveFailure(title: title, detail: detail))
+    func report(title: String, detail: String, repository: RepositoryModel? = nil) {
+        report(GroveFailure(title: title, detail: detail), repository: repository)
     }
 
     func dismiss(_ failure: GroveFailure) {

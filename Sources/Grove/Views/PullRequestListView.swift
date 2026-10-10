@@ -753,7 +753,7 @@ private struct PullRequestDetailView: View {
             await reloadThreads()
             return true
         } catch {
-            appModel.report(title: "回复失败", error: error)
+            appModel.report(title: "回复失败", error: error, repository: repository)
             return false
         }
     }
@@ -766,7 +766,7 @@ private struct PullRequestDetailView: View {
                 threads[index].isResolved.toggle()
             }
             await reloadThreads()
-        } catch { appModel.report(title: "更新讨论状态失败", error: error) }
+        } catch { appModel.report(title: "更新讨论状态失败", error: error, repository: repository) }
     }
 
     private func locate(path: String, line: Int?, isOldSide: Bool = false) {
@@ -927,7 +927,7 @@ private struct PullRequestDetailView: View {
             }
         } catch {
             isWorking = false
-            appModel.report(title: "操作失败", error: error)
+            appModel.report(title: "操作失败", error: error, repository: repository)
             return
         }
         // 批准不会改变正文或讨论，本地 `didApprove` 已经足够立即收起按钮。
@@ -1102,7 +1102,7 @@ private struct PullRequestDetailView: View {
         do {
             try await forge.close(number: current.number, in: repository.root)
         } catch {
-            appModel.report(title: "关闭请求失败", error: error)
+            appModel.report(title: "关闭请求失败", error: error, repository: repository)
             return
         }
 

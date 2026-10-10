@@ -152,10 +152,10 @@ final class RepositoryModel: Identifiable {
                 // 报一次就够；恢复后还能再报。
                 if !didReportReadFailure {
                     didReportReadFailure = true
-                    app?.report(title: "连接 \(server?.displayName ?? name) 失败", error: error)
+                    app?.report(title: "连接 \(server?.displayName ?? name) 失败", error: error, repository: self)
                 }
             } else {
-                app?.report(title: "读取 \(name) 失败", error: error)
+                app?.report(title: "读取 \(name) 失败", error: error, repository: self)
             }
             return
         }
@@ -292,7 +292,7 @@ final class RepositoryModel: Identifiable {
             await refreshWorktreePullRequests()
         } catch {
             guard pullRequestRefreshID == requestID, origin == requestedOrigin else { return }
-            app?.report(title: "读取 PR 列表失败", error: error)
+            app?.report(title: "读取 PR 列表失败", error: error, repository: self)
         }
     }
 
@@ -550,7 +550,7 @@ final class RepositoryModel: Identifiable {
         do {
             try await work()
         } catch {
-            app?.report(title: label.replacingOccurrences(of: "正在", with: "").replacingOccurrences(of: "…", with: "") + "失败", error: error)
+            app?.report(title: label.replacingOccurrences(of: "正在", with: "").replacingOccurrences(of: "…", with: "") + "失败", error: error, repository: self)
         }
     }
 
@@ -586,13 +586,14 @@ final class RepositoryModel: Identifiable {
         // 存在性与建目录都走传输层 —— 远程服务器上新建工作树同样可用。
         // 占位检查用 fileExists：已存在的文件（不只是目录）同样挡住 git。
         if await git.fileExists(atPath: path.path) {
-            app?.report(title: "新建工作树失败", error: GroveError.worktreePathExists(path))
+            app?.report(title: "新建工作树失败", error: GroveError.worktreePathExists(path), repository: self)
             return nil
         }
         if case .existingBranch(let branch) = source, let holder = worktreeHoldingBranch(branch) {
             app?.report(
                 title: "新建工作树失败",
-                error: GroveError.branchAlreadyCheckedOut(branch: branch, worktree: holder.path)
+                error: GroveError.branchAlreadyCheckedOut(branch: branch, worktree: holder.path),
+                repository: self
             )
             return nil
         }
@@ -603,7 +604,7 @@ final class RepositoryModel: Identifiable {
             do {
                 try await git.createDirectory(atPath: parent.path)
             } catch {
-                app?.report(title: "无法创建目录 \(parent.lastPathComponent)", error: error)
+                app?.report(title: "无法创建目录 \(parent.lastPathComponent)", error: error, repository: self)
                 return nil
             }
         }
@@ -613,7 +614,7 @@ final class RepositoryModel: Identifiable {
         do {
             try await git.addWorktree(at: path, source: source, in: root)
         } catch {
-            app?.report(title: "新建工作树失败", error: error)
+            app?.report(title: "新建工作树失败", error: error, repository: self)
             return nil
         }
 
@@ -637,7 +638,8 @@ final class RepositoryModel: Identifiable {
         if let holder = worktreeHoldingBranch(branchName) {
             app?.report(
                 title: "检出 PR #\(pullRequest.number) 失败",
-                error: GroveError.branchAlreadyCheckedOut(branch: branchName, worktree: holder.path)
+                error: GroveError.branchAlreadyCheckedOut(branch: branchName, worktree: holder.path),
+                repository: self
             )
             return nil
         }
@@ -685,7 +687,7 @@ final class RepositoryModel: Identifiable {
                 }
             }
         } catch {
-            app?.report(title: "检出 PR #\(pullRequest.number) 失败", error: error)
+            app?.report(title: "检出 PR #\(pullRequest.number) 失败", error: error, repository: self)
             return nil
         }
 
@@ -709,7 +711,7 @@ final class RepositoryModel: Identifiable {
                 try await git.deleteBranch(branch, force: true, in: root)
             }
         } catch {
-            app?.report(title: "删除工作树失败", error: error)
+            app?.report(title: "删除工作树失败", error: error, repository: self)
         }
 
         worktreeModels[worktree.path] = nil

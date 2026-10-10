@@ -64,6 +64,7 @@ func sidebarSelectionBackground(_ isSelected: Bool) -> some View {
         .fill(isSelected
               ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
               : .clear)
+        .padding(.horizontal, 8)
 }
 
 /// 侧边栏行的统一高度：仓库行、工作树行、折叠三角都用它，节奏才一致。

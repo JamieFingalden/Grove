@@ -377,6 +377,11 @@ struct FailureBanner: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(failure.title)
                     .font(.callout.weight(.semibold))
+                if let context = failure.context {
+                    Text(context)
+                        .font(.caption.weight(.medium))
+                        .textSelection(.enabled)
+                }
                 Text(failure.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -401,7 +406,8 @@ struct FailureBanner: View {
 
             Button {
                 let technical = failure.technicalDetail.map { "\n\n技术详情：\n\($0)" } ?? ""
-                SystemActions.copyToPasteboard("\(failure.title)\n\(failure.detail)\(technical)")
+                let context = failure.context.map { "\n\($0)" } ?? ""
+                SystemActions.copyToPasteboard("\(failure.title)\(context)\n\(failure.detail)\(technical)")
             } label: {
                 Image(systemName: "doc.on.doc")
             }

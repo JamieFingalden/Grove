@@ -113,6 +113,28 @@ final class LayoutRenderHarness: XCTestCase {
         }
     }
 
+    func testSidebarSelectionInsets() throws {
+        try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
+        try render(
+            List {
+                Label("Grove", systemImage: "house")
+                    .frame(height: SidebarMetrics.rowHeight)
+                    .listRowBackground(sidebarSelectionBackground(false))
+                Label("main", systemImage: "externaldrive")
+                    .foregroundStyle(.blue)
+                    .frame(height: SidebarMetrics.rowHeight)
+                    .listRowBackground(sidebarSelectionBackground(true))
+                Label("LightSnap", systemImage: "house")
+                    .frame(height: SidebarMetrics.rowHeight)
+                    .listRowBackground(sidebarSelectionBackground(false))
+            }
+                .listStyle(.sidebar)
+                .environment(\.colorScheme, .light),
+            size: CGSize(width: 280, height: 160),
+            to: "/tmp/grove-render-sidebar-selection-insets.png"
+        )
+    }
+
     func testSidebarPullRequestIcons() throws {
         try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
         let states = ["OPEN", "MERGED", "CLOSED"]
