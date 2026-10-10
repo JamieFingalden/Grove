@@ -3,6 +3,46 @@ import XCTest
 
 @MainActor
 final class AIReviewAutomationTests: XCTestCase {
+    func testAutomaticCheckFailureIncludesRepositoryAndFailedStep() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        try fixture.write("gh", "#!/bin/sh\nprintf 'HTTP 403: access denied\\n' >&2\nexit 7\n")
+        let model = fixture.model { _ in Self.review }
+
+        await model.pollAutomaticAIReviews()
+
+        let failure = try XCTUnwrap(model.failures.first)
+        XCTAssertEqual(failure.title, "自动 AI Review 检查失败")
+        XCTAssertEqual(failure.repositoryID, model.repositories.first?.id)
+        XCTAssertTrue(failure.context?.contains(fixture.directory.path) == true)
+        XCTAssertTrue(failure.context?.contains("读取开放 PR 列表") == true)
+        XCTAssertTrue(failure.detail.contains("gh 执行失败（退出码 7）"))
+        XCTAssertTrue(failure.detail.contains("HTTP 403: access denied"))
+    }
+
+    func testAutomaticHeadCheckFailureIdentifiesPullRequest() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        try fixture.write("gh", #"""
+        #!/bin/sh
+        if [ "$1:$2" = "pr:list" ]; then
+          cat "$GROVE_TEST_ROOT/list"
+        else
+          printf '无法读取提交版本\n' >&2
+          exit 7
+        fi
+        """#)
+        let model = fixture.model { _ in Self.review }
+
+        await model.pollAutomaticAIReviews()
+
+        let failure = try XCTUnwrap(model.failures.first)
+        XCTAssertTrue(failure.context?.contains("PR #42 · 读取最新提交") == true)
+        XCTAssertTrue(failure.context?.contains("https://example.invalid/pr/42") == true)
+        XCTAssertTrue(failure.context?.contains(fixture.directory.path) == true)
+        XCTAssertTrue(failure.detail.contains("无法读取提交版本"))
+    }
+
     func testClearAndUnknownAssessmentsRemainLocalAndDoNotPublishDiscussions() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
@@ -133,6 +173,9 @@ final class AIReviewAutomationTests: XCTestCase {
         try await waitForReview(model)
         XCTAssertEqual(try fixture.publicationTargets(), ["inline"])
         XCTAssertEqual(model.failures.count, 1)
+        XCTAssertTrue(model.failures.first?.context?.contains("PR #42 · 发布评审讨论") == true)
+        XCTAssertTrue(model.failures.first?.context?.contains(fixture.directory.path) == true)
+        XCTAssertTrue(model.failures.first?.detail.contains("模拟第二条问题发布失败") == true)
         XCTAssertNotNil(model.cachedAIReview(for: fixture.directory, pullRequestNumber: 42))
         try fixture.syncPublishedDiscussions()
         try FileManager.default.removeItem(at: fixture.directory.appendingPathComponent("fail-second"))

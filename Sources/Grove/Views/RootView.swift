@@ -389,13 +389,16 @@ struct FailureBanner: View {
 
                 if let technicalDetail = failure.technicalDetail, !technicalDetail.isEmpty {
                     DisclosureGroup("技术详情", isExpanded: $showsTechnicalDetails) {
-                        Text(technicalDetail)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                            // 原始 stderr 只在用户主动展开时出现，并限制高度避免挤掉界面。
-                            .lineLimit(8)
-                            .textSelection(.enabled)
-                            .padding(.top, 3)
+                        ScrollView {
+                            Text(technicalDetail)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .scrollIndicators(.visible)
+                        .frame(height: 160)
+                        .padding(.top, 3)
                     }
                     .font(.caption2)
                     .foregroundStyle(.secondary)

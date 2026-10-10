@@ -753,7 +753,8 @@ private struct PullRequestDetailView: View {
             await reloadThreads()
             return true
         } catch {
-            appModel.report(title: "回复失败", error: error, repository: repository)
+            appModel.report(title: "回复讨论失败", error: error, repository: repository,
+                            context: "PR #\(current.number) · 讨论 \(thread.id) · \(current.url)")
             return false
         }
     }
@@ -766,7 +767,10 @@ private struct PullRequestDetailView: View {
                 threads[index].isResolved.toggle()
             }
             await reloadThreads()
-        } catch { appModel.report(title: "更新讨论状态失败", error: error, repository: repository) }
+        } catch {
+            appModel.report(title: "更新讨论状态失败", error: error, repository: repository,
+                            context: "PR #\(current.number) · 讨论 \(thread.id) · \(current.url)")
+        }
     }
 
     private func locate(path: String, line: Int?, isOldSide: Bool = false) {
@@ -901,6 +905,14 @@ private struct PullRequestDetailView: View {
         let expectedOrigin = repository.origin
         isWorking = true
 
+        var label: String
+        switch action {
+        case .comment: label = "发布评论"
+        case .requestChanges: label = "请求修改"
+        case .approve: label = "批准请求"
+        case .unapprove: label = "撤销批准"
+        }
+
         let text = commentText.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             switch action {
@@ -913,6 +925,7 @@ private struct PullRequestDetailView: View {
                 viewerHasApprovedOverride = true
                 // 批准时顺手把写了的评论也发出去，不然那段字会被静默丢掉。
                 if !text.isEmpty {
+                    label = "发布评论（批准已成功）"
                     try await forge.comment(number: current.number, body: text, in: repository.root)
                 }
             case .unapprove:
@@ -927,7 +940,8 @@ private struct PullRequestDetailView: View {
             }
         } catch {
             isWorking = false
-            appModel.report(title: "操作失败", error: error, repository: repository)
+            appModel.report(title: "\(label)失败", error: error, repository: repository,
+                            context: "PR #\(current.number) · \(current.url)")
             return
         }
         // 批准不会改变正文或讨论，本地 `didApprove` 已经足够立即收起按钮。
@@ -1102,7 +1116,8 @@ private struct PullRequestDetailView: View {
         do {
             try await forge.close(number: current.number, in: repository.root)
         } catch {
-            appModel.report(title: "关闭请求失败", error: error, repository: repository)
+            appModel.report(title: "关闭请求失败", error: error, repository: repository,
+                            context: "PR #\(current.number) · \(current.url)")
             return
         }
 

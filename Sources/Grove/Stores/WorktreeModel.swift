@@ -182,6 +182,7 @@ final class WorktreeModel: Identifiable {
     nonisolated var id: URL { identity }
     nonisolated var identityKey: String { RepoID(location: location, root: identity).identityKey }
     var path: URL { worktree.path }
+    var failureContext: String { "工作树 · \(worktree.checkoutLabel) · \(path.path)" }
     var isAICommitEnabled: Bool { app?.canUseAIGeneration == true }
 
     init(worktree: Worktree, repository: RepositoryModel?, git: GitClient, app: AppModel?) {
@@ -396,7 +397,7 @@ final class WorktreeModel: Identifiable {
         } catch {
             guard !Task.isCancelled else { return }
             setDiff([])
-            app?.report(title: "读取 diff 失败", error: error, repository: repository)
+            app?.report(title: "读取 diff 失败", error: error, repository: repository, context: "\(failureContext) · \(selectedPath)")
         }
     }
 
@@ -707,7 +708,7 @@ final class WorktreeModel: Identifiable {
             }
             selectedLines.removeAll()
         } catch {
-            app?.report(title: "\(label)失败", error: error, repository: repository)
+            app?.report(title: "\(label)失败", error: error, repository: repository, context: failureContext)
         }
         await refresh()
     }
@@ -747,10 +748,10 @@ final class WorktreeModel: Identifiable {
                 app?.report(
                     title: "变基遇到冲突",
                     detail: "在「冲突」区把每个文件解决并标记为已解决，再点上方的「继续」；不想继续就点「中止」，仓库会回到变基前的样子。",
-                    repository: repository
+                    repository: repository, context: failureContext
                 )
             } else {
-                app?.report(title: "变基失败", error: error, repository: repository)
+                app?.report(title: "变基失败", error: error, repository: repository, context: failureContext)
             }
             return
         }
@@ -778,10 +779,10 @@ final class WorktreeModel: Identifiable {
                 app?.report(
                     title: "还有冲突没解决",
                     detail: "把「冲突」区里的每个文件解决并标记为已解决之后，再点「继续」。",
-                    repository: repository
+                    repository: repository, context: failureContext
                 )
             } else {
-                app?.report(title: "\(label)失败", error: error, repository: repository)
+                app?.report(title: "\(label)失败", error: error, repository: repository, context: failureContext)
             }
             return
         }
@@ -897,7 +898,7 @@ final class WorktreeModel: Identifiable {
             app?.report(
                 title: "文件已在外部被修改",
                 detail: "「\(editor.change.displayName)」跟 Grove 上次读到的不一样，已重新读取。这次的选择没有写入，请重新选。",
-                repository: repository
+                repository: repository, context: failureContext
             )
             Task { await reloadConflictContent() }
             return
@@ -917,7 +918,7 @@ final class WorktreeModel: Identifiable {
             editor.lastKnownText = text
             conflictContent = .editor(editor)
         } catch {
-            app?.report(title: "写入 \(editor.change.displayName) 失败", error: error, repository: repository)
+            app?.report(title: "写入 \(editor.change.displayName) 失败", error: error, repository: repository, context: failureContext)
         }
     }
 
@@ -1029,7 +1030,7 @@ final class WorktreeModel: Identifiable {
             hasGeneratedCommitMessage = false
             generatedDiffNotice = nil
         } catch {
-            app?.report(title: "提交失败", error: error, repository: repository)
+            app?.report(title: "提交失败", error: error, repository: repository, context: failureContext)
         }
         await refresh()
     }
@@ -1061,7 +1062,7 @@ final class WorktreeModel: Identifiable {
                 // 用户主动取消不属于失败，静默回到空闲状态。
             } catch {
                 self.canRetryCommitMessageGeneration = AIGenerationFailure.isTimeout(error)
-                self.app?.report(title: "AI 提交信息生成失败", error: error, repository: self.repository)
+                self.app?.report(title: "AI 提交信息生成失败", error: error, repository: self.repository, context: self.failureContext)
             }
             self.isGeneratingCommitMessage = false
             self.commitMessageTask = nil
@@ -1110,10 +1111,10 @@ final class WorktreeModel: Identifiable {
                     self.app?.report(
                         title: "拉取遇到冲突",
                         detail: "拉取的提交正在重放到当前分支之上，有文件冲突。在「冲突」区逐个解决并标记为已解决，再点上方的「继续」；不想继续就点「中止」。",
-                        repository: self.repository
+                        repository: self.repository, context: self.failureContext
                     )
                 } else {
-                    self.app?.report(title: "拉取失败", error: error, repository: self.repository)
+                    self.app?.report(title: "拉取失败", error: error, repository: self.repository, context: self.failureContext)
                 }
             }
         ) {
@@ -1163,7 +1164,7 @@ final class WorktreeModel: Identifiable {
                         branch: self.worktree.branch
                     )
                 } else {
-                    self.app?.report(title: "推送失败", error: error, repository: self.repository)
+                    self.app?.report(title: "推送失败", error: error, repository: self.repository, context: self.failureContext)
                 }
             }
         ) {
@@ -1246,7 +1247,7 @@ final class WorktreeModel: Identifiable {
                 await onFailure(error)
             } else {
                 let title = action == .pull ? "拉取失败" : "推送失败"
-                app?.report(title: title, error: error, repository: repository)
+                app?.report(title: title, error: error, repository: repository, context: failureContext)
             }
         }
 
@@ -1272,7 +1273,7 @@ final class WorktreeModel: Identifiable {
         do {
             try await work()
         } catch {
-            app?.report(title: "\(label)失败", error: error, repository: repository)
+            app?.report(title: "\(label)失败", error: error, repository: repository, context: failureContext)
         }
         await refresh()
     }
@@ -1291,6 +1292,17 @@ final class WorktreeModel: Identifiable {
         await VersionTag.suggestedNext(after: git.tags(in: path))
     }
 
+    func generateTagMessage(name: String, on commit: CommitSummary) async throws
+        -> (message: String, note: String?) {
+        guard isAICommitEnabled, let service = app?.aiService else { throw AIAPIError.invalidConfiguration }
+        if location.isRemote, case .codex = service {
+            throw CodexGenerationError.commandFailed("远程工作树的 AI 标签说明请使用兼容 API；Codex CLI 需要本地仓库目录。")
+        }
+        return try await TagMessageGenerator.generate(
+            in: path, name: name, commit: commit, git: git, service: service
+        )
+    }
+
     /// 标签名是否已被占用。建标签弹窗的即时校验用。
     func tagExists(_ name: String) async -> Bool {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1306,7 +1318,7 @@ final class WorktreeModel: Identifiable {
         do {
             try await git.createTag(name, message: message, at: commit.oid, in: path)
         } catch {
-            app?.report(title: "创建标签失败", error: error, repository: repository)
+            app?.report(title: "创建标签失败", error: error, repository: repository, context: "\(failureContext) · 标签 \(name) · 提交 \(commit.oid)")
             return false
         }
         // 标签会出现在历史列表的引用角标上，刷一遍才看得见。
@@ -1322,7 +1334,7 @@ final class WorktreeModel: Identifiable {
         do {
             try await git.pushTag(name, to: remote.name, in: path)
         } catch {
-            app?.report(title: "推送标签 \(name) 到 \(remote.name) 失败", error: error, repository: repository)
+            app?.report(title: "推送标签 \(name) 到 \(remote.name) 失败", error: error, repository: repository, context: failureContext)
         }
         await refresh()
     }
@@ -1385,7 +1397,7 @@ final class WorktreeModel: Identifiable {
                 try await git.push(in: path, remote: nil, branch: branch, setUpstream: false)
             }
         } catch {
-            app?.report(title: "推送分支失败", error: error, repository: repository)
+            app?.report(title: "推送分支失败", error: error, repository: repository, context: failureContext)
             return nil
         }
 
@@ -1401,7 +1413,7 @@ final class WorktreeModel: Identifiable {
             await repository?.refreshPullRequests()
             return url
         } catch {
-            app?.report(title: "创建 PR 失败", error: error, repository: repository)
+            app?.report(title: "创建 PR 失败", error: error, repository: repository, context: failureContext)
             return nil
         }
     }

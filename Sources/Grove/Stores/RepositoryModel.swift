@@ -586,14 +586,14 @@ final class RepositoryModel: Identifiable {
         // 存在性与建目录都走传输层 —— 远程服务器上新建工作树同样可用。
         // 占位检查用 fileExists：已存在的文件（不只是目录）同样挡住 git。
         if await git.fileExists(atPath: path.path) {
-            app?.report(title: "新建工作树失败", error: GroveError.worktreePathExists(path), repository: self)
+            app?.report(title: "新建工作树失败", error: GroveError.worktreePathExists(path), repository: self, context: "目标工作树 · \(path.path)")
             return nil
         }
         if case .existingBranch(let branch) = source, let holder = worktreeHoldingBranch(branch) {
             app?.report(
                 title: "新建工作树失败",
                 error: GroveError.branchAlreadyCheckedOut(branch: branch, worktree: holder.path),
-                repository: self
+                repository: self, context: "目标工作树 · \(path.path) · 分支 \(branch)"
             )
             return nil
         }
@@ -604,7 +604,7 @@ final class RepositoryModel: Identifiable {
             do {
                 try await git.createDirectory(atPath: parent.path)
             } catch {
-                app?.report(title: "无法创建目录 \(parent.lastPathComponent)", error: error, repository: self)
+                app?.report(title: "无法创建目录 \(parent.lastPathComponent)", error: error, repository: self, context: "目标目录 · \(parent.path)")
                 return nil
             }
         }
@@ -614,7 +614,7 @@ final class RepositoryModel: Identifiable {
         do {
             try await git.addWorktree(at: path, source: source, in: root)
         } catch {
-            app?.report(title: "新建工作树失败", error: error, repository: self)
+            app?.report(title: "新建工作树失败", error: error, repository: self, context: "目标工作树 · \(path.path)")
             return nil
         }
 
@@ -639,7 +639,7 @@ final class RepositoryModel: Identifiable {
             app?.report(
                 title: "检出 PR #\(pullRequest.number) 失败",
                 error: GroveError.branchAlreadyCheckedOut(branch: branchName, worktree: holder.path),
-                repository: self
+                repository: self, context: "目标工作树 · \(path.path) · \(pullRequest.url)"
             )
             return nil
         }
@@ -687,7 +687,8 @@ final class RepositoryModel: Identifiable {
                 }
             }
         } catch {
-            app?.report(title: "检出 PR #\(pullRequest.number) 失败", error: error, repository: self)
+            app?.report(title: "检出 PR #\(pullRequest.number) 失败", error: error, repository: self,
+                        context: "目标工作树 · \(path.path) · \(pullRequest.url)")
             return nil
         }
 
@@ -703,15 +704,18 @@ final class RepositoryModel: Identifiable {
 
         activity = "正在删除工作树…"
         defer { activity = nil }
+        var step = "删除工作树"
         do {
             try await git.removeWorktree(at: worktree.path, force: force, in: root)
             if deleteBranch, let branch {
+                step = "删除分支 \(branch)"
                 // 分支删除用 `-D`（强制）：走到这一步用户已经在确认框里明确勾了
                 // 「同时删除分支」，再因为「分支未合并」被 git 拦一次没有意义。
                 try await git.deleteBranch(branch, force: true, in: root)
             }
         } catch {
-            app?.report(title: "删除工作树失败", error: error, repository: self)
+            app?.report(title: "\(step)失败", error: error, repository: self,
+                        context: "工作树 · \(worktree.checkoutLabel) · \(worktree.path.path)")
         }
 
         worktreeModels[worktree.path] = nil

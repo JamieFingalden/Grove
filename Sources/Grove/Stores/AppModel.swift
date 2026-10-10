@@ -31,12 +31,18 @@ struct GroveFailure: Identifiable, Sendable {
     init(title: String, error: Error) {
         self.title = title
         if let failure = error as? CommandFailure {
-            self.detail = Self.friendlyGitMessage(failure.output)
-            self.technicalDetail = [failure.commandLine, failure.output]
+            let executable = URL(fileURLWithPath: failure.executable).lastPathComponent
+            let reason = Self.commandReason(failure.output)
+            self.detail = "\(executable) 执行失败（退出码 \(failure.exitCode)）：\(reason)"
+            if let guidance = Self.friendlyCommandMessage(failure.output) {
+                self.detail += "\n\(guidance)"
+            }
+            self.technicalDetail = [failure.commandLine, "退出码：\(failure.exitCode)", failure.output]
                 .filter { !$0.isEmpty }
                 .joined(separator: "\n\n")
-        } else if error is CommandTimeout {
-            self.detail = "远端响应时间过长，操作已经停止。请检查网络或 VPN，确认远端服务可用后再试。"
+        } else if let timeout = error as? CommandTimeout {
+            let executable = URL(fileURLWithPath: timeout.executable).lastPathComponent
+            self.detail = "\(executable) 执行超过 \(Int(timeout.seconds)) 秒，已停止。请检查命令所访问的服务或网络后重试。"
             self.technicalDetail = error.localizedDescription
         } else {
             self.detail = error.localizedDescription
@@ -52,8 +58,23 @@ struct GroveFailure: Identifiable, Sendable {
         self.date = Date()
     }
 
-    /// 把 Git 面向终端的报错翻译成用户能直接采取行动的说明。
-    private static func friendlyGitMessage(_ output: String) -> String {
+    private static func commandReason(_ output: String) -> String {
+        let lines = output.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let errors = lines.filter {
+            let line = $0.lowercased()
+            return line.hasPrefix("fatal:") || line.hasPrefix("error:")
+                || line.contains("failed") || line.contains("http ") || line.contains("失败")
+        }
+        let reason = (errors.isEmpty ? lines : errors).prefix(3)
+            .map { $0.replacingOccurrences(of: #"^(fatal|error):\s*"#, with: "", options: .regularExpression) }
+            .joined(separator: "\n")
+        guard !reason.isEmpty else { return "命令没有返回错误说明。" }
+        return reason.count > 500 ? String(reason.prefix(500)) + "…" : reason
+    }
+
+    private static func friendlyCommandMessage(_ output: String) -> String? {
         let message = output.lowercased()
 
         if message.contains("unmerged files")
@@ -80,10 +101,10 @@ struct GroveFailure: Identifiable, Sendable {
             return "远端身份验证失败。请检查 Git 凭据或 SSH 密钥，确认当前账号有这个仓库的访问权限后重试。"
         }
         if message.contains("already exists") || message.contains("has already been taken") {
-            return "远端已经有同名仓库。请换一个仓库路径，或把本地仓库连接到已有远端。"
+            return "目标已经存在。请检查同名仓库、分支、标签或目录，换一个名称后重试。"
         }
         if message.contains("403") || message.contains("forbidden") {
-            return "当前账号没有在这个组织或群组中创建仓库的权限。请更换仓库路径或联系管理员。"
+            return "服务拒绝了当前账号的访问。请检查账号对这个仓库或操作的权限，必要时联系管理员。"
         }
         if message.contains("could not resolve host")
             || message.contains("failed to connect")
@@ -105,7 +126,7 @@ struct GroveFailure: Identifiable, Sendable {
             return "远端找不到这个评审请求。它可能已经结束、被删除，或者当前仓库与请求不匹配；请刷新后重新选择。"
         }
 
-        return "Git 没有完成这次操作。请展开「技术详情」查看原始信息，处理后再试。"
+        return nil
     }
 }
 
@@ -304,14 +325,14 @@ final class AppModel {
         } catch is CancellationError {
             // 用户关闭设置时不显示失败提醒。
         } catch {
-            report(title: "获取 Codex 模型失败", error: error)
+            report(title: "获取 Codex 模型失败", error: error, context: "设置 · AI · Codex 模型列表")
         }
     }
 
     func fetchAPIModels() async {
         guard !isLoadingAPIModels else { return }
         guard let key = AIAPIKeychain.read() else {
-            report(title: "获取 API 模型失败", error: AIAPIError.invalidConfiguration)
+            report(title: "获取 API 模型失败", error: AIAPIError.invalidConfiguration, context: "设置 · AI · API 模型列表 · \(aiAPIBaseURL)")
             return
         }
         isLoadingAPIModels = true
@@ -325,7 +346,7 @@ final class AppModel {
         } catch is CancellationError {
             // 用户关闭设置时不显示失败提醒。
         } catch {
-            report(title: "获取 API 模型失败", error: error)
+            report(title: "获取 API 模型失败", error: error, context: "设置 · AI · API 模型列表 · \(aiAPIBaseURL)")
         }
     }
 
@@ -478,6 +499,7 @@ final class AppModel {
             let expectedOrigin = repository.origin
             let retryKey = repository.root.path
             guard (automaticAIReviewRetryAfter[retryKey] ?? .distantPast) <= Date() else { continue }
+            var step = "读取开放 PR 列表"
             do {
                 // ponytail: 每轮最多检查 1000 个开放请求；超大仓库可改为平台事件订阅。
                 let requests = try await forge.pullRequests(in: repository.root, limit: 1000, state: .open)
@@ -496,6 +518,7 @@ final class AppModel {
                 for request in requests where request.isActive {
                     guard !Task.isCancelled, canUseAIGeneration, automaticAIReviewEnabled(for: repository.root),
                           repository.origin == expectedOrigin else { break }
+                    step = "PR #\(request.number) · 读取最新提交 · \(request.url)"
                     let head = try await forge.reviewHead(number: request.number, in: repository.root)
                     guard !Task.isCancelled, repository.origin == expectedOrigin else { break }
                     guard !head.isEmpty else { continue }
@@ -538,7 +561,7 @@ final class AppModel {
                 return
             } catch {
                 automaticAIReviewRetryAfter[retryKey] = Date().addingTimeInterval(300)
-                report(title: "自动 AI Review 检查失败", error: error)
+                report(title: "自动 AI Review 检查失败", error: error, repository: repository, context: step)
             }
         }
     }
@@ -556,6 +579,7 @@ final class AppModel {
             guard let self else { return }
             var input = request
             var head = expectedHead
+            var step = "准备评审"
             @MainActor func validate() async throws {
                 try Task.checkCancellation()
                 guard aiReviewJobs[key]?.id == jobID else { throw CancellationError() }
@@ -563,6 +587,7 @@ final class AppModel {
                     guard canUseAIGeneration, automaticAIReviewEnabled(for: input.repositoryRoot) else { throw CancellationError() }
                 }
                 if let repository, let forge {
+                    step = "校验 PR 状态与提交版本"
                     guard repository.origin == expectedOrigin,
                           repositories.contains(where: { $0 === repository }) else { throw CancellationError() }
                     let fresh = try await forge.pullRequest(number: input.pullRequest.number, in: input.repositoryRoot)
@@ -576,6 +601,7 @@ final class AppModel {
             }
             do {
                 if let forge {
+                    step = "读取最新提交"
                     head = try await forge.reviewHead(number: input.pullRequest.number, in: input.repositoryRoot)
                     if let expectedHead, head != expectedHead { throw ReviewDiscussionError.changedHead }
                     try Task.checkCancellation()
@@ -584,8 +610,11 @@ final class AppModel {
                     if let head, aiGenerationSettings.initialReviewHead(for: input.pullRequest.url) == nil {
                         aiGenerationSettings.setInitialReviewHead(head, for: input.pullRequest.url)
                     }
+                    step = "读取 PR 详情"
                     input.pullRequest = try await forge.pullRequest(number: input.pullRequest.number, in: input.repositoryRoot)
+                    step = "读取 PR 差异"
                     input.files = try await forge.pullRequestDiff(number: input.pullRequest.number, in: input.repositoryRoot)
+                    step = "读取评审讨论"
                     input.threads = try await forge.reviewThreads(number: input.pullRequest.number, in: input.repositoryRoot)
                 } else if automatic { throw ReviewDiscussionError.unavailable }
                 try await validate()
@@ -602,6 +631,7 @@ final class AppModel {
                 } else {
                     input.logContext = .init(trigger: automatic ? "自动" : "手动",
                                              pullRequestNumber: input.pullRequest.number, head: head)
+                    step = "\(input.service.displayName) · 生成 AI 评审"
                     result = try await aiReviewGenerator(input)
                 }
                 try await validate()
@@ -614,8 +644,10 @@ final class AppModel {
                         try await validate()
                         let body = AIReviewAutomation.body(for: assessment, head: head)
                         if let thread = AIReviewAutomation.existingDiscussion(for: assessment, threads: input.threads) {
+                            step = "回复评审讨论 \(thread.id)"
                             try await forge.reply(number: input.pullRequest.number, thread: thread, body: body, in: input.repositoryRoot)
                         } else {
+                            step = "发布评审讨论\(assessment.file.map { " · \($0)" } ?? "")"
                             try await forge.createDiscussion(number: input.pullRequest.number, body: body,
                                 location: AIReviewAutomation.location(for: assessment, files: input.files),
                                 expectedHead: head, in: input.repositoryRoot)
@@ -634,7 +666,9 @@ final class AppModel {
             } catch {
                 if aiReviewJobs[key]?.id == jobID {
                     if automatic { automaticAIReviewRetryAfter["\(input.pullRequest.url):\(head ?? "")"] = Date().addingTimeInterval(300) }
-                    report(title: automatic ? "自动 AI Review 失败" : "AI Review 失败", error: error)
+                    let source = repository == nil ? "\(input.repositoryRoot.lastPathComponent) · 本机 · \(input.repositoryRoot.path) · " : ""
+                    report(title: automatic ? "自动 AI Review 失败" : "AI Review 失败", error: error,
+                           repository: repository, context: "\(source)PR #\(input.pullRequest.number) · \(step) · \(input.pullRequest.url)")
                 }
             }
             finishAIReview(key: key, jobID: jobID)
@@ -670,7 +704,7 @@ final class AppModel {
         do {
             git = try await GitClient.resolve()
         } catch {
-            report(GroveFailure(title: "无法启动", error: error))
+            report(title: "无法启动", error: error, context: "Grove · 启动 · 查找 Git 工具")
             toolsReady = true
             return
         }
@@ -881,7 +915,7 @@ final class AppModel {
         guard let git else { return nil }
 
         guard let root = await git.repositoryRoot(for: url) else {
-            report(GroveFailure(title: "打开失败", error: GroveError.notARepository(url)))
+            report(title: "打开仓库失败", error: GroveError.notARepository(url), context: "本机 · \(url.path)")
             return nil
         }
 
@@ -980,16 +1014,16 @@ final class AppModel {
     @discardableResult
     func addRemoteProject(_ path: String, on server: RemoteServer) async -> RepositoryModel? {
         guard let git = remoteGitClient(for: server), let transport = remoteTransport(for: server) else {
-            report(GroveFailure(title: "连接 \(server.displayName) 失败", error: GroveError.sshNotFound))
+            report(title: "连接 \(server.displayName) 失败", error: GroveError.sshNotFound,
+                   context: "\(server.displayName) · \(server.destination) · \(path)")
             return nil
         }
 
         let entered = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let root = await transport.repositoryRoot(forPath: entered) else {
-            report(GroveFailure(
-                title: "添加失败",
-                detail: "「\(entered)」在 \(server.destination) 上不是一个 git 仓库（或目录不存在）。"
-            ))
+            report(title: "添加远程仓库失败",
+                   detail: "「\(entered)」在 \(server.destination) 上不是一个 git 仓库（或目录不存在）。",
+                   context: "\(server.displayName) · \(server.destination) · \(entered)")
             return nil
         }
         guard remoteServers.contains(server) else { return nil }
@@ -1195,12 +1229,15 @@ final class AppModel {
 
     // MARK: - 错误
 
-    func report(_ failure: GroveFailure, repository: RepositoryModel? = nil) {
+    func report(_ failure: GroveFailure, repository: RepositoryModel? = nil, context: String? = nil) {
         var failure = failure
         if let repository {
             failure.repositoryID = repository.id
-            failure.context = "\(repository.name) · \(repository.server?.displayName ?? "本机") · \(repository.root.path)"
+            let server = repository.server.map { "\($0.displayName)（\($0.destination)）" } ?? "本机"
+            failure.context = "\(repository.name) · \(server) · \(repository.root.path)"
         }
+        failure.context = [failure.context, context].compactMap { $0 }.joined(separator: "\n")
+        if failure.context?.isEmpty != false { failure.context = "Grove · 应用" }
         guard !failures.contains(where: {
             $0.title == failure.title && $0.repositoryID == failure.repositoryID && $0.context == failure.context
                 && $0.detail == failure.detail && $0.technicalDetail == failure.technicalDetail
@@ -1210,16 +1247,16 @@ final class AppModel {
         if failures.count > 4 { failures.removeFirst(failures.count - 4) }
     }
 
-    func report(title: String, error: Error, repository: RepositoryModel? = nil) {
+    func report(title: String, error: Error, repository: RepositoryModel? = nil, context: String? = nil) {
         // 取消不是失败：SwiftUI 的 .task 在视图切走 / 选中项变化时会取消
         // 进行中的请求，ProcessRunner 忠实地抛 CancellationError。把它当失败
         // 弹横幅，用户看到的就是那句莫名其妙的「未能完成操作」。
         guard !(error is CancellationError) else { return }
-        report(GroveFailure(title: title, error: error), repository: repository)
+        report(GroveFailure(title: title, error: error), repository: repository, context: context)
     }
 
-    func report(title: String, detail: String, repository: RepositoryModel? = nil) {
-        report(GroveFailure(title: title, detail: detail), repository: repository)
+    func report(title: String, detail: String, repository: RepositoryModel? = nil, context: String? = nil) {
+        report(GroveFailure(title: title, detail: detail), repository: repository, context: context)
     }
 
     func dismiss(_ failure: GroveFailure) {

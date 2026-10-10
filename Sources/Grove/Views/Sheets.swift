@@ -179,7 +179,8 @@ struct CreateRemoteRepositorySheet: View {
     @MainActor
     private func createRepository() async {
         guard isValidRepositoryPath else {
-            app.report(title: "创建远程仓库失败", error: RemoteRepositoryCreationError.invalidPath)
+            app.report(title: "创建远程仓库失败", error: RemoteRepositoryCreationError.invalidPath,
+                       repository: repository, context: "\(host) · \(repositoryPath)")
             return
         }
         isWorking = true
@@ -202,9 +203,11 @@ struct CreateRemoteRepositorySheet: View {
             if repository.hasOrigin {
                 pushFailed = true
                 isCreated = true
-                app.report(title: "远程仓库已创建，但首次推送失败", error: error)
+                app.report(title: "远程仓库已创建，但首次推送失败", error: error,
+                           repository: repository, context: "\(host) · \(request.path)")
             } else {
-                app.report(title: "创建远程仓库失败", error: error)
+                app.report(title: "创建远程仓库失败", error: error,
+                           repository: repository, context: "\(host) · \(request.path)")
             }
         }
     }
@@ -465,7 +468,8 @@ struct CreatePullRequestSheet: View {
                 // 用户取消时保留原有描述，不显示错误。
             } catch {
                 canRetryDescriptionGeneration = AIGenerationFailure.isTimeout(error)
-                app.report(title: "AI PR 描述生成失败", error: error)
+                app.report(title: "AI PR 描述生成失败", error: error, repository: model.repository,
+                           context: "\(model.failureContext) · 目标分支 \(target)")
             }
             isGeneratingDescription = false
             descriptionTask = nil
@@ -1055,7 +1059,7 @@ struct PreferencesView: View {
                             let directory = try await AIUsageLog.shared.openDirectory()
                             NSWorkspace.shared.open(directory)
                         } catch {
-                            model.report(title: "打开 AI 日志目录失败", error: error)
+                            model.report(title: "打开 AI 日志目录失败", error: error, context: "设置 · AI · 使用日志")
                         }
                     }
                 }
@@ -1190,7 +1194,7 @@ struct PreferencesView: View {
         do {
             try model.saveAIAPIKey(key)
         } catch {
-            model.report(title: "保存 AI API 密钥失败", error: error)
+            model.report(title: "保存 AI API 密钥失败", error: error, context: "设置 · AI · API 密钥 · macOS 钥匙串")
         }
     }
 
@@ -1199,7 +1203,7 @@ struct PreferencesView: View {
             try model.removeAIAPIKey()
             apiKey = ""
         } catch {
-            model.report(title: "移除 AI API 密钥失败", error: error)
+            model.report(title: "移除 AI API 密钥失败", error: error, context: "设置 · AI · API 密钥 · macOS 钥匙串")
         }
     }
 
@@ -1466,6 +1470,7 @@ struct RebaseSheet: View {
 /// 从工具栏的「标签」按钮、历史列表的右键菜单或提交详情头部的「创建标签」打开。
 struct NewTagSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppModel.self) private var app
     let model: WorktreeModel
     let commit: CommitSummary
 
@@ -1476,6 +1481,10 @@ struct NewTagSheet: View {
     @State private var remote: NamedRemote?
     @State private var nameExists = false
     @State private var isWorking = false
+
+    @State private var isGeneratingMessage = false
+    @State private var messageTask: Task<Void, Never>?
+    @State private var generationNotice: String?
 
     private var remotes: [NamedRemote] { model.repository?.remotes ?? [] }
 
@@ -1499,6 +1508,10 @@ struct NewTagSheet: View {
                 guard let suggestion = await model.suggestedTagName(), name.isEmpty else { return }
                 name = suggestion
             }
+        }
+        .onDisappear { messageTask?.cancel() }
+        .onChange(of: isAnnotated) { _, annotated in
+            if !annotated { messageTask?.cancel() }
         }
     }
 
@@ -1552,9 +1565,13 @@ struct NewTagSheet: View {
 
                 if isAnnotated {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("说明")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
+                        HStack {
+                            Text("说明")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            messageGenerationControl
+                        }
                         TextEditor(text: $message)
                             .font(.system(size: 11.5, design: .monospaced))
                             .scrollContentBackground(.hidden)
@@ -1564,6 +1581,11 @@ struct NewTagSheet: View {
                             .overlay {
                                 RoundedRectangle(cornerRadius: 7).stroke(.separator, lineWidth: 0.5)
                             }
+                        if let generationNotice {
+                            Text(generationNotice)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
 
@@ -1612,13 +1634,79 @@ struct NewTagSheet: View {
             }
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(.defaultAction)
-            .disabled(!canCreate || isWorking)
+            .disabled(!canCreate || isWorking || isGeneratingMessage)
         }
         .padding(14)
     }
 
     private var trimmedName: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @ViewBuilder
+    private var messageGenerationControl: some View {
+        if isGeneratingMessage {
+            HStack(spacing: 5) {
+                ProgressView().controlSize(.mini)
+                Button("取消生成") { messageTask?.cancel() }
+                    .buttonStyle(.borderless)
+            }
+            .font(.system(size: 10.5))
+        } else {
+            Button { generateMessage() } label: {
+                Label("AI 生成", systemImage: "sparkles")
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 10.5))
+            .disabled(!model.isAICommitEnabled || (model.location.isRemote && app.aiProvider == .codex)
+                      || trimmedName.isEmpty || nameProblem != nil || isWorking)
+            .help(model.location.isRemote && app.aiProvider == .codex
+                  ? "远程工作树请在设置中选择兼容 API 生成标签说明。"
+                  : model.isAICommitEnabled
+                  ? "根据所选提交的已提交改动生成标签说明，不包含未提交内容。"
+                  : "AI 生成功能已关闭，请在 Grove 设置中开启。")
+        }
+    }
+
+    @MainActor
+    private func generateMessage() {
+        guard !isGeneratingMessage, !isWorking, isAnnotated, model.isAICommitEnabled,
+              !trimmedName.isEmpty, nameProblem == nil else { return }
+        if !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "替换已有的标签说明？"
+            alert.informativeText = "AI 生成的说明会替换输入框里的现有内容。"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "替换并生成")
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        let targetName = trimmedName
+        let originalMessage = message
+        isGeneratingMessage = true
+        generationNotice = nil
+        messageTask = Task {
+            defer {
+                isGeneratingMessage = false
+                messageTask = nil
+            }
+            do {
+                let generated = try await model.generateTagMessage(name: targetName, on: commit)
+                try Task.checkCancellation()
+                guard message == originalMessage, trimmedName == targetName, isAnnotated else {
+                    generationNotice = "生成期间标签名或说明已修改，已保留你的输入。"
+                    return
+                }
+                message = generated.message
+                generationNotice = generated.note
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                app.report(title: "AI 标签说明生成失败", error: error, repository: model.repository,
+                           context: "\(model.failureContext) · 标签 \(targetName) · 提交 \(commit.oid)")
+            }
+        }
     }
 
     /// 名字本身的问题（空串除外 —— 那交给按钮禁用，不占提示位）。
@@ -1651,7 +1739,7 @@ struct NewTagSheet: View {
 
     @MainActor
     private func create() async {
-        guard !isWorking else { return }
+        guard !isWorking, !isGeneratingMessage, canCreate else { return }
         isWorking = true
         defer { isWorking = false }
 

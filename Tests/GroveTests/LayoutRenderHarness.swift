@@ -28,6 +28,24 @@ final class LayoutRenderHarness: XCTestCase {
         ProcessInfo.processInfo.environment["GROVE_RENDER"] == "1"
     }
 
+    func testRenderFailureContext() throws {
+        try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
+        let app = AppModel()
+        let repository = RepositoryModel(root: URL(fileURLWithPath: "/Users/jamie/Documents/code/tools/Grove"),
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: app)
+        app.report(title: "自动 AI Review 检查失败", error: CommandFailure(
+            executable: "/opt/homebrew/bin/gh", arguments: ["pr", "list"], exitCode: 1,
+            output: "HTTP 403: Resource not accessible by integration"
+        ), repository: repository, context: "PR #42 · 读取最新提交 · https://github.com/example/Grove/pull/42")
+        let failure = try XCTUnwrap(app.failures.first)
+        let view = FailureBanner(failure: failure, dismiss: {})
+            .padding(20)
+            .frame(width: 600, height: 300, alignment: .top)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .environment(\.colorScheme, .light)
+        try render(view, size: CGSize(width: 600, height: 300), to: "/tmp/grove-render-failure-context.png")
+    }
+
     func testRenderWorktreeDetail() async throws {
         try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
 
@@ -111,6 +129,39 @@ final class LayoutRenderHarness: XCTestCase {
                 .environment(app)
             try render(tagSheet, size: CGSize(width: 480, height: 420), to: "/tmp/grove-render-new-tag.png")
         }
+    }
+
+    func testRenderNewTagAI() async throws {
+        try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let git = try await GitClient.resolve()
+        try await git.run(["init", "-b", "main"], in: root)
+        try await git.run(["config", "user.name", "测试"], in: root)
+        try await git.run(["config", "user.email", "test@example.invalid"], in: root)
+        try await git.run(["commit", "--allow-empty", "-m", "创建标签测试"], in: root)
+        try await git.createTag("v1.0.0", message: "发布说明", at: "HEAD", in: root)
+        let commits = try await git.log(in: root, limit: 1)
+        let commit = try XCTUnwrap(commits.first)
+        let suite = "grove-tag-render-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AIGenerationSettings(defaults: defaults)
+        settings.setEnabled(true)
+        settings.setProvider(.codex)
+        let app = AppModel(aiGenerationSettings: settings)
+        let repository = RepositoryModel(root: root, git: git, app: app)
+        let worktree = Worktree(path: root, head: commit.oid, branch: "main", isBare: false,
+                                isDetached: false, lockReason: nil, prunableReason: nil)
+        let model = WorktreeModel(worktree: worktree, repository: repository, git: git, app: app)
+        try render(
+            NewTagSheet(model: model, commit: commit)
+                .environment(app)
+                .environment(\.colorScheme, .light)
+                .background(Color(nsColor: .windowBackgroundColor)),
+            size: CGSize(width: 480, height: 420), to: "/tmp/grove-render-new-tag-ai.png"
+        )
     }
 
     func testSidebarSelectionInsets() throws {

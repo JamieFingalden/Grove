@@ -39,6 +39,43 @@ final class TagTests: XCTestCase {
         XCTAssertTrue(exists)
     }
 
+    func testAITagContextUsesSelectedCommitAndExcludesOtherChanges() async throws {
+        let (git, root, _) = try await makeRepository()
+        let file = root.appendingPathComponent("file.txt")
+        try Data("标签目标内容\n".utf8).write(to: file)
+        try Data("SECRET=不应发送的凭据\n".utf8).write(to: root.appendingPathComponent(".env"))
+        try await git.stageAll(in: root)
+        try await git.commit(message: "标签目标提交", in: root)
+        let commits = try await git.log(in: root, limit: 1)
+        let selected = try XCTUnwrap(commits.first)
+
+        try Data("后续提交内容\n".utf8).write(to: file)
+        try await git.stageAll(in: root)
+        try await git.commit(message: "后续提交标题", in: root)
+        try Data("尚未提交的暂存内容\n".utf8).write(to: file)
+        try await git.stageAll(in: root)
+        try Data("尚未暂存的内容\n".utf8).write(to: file)
+
+        let input = try await TagMessageGenerator.prepare(in: root, name: "v1.0.0", commit: selected, git: git)
+
+        XCTAssertTrue(input.prompt.contains("v1.0.0"))
+        XCTAssertTrue(input.prompt.contains(selected.oid))
+        XCTAssertTrue(input.prompt.contains("标签目标内容"))
+        XCTAssertFalse(input.prompt.contains("不应发送的凭据"))
+        XCTAssertTrue(input.note?.contains("疑似凭据") == true)
+        for excluded in ["后续提交内容", "后续提交标题", "尚未提交的暂存内容", "尚未暂存的内容"] {
+            XCTAssertFalse(input.prompt.contains(excluded))
+        }
+    }
+
+    func testAITagOutputIsCleanedAndInvalidContentRejected() throws {
+        let valid = Data(#"{"body":"```\n发布说明\n```"}"#.utf8)
+        XCTAssertEqual(try TagMessageGenerator.decode(valid), "发布说明")
+        for invalid in [#"{"body":"  "}"#, #"{"body":123}"#, "not-json"] {
+            XCTAssertThrowsError(try TagMessageGenerator.decode(Data(invalid.utf8)))
+        }
+    }
+
     func testLightweightTagPointsAtCommitDirectly() async throws {
         let (git, root, oid) = try await makeRepository()
 
