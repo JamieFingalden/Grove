@@ -24,11 +24,17 @@ enum AIReviewAutomation {
     }
 
     static func discussionContext(_ threads: [ReviewThread]) -> String {
-        let discussions = threads.filter { !$0.isSystemOnly }.sorted {
+        // 凭据或密钥文件上的行内讨论带着原始 diffHunk 和评论正文，整条跳过，
+        // 不让敏感内容绕过确定性排除从讨论侧混进提示词。
+        func isOnSecretPath(_ thread: ReviewThread) -> Bool {
+            thread.filePath.map { DiffBudget.isSecret($0) } ?? false
+        }
+        let secretThreads = threads.filter { !$0.isSystemOnly && isOnSecretPath($0) }
+        let discussions = threads.filter { !$0.isSystemOnly && !isOnSecretPath($0) }.sorted {
             if $0.isResolved != $1.isResolved { return !$0.isResolved }
             return ($0.firstNote?.createdAt ?? .distantPast) > ($1.firstNote?.createdAt ?? .distantPast)
         }
-        guard !discussions.isEmpty else { return "（没有历史讨论。）" }
+        guard !discussions.isEmpty || !secretThreads.isEmpty else { return "（没有历史讨论。）" }
         let text = discussions.map { thread in
             let location = thread.filePath.map { "\($0):\(thread.line ?? 0)" } ?? "整体讨论"
             let notes = thread.notes.filter { !$0.isSystem }.map {
@@ -37,8 +43,12 @@ enum AIReviewAutomation {
             return "讨论 \(thread.id) · \(location) · \(thread.isResolved ? "已解决" : "未解决") · \(thread.isOutdated ? "旧版本定位" : "当前定位")\n代码片段：\n\(thread.diffHunk ?? "（无）")\n发言与回复：\n\(notes)"
         }.joined(separator: "\n\n")
         let limit = 64 * 1024
-        let bounded = CommitPromptBuilder.limited(text, byteLimit: limit)
-        return bounded + (text.utf8.count > limit ? "\n（历史讨论超出预算，已优先保留未解决讨论；省略部分不能视为已解决。）" : "")
+        var result = CommitPromptBuilder.limited(text, byteLimit: limit)
+            + (text.utf8.count > limit ? "\n（历史讨论超出预算，已优先保留未解决讨论；省略部分不能视为已解决。）" : "")
+        if !secretThreads.isEmpty {
+            result += "\n（另有 \(secretThreads.count) 条位于凭据或密钥文件上的讨论已省略，不能视为已解决或已核实。）"
+        }
+        return result
     }
 
     /// 行号吸附容忍的最近距离。超过就不硬贴行，退化为无定位的整体评论。

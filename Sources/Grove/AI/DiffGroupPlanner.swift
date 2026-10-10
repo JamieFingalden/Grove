@@ -22,9 +22,9 @@ enum DiffGroupPlanner {
     }
 
     static func plan(files: [FileDiff], byteLimit: Int, maxGroups: Int = DiffGroupPlanner.maxGroups) -> Plan {
-        let secretFiles = files.filter { DiffBudget.isSecret($0.displayPath) }
+        let secretFiles = files.filter { DiffBudget.isSecretFile($0) }
         let secretNames = secretFiles.map(\.displayPath)
-        let reviewable = files.filter { !DiffBudget.isSecret($0.displayPath) }
+        let reviewable = files.filter { !DiffBudget.isSecretFile($0) }
         let total = Data(PullRequestReviewPromptBuilder.unifiedDiff(reviewable).utf8).count
         guard reviewable.count > 1, total > max(0, byteLimit) else {
             return Plan(groups: [reviewable], uncoveredFiles: [], secretFiles: secretNames, isSplit: false)
@@ -73,8 +73,13 @@ enum DiffGroupPlanner {
             }
         }
 
-        // 大组先审，优先保住改动最多的覆盖面。超出上限的组整组让位。
+        // 组数不够时先保住核心代码组（混入核心文件的组也算核心），纯测试/
+        // 锁文件组让位 —— 只按体量排序会让大体积测试组挤掉小生产组，
+        // 和装箱时的核心优先策略自相矛盾。体量只做同层内的排序。
         let ranked = groups.enumerated().sorted { lhs, rhs in
+            let lhsCore = !lhs.element.files.allSatisfy { DiffBudget.isLowValue($0.displayPath) }
+            let rhsCore = !rhs.element.files.allSatisfy { DiffBudget.isLowValue($0.displayPath) }
+            if lhsCore != rhsCore { return lhsCore }
             if lhs.element.bytes != rhs.element.bytes { return lhs.element.bytes > rhs.element.bytes }
             return lhs.offset < rhs.offset
         }.map(\.element)

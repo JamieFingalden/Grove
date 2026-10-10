@@ -327,6 +327,32 @@ final class AIReviewAutomationTests: XCTestCase {
         XCTAssertNil(AIReviewAutomation.existingDiscussion(for: different, threads: [thread]))
     }
 
+    func testDiscussionContextOmitsSecretFileThreads() {
+        let secretThread = ReviewThread(
+            id: "env-thread",
+            notes: [.init(id: "1", authorName: "作者", authorLogin: "author",
+                          body: "这是令牌轮换的说明", createdAt: nil, isSystem: false)],
+            filePath: ".env", line: 2, isResolved: false, isResolvable: true,
+            diffHunk: "-SECRET_TOKEN=abc123\n+SECRET_TOKEN=def456"
+        )
+        let normalThread = ReviewThread(
+            id: "code-thread",
+            notes: [.init(id: "2", authorName: "审查者", authorLogin: "reviewer",
+                          body: "旧接口删除影响调用方", createdAt: nil, isSystem: false)],
+            filePath: "a.swift", line: 1, isResolved: false, isResolvable: true,
+            diffHunk: "+new"
+        )
+        let context = AIReviewAutomation.discussionContext([secretThread, normalThread])
+
+        XCTAssertTrue(context.contains("旧接口删除影响调用方"))
+        XCTAssertTrue(context.contains("a.swift"))
+        XCTAssertFalse(context.contains("SECRET_TOKEN"))
+        XCTAssertFalse(context.contains("def456"))
+        XCTAssertFalse(context.contains("令牌轮换"))
+        XCTAssertTrue(context.contains("凭据或密钥文件"))
+        XCTAssertTrue(context.contains("不能视为已解决或已核实"))
+    }
+
     func testLocationSnapsToNearestChangedLineWithinTolerance() {
         let additions = (1...10).map { "+line \($0)" }.joined(separator: "\n")
         let files = DiffParser.parse("""

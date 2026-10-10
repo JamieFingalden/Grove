@@ -310,6 +310,12 @@ enum DiffBudget {
         ".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".kdbx"
     ]
 
+    /// FileDiff 级别的敏感判定：任一侧路径命中即算 —— 把 `.env` 重命名成
+    /// `config.txt` 再改几行，删除行里照样带着旧凭据内容，不能只看新路径。
+    static func isSecretFile(_ file: FileDiff) -> Bool {
+        [file.oldPath, file.newPath].compactMap { $0 }.contains { isSecret($0) }
+    }
+
     /// 按 `diff --git` 行切分成单文件段。每段都带自己的文件头。
     static func splitFileDiffs(_ diff: String) -> [String] {
         SectionSplitter.split(diff)

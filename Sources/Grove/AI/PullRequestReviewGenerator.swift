@@ -127,10 +127,11 @@ enum PullRequestReviewPromptBuilder {
 
     static func build(_ input: Input) -> Result {
         // 疑似凭据或密钥的文件内容在任何预算下都不进提示词，只保留文件名，
-        // 让模型知道它们变了但不臆测内容。
+        // 让模型知道它们变了但不臆测内容。按任一侧路径判定：重命名到
+        // 无辜名字的凭据文件同样排除。
         let scopeFiles = input.group?.files ?? input.files
-        let diffFiles = scopeFiles.filter { !DiffBudget.isSecret($0.displayPath) }
-        let secretNames = scopeFiles.filter { DiffBudget.isSecret($0.displayPath) }
+        let diffFiles = scopeFiles.filter { !DiffBudget.isSecretFile($0) }
+        let secretNames = scopeFiles.filter { DiffBudget.isSecretFile($0) }
             .map(\.displayPath)
         let completeDiff = unifiedDiff(diffFiles)
         let limit = max(0, input.maxDiffBytes)
@@ -146,7 +147,7 @@ enum PullRequestReviewPromptBuilder {
         }.joined(separator: "\n") ?? "（没有检查数据。）"
         let rawFileSummary = input.files.map { file -> String in
             var suffix = file.isBinary ? "，二进制" : ""
-            if DiffBudget.isSecret(file.displayPath) { suffix += "，内容已排除（疑似凭据）" }
+            if DiffBudget.isSecretFile(file) { suffix += "，内容已排除（疑似凭据）" }
             return "- \(file.displayPath)：+\(file.additions) −\(file.deletions)\(suffix)"
         }.joined(separator: "\n")
         let files = CommitPromptBuilder.limited(rawFileSummary, byteLimit: 16 * 1024)
@@ -156,7 +157,7 @@ enum PullRequestReviewPromptBuilder {
         let groupNotice: String
         if let group = input.group {
             let names = CommitPromptBuilder.limited(
-                group.files.filter { !DiffBudget.isSecret($0.displayPath) }
+                group.files.filter { !DiffBudget.isSecretFile($0) }
                     .map(\.displayPath).joined(separator: "、"),
                 byteLimit: 4 * 1024
             )

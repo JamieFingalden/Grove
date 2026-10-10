@@ -99,6 +99,30 @@ final class PullRequestReviewPromptBuilderTests: XCTestCase {
         XCTAssertTrue(result.text.contains("+new"))
     }
 
+    func testRenamedSecretFileIsExcludedByEitherPath() {
+        let files = DiffParser.parse("""
+        diff --git a/.env b/config.txt
+        similarity index 80%
+        rename from .env
+        rename to config.txt
+        --- a/.env
+        +++ b/config.txt
+        @@ -1,2 +1,2 @@
+        -SECRET_TOKEN=abc123
+        -PASSWORD=hunter2
+        +APP_NAME=grove
+        """)
+        let result = PullRequestReviewPromptBuilder.build(
+            .init(pullRequest: makePullRequest(), files: files))
+
+        // 旧路径是凭据文件：即使 displayPath 已是无辜的新名字，内容也不送审。
+        XCTAssertFalse(result.text.contains("SECRET_TOKEN"))
+        XCTAssertFalse(result.text.contains("hunter2"))
+        XCTAssertFalse(result.text.contains("APP_NAME=grove"))
+        XCTAssertTrue(result.text.contains("config.txt"))
+        XCTAssertTrue(result.text.contains("疑似凭据"))
+    }
+
     func testGroupScopeRestrictsDiffToItsOwnFiles() {
         let files = DiffParser.parse("""
         diff --git a/core/engine.swift b/core/engine.swift
@@ -471,6 +495,24 @@ final class DiffGroupPlannerTests: XCTestCase {
         XCTAssertFalse(plan.groups.flatMap { $0.map(\.displayPath) }.contains("deploy/server.pem"))
     }
 
+    func testRenamedSecretFileIsExcludedBeforeGrouping() {
+        let renamed = FileDiff(
+            oldPath: ".env", newPath: "config.txt",
+            hunks: [DiffHunk(id: 1, header: "@@ -1,2 +1,2 @@", oldStart: 1, oldCount: 2,
+                             newStart: 1, newCount: 2, lines: [
+                                DiffLine(id: 1, kind: .deletion, text: "SECRET_TOKEN=abc123", oldNumber: 1, newNumber: nil),
+                                DiffLine(id: 2, kind: .addition, text: "APP_NAME=grove", oldNumber: nil, newNumber: 1),
+                             ])],
+            isBinary: false, isNewFile: false, isDeletedFile: false, isRename: true,
+            isModeChangeOnly: false, oldMode: nil, newMode: nil
+        )
+        let files = makeFiles(specced: [("core/engine.swift", 60)]) + [renamed]
+        let plan = DiffGroupPlanner.plan(files: files, byteLimit: 2_500)
+
+        XCTAssertEqual(plan.secretFiles, ["config.txt"])
+        XCTAssertEqual(plan.groups.flatMap { $0.map(\.displayPath) }, ["core/engine.swift"])
+    }
+
     func testGroupCapPrefersDroppingLowValueFiles() {
         let files = makeFiles(specced: [
             ("core/engine.swift", 60), ("ui/view.swift", 60), ("tests/spec_test.rb", 40),
@@ -484,6 +526,22 @@ final class DiffGroupPlannerTests: XCTestCase {
             Set(plan.groups.flatMap { $0.map(\.displayPath) }),
             Set(["core/engine.swift", "ui/view.swift"])
         )
+    }
+
+    func testGroupCapKeepsSmallCoreGroupsAheadOfLargerLowValueGroup() {
+        // 体量排序会保住更大的测试组、裁掉更小的生产组；核心优先必须在
+        // 上限裁剪时同样生效。
+        let files = makeFiles(specced: [
+            ("core/engine.swift", 60), ("ui/view.swift", 40), ("tests/spec_test.rb", 60),
+        ])
+        let plan = DiffGroupPlanner.plan(files: files, byteLimit: 2_500, maxGroups: 2)
+
+        XCTAssertEqual(plan.groups.count, 2)
+        XCTAssertEqual(
+            Set(plan.groups.flatMap { $0.map(\.displayPath) }),
+            Set(["core/engine.swift", "ui/view.swift"])
+        )
+        XCTAssertEqual(plan.uncoveredFiles, ["tests/spec_test.rb"])
     }
 }
 
