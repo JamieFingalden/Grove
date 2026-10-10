@@ -13,7 +13,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Grove",
-            path: "Sources/Grove"
+            path: "Sources/Grove",
+            resources: [.process("Resources/PullRequestIcons")]
         ),
         .testTarget(
             name: "GroveTests",

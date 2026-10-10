@@ -3,6 +3,51 @@ import XCTest
 
 @MainActor
 final class ForgeSafetyTests: XCTestCase {
+    func testSidebarPullRequestsIncludeHistoryWithoutChangingActiveLinks() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let response = directory.appendingPathComponent("response.json")
+        let executable = directory.appendingPathComponent("gh")
+        try Data(#"""
+        #!/bin/sh
+        if [ "$3" = "--head" ]; then
+          cat "$GROVE_TEST_RESPONSE"
+        else
+          printf '[]\n'
+        fi
+        """#.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        var environment = ProcessInfo.processInfo.environment
+        environment["GROVE_TEST_RESPONSE"] = response.path
+        let forge = GitHubClient(executable: executable, environment: environment)
+        let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: environment)
+        let repository = RepositoryModel(root: directory, git: git, app: nil, forge: forge)
+        repository.slug = "group/project"
+        repository.defaultBranch = "main"
+        repository.worktrees = ["main", "feature"].map { branch in
+            Worktree(path: directory.appendingPathComponent(branch), head: nil, branch: branch,
+                     isBare: false, isDetached: false, lockReason: nil, prunableReason: nil)
+        }
+        for state in ["MERGED", "CLOSED", "OPEN"] {
+            let json = """
+            [{"number":42,"title":"评审","state":"\(state)","isDraft":false,"headRefName":"feature",
+              "baseRefName":"main","url":"u","updatedAt":"2026-10-10T00:00:00Z",
+              "additions":0,"deletions":0,"changedFiles":0,"isCrossRepository":false,"labels":[]}]
+            """
+            try Data(json.utf8).write(to: response)
+            await repository.refreshPullRequests()
+            XCTAssertEqual(repository.sidebarPullRequest(forBranch: "feature")?.state, state)
+            XCTAssertNil(repository.sidebarPullRequest(forBranch: "main"))
+            XCTAssertNil(repository.pullRequest(forBranch: "feature"))
+            let linked = await forge.linkedPullRequest(branch: "feature", defaultBranch: "main", in: directory)
+            XCTAssertEqual(linked?.state, state == "OPEN" ? state : nil, "历史请求不应占用评审入口")
+        }
+        try Data("[]".utf8).write(to: response)
+        await repository.refreshWorktreePullRequests()
+        XCTAssertNil(repository.sidebarPullRequest(forBranch: "feature"), "无关联请求时不应保留旧图标")
+    }
+
     func testLinkedPullRequestIgnoresChangedOriginAndBranchAndClearsCachedModels() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

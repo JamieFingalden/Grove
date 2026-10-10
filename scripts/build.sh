@@ -60,6 +60,7 @@ install -m 755 "${BIN_DIR}/Grove" "${CONTENTS_DIR}/MacOS/Grove"
 install -m 644 "${PROJECT_DIR}/Support/Info.plist" "${CONTENTS_DIR}/Info.plist"
 install -m 644 "${ICON_SOURCE_PATH}" "${CONTENTS_DIR}/Resources/GroveIcon.png"
 ditto "${ASSET_OUTPUT_DIR}/" "${CONTENTS_DIR}/Resources/"
+ditto "${BIN_DIR}/Grove_Grove.bundle" "${CONTENTS_DIR}/Resources/Grove_Grove.bundle"
 
 SIGNING_IDENTITY="$(
     security find-identity -v -p codesigning \

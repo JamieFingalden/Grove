@@ -30,6 +30,8 @@ final class RepositoryModel: Identifiable {
     var pullRequests: [PullRequest] = []
     /// PR 列表视图当前显示的内容，按 `listState` 过滤。
     var listPullRequests: [PullRequest] = []
+    private(set) var worktreePullRequests: [String: PullRequest] = [:]
+    private var worktreePullRequestRefreshID = UUID()
 
     /// 只有详情接口才知道的状态（审批、可合并性 —— GitLab 的列表接口两样都不回）。
     /// 列表每次刷新都被服务端数据整体替换，把已知详情记在这里刷新后重放，
@@ -40,6 +42,9 @@ final class RepositoryModel: Identifiable {
     func mergeDetailIntoList(_ detail: PullRequest, fromOrigin expectedOrigin: GitRemote?) {
         guard origin == expectedOrigin else { return }
         detailKnownState[detail.number] = detail
+        for branch in worktreePullRequests.keys where worktreePullRequests[branch]?.number == detail.number {
+            worktreePullRequests[branch] = detail
+        }
         applyDetailState()
     }
 
@@ -227,11 +232,14 @@ final class RepositoryModel: Identifiable {
         if previousKind != forge?.kind {
             clearForgeState()
         }
-        guard slug == nil, let forge else { return }
-        let expectedOrigin = origin
-        let resolvedSlug = await forge.repositorySlug(in: root)
-        guard origin == expectedOrigin, self.forge?.kind == forge.kind else { return }
-        slug = resolvedSlug
+        guard let forge else { return }
+        if slug == nil {
+            let expectedOrigin = origin
+            let resolvedSlug = await forge.repositorySlug(in: root)
+            guard origin == expectedOrigin, self.forge?.kind == forge.kind else { return }
+            slug = resolvedSlug
+        }
+        await refreshWorktreePullRequests()
     }
 
     private func clearForgeState() {
@@ -240,6 +248,8 @@ final class RepositoryModel: Identifiable {
         slug = nil
         pullRequests = []
         listPullRequests = []
+        worktreePullRequests = [:]
+        worktreePullRequestRefreshID = UUID()
         detailKnownState = [:]
         for model in worktreeModels.values { model.linkedPullRequest = nil }
         listState = .open
@@ -279,6 +289,7 @@ final class RepositoryModel: Identifiable {
                   origin == requestedOrigin, listState == requestedState else { return }
             listPullRequests = loadedList
             updateOpenPullRequests(loadedOpen, fromOrigin: requestedOrigin)
+            await refreshWorktreePullRequests()
         } catch {
             guard pullRequestRefreshID == requestID, origin == requestedOrigin else { return }
             app?.report(title: "读取 PR 列表失败", error: error)
@@ -304,6 +315,42 @@ final class RepositoryModel: Identifiable {
     func pullRequest(forBranch branch: String?) -> PullRequest? {
         guard let branch else { return nil }
         return pullRequests.first { $0.headRefName == branch }
+    }
+
+    func sidebarPullRequest(forBranch branch: String?) -> PullRequest? {
+        guard let branch, branch != defaultBranch else { return nil }
+        return pullRequest(forBranch: branch) ?? worktreePullRequests[branch]
+    }
+
+    func refreshWorktreePullRequests() async {
+        guard let forge, slug != nil else { return }
+        let requestID = UUID()
+        worktreePullRequestRefreshID = requestID
+        let expectedOrigin = origin
+        let expectedDefaultBranch = defaultBranch
+        let expectedBranches = Set(worktrees.compactMap(\.branch))
+        let directory = root
+        let requests = await withTaskGroup(of: (String, PullRequest?).self) { group in
+            for branch in expectedBranches where branch != expectedDefaultBranch {
+                group.addTask {
+                    let request = await forge.linkedPullRequest(
+                        branch: branch, defaultBranch: expectedDefaultBranch,
+                        in: directory, includeInactive: true
+                    )
+                    return (branch, request)
+                }
+            }
+            var results: [String: PullRequest] = [:]
+            for await (branch, request) in group {
+                results[branch] = request
+            }
+            return results
+        }
+        guard !Task.isCancelled, worktreePullRequestRefreshID == requestID,
+              origin == expectedOrigin, self.forge?.kind == forge.kind,
+              defaultBranch == expectedDefaultBranch,
+              Set(worktrees.compactMap(\.branch)) == expectedBranches else { return }
+        worktreePullRequests = requests
     }
 
     /// 托管平台确认请求已结束后先更新本地列表，避免等待后续网络刷新时仍显示旧状态。

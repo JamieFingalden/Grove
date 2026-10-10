@@ -81,7 +81,13 @@ private struct ProjectSection: View {
     let project: AppModel.ProjectGroup
     @Binding var sheet: RootView.ActiveSheet?
 
-    @State private var worktreesExpanded = true
+    @AppStorage private var worktreesExpanded: Bool
+
+    init(project: AppModel.ProjectGroup, sheet: Binding<RootView.ActiveSheet?>) {
+        self.project = project
+        _sheet = sheet
+        _worktreesExpanded = AppStorage(wrappedValue: true, "sidebar.projectExpanded.\(project.key)")
+    }
 
     // 不包 Section：侧边栏 List 底层是 NSOutlineView，Section 是它的父节点，
     // 动画移除子行时两者行数对不上会直接闪退（_validateParentRowEntry）。
@@ -260,7 +266,7 @@ private struct WorktreeRow: View {
     }
 
     private var pullRequest: PullRequest? {
-        detail?.linkedPullRequest ?? repository.pullRequest(forBranch: worktree.branch)
+        repository.sidebarPullRequest(forBranch: worktree.branch) ?? detail?.linkedPullRequest
     }
 
     var body: some View {
@@ -345,9 +351,9 @@ private struct WorktreeRow: View {
     @ViewBuilder
     private var trailingBadges: some View {
         HStack(spacing: 4) {
-            // 这个分支最新一条流水线的状态：推完不用打开 CI 页也知道绿了没。
+            // 侧栏只提示需要关注的流水线状态；成功状态留在 CI 页。
             if let branch = worktree.branch,
-               let ci = repository.pipelineStatusByRef[branch] {
+               let ci = repository.pipelineStatusByRef[branch], ci != .success {
                 Image(systemName: ci.systemImage)
                     .font(.system(size: 9))
                     .foregroundStyle(ci.tint)
@@ -656,26 +662,41 @@ struct PullRequestBadge: View {
     let pullRequest: PullRequest
 
     var body: some View {
-        HStack(spacing: 2) {
-            Image(systemName: pullRequest.status.systemImage)
-                .font(.system(size: 8, weight: .bold))
-            Text("#\(pullRequest.number)")
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                .monospacedDigit()
+        if let icon = Self.iconImage(for: pullRequest.status) {
+            Image(nsImage: icon)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .foregroundStyle(tint)
+                .frame(width: 16, height: 16)
+                .accessibilityLabel(helpText)
+                .help(helpText)
         }
-        .foregroundStyle(tint)
-        .padding(.horizontal, 4)
-        .padding(.vertical, 1.5)
-        .background(tint.opacity(0.14), in: Capsule())
-        .help(helpText)
+    }
+
+    static let iconBundle = Bundle.main.url(forResource: "Grove_Grove", withExtension: "bundle")
+        .flatMap { Bundle(url: $0) } ?? Bundle.module
+
+    static func iconImage(for status: PullRequest.Status) -> NSImage? {
+        iconBundle.url(forResource: iconName(for: status), withExtension: "png")
+            .flatMap { NSImage(contentsOf: $0) }
+    }
+
+    static func iconName(for status: PullRequest.Status) -> String {
+        switch status {
+        case .open: "pull-request-open"
+        case .draft: "pull-request-draft"
+        case .merged: "pull-request-merged"
+        case .closed: "pull-request-closed"
+        }
     }
 
     private var tint: Color {
         switch pullRequest.status {
         case .open: pullRequest.checks.isFailing ? .red : .green
         case .draft: .gray
-        case .merged: .purple
-        case .closed: .red
+        case .merged: Color(red: 146 / 255, green: 79 / 255, blue: 247 / 255)
+        case .closed: .orange
         }
     }
 

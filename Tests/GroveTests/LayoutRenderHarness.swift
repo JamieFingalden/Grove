@@ -113,6 +113,57 @@ final class LayoutRenderHarness: XCTestCase {
         }
     }
 
+    func testSidebarPullRequestIcons() throws {
+        try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
+        let states = ["OPEN", "MERGED", "CLOSED"]
+        let requests = states.enumerated().map { index, state in
+            PullRequest(
+                number: index + 1, title: "评审", state: state, isDraft: false,
+                headRefName: "feature", baseRefName: "main", url: "u", author: nil,
+                updatedAt: Date(), additions: 0, deletions: 0, changedFiles: 0,
+                reviewDecision: nil, mergeable: nil, isCrossRepository: false,
+                labels: [], statusCheckRollup: nil, body: nil, headRepositoryOwner: nil
+            )
+        }
+        for status in [PullRequest.Status.open, .draft, .merged, .closed] {
+            let resource = try XCTUnwrap(PullRequestBadge.iconBundle.url(
+                forResource: PullRequestBadge.iconName(for: status), withExtension: "png"
+            ))
+            let image = try XCTUnwrap(NSBitmapImageRep(data: Data(contentsOf: resource)))
+            XCTAssertEqual(image.pixelsWide, 64)
+            XCTAssertEqual(image.pixelsHigh, 64)
+            XCTAssertTrue(image.hasAlpha, "官方图标必须保留透明背景")
+            XCTAssertNotNil(PullRequestBadge.iconImage(for: status))
+            let visiblePixels = (0..<image.pixelsWide).reduce(0) { count, horizontal in
+                count + (0..<image.pixelsHigh).filter { vertical in
+                    (image.colorAt(x: horizontal, y: vertical)?.alphaComponent ?? 0) > 0.1
+                }.count
+            }
+            XCTAssertGreaterThan(visiblePixels, 0, "图标不能是全透明的空图片")
+            XCTAssertLessThan(visiblePixels, image.pixelsWide * image.pixelsHigh, "图标背景必须透明")
+        }
+        try render(
+            VStack(spacing: 0) {
+                ForEach(requests) { request in
+                    HStack(spacing: 8) {
+                        Image(systemName: "leaf")
+                            .foregroundStyle(.secondary)
+                        Text("feature/\(request.state.lowercased())")
+                        Spacer()
+                        PullRequestBadge(pullRequest: request)
+                    }
+                    .font(.system(size: 13))
+                    .frame(height: SidebarMetrics.rowHeight)
+                }
+            }
+                .padding(16)
+                .environment(\.colorScheme, .light)
+                .background(Color(nsColor: .windowBackgroundColor)),
+            size: CGSize(width: 320, height: 180),
+            to: "/tmp/grove-render-sidebar-pr-states.png"
+        )
+    }
+
     func testRenderLongCommitBody() throws {
         try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
         let commit = CommitSummary(
