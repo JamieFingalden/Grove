@@ -5,6 +5,7 @@ struct HistoryView: View {
     @Binding var sheet: RootView.ActiveSheet?
     @State private var selectedFileID: String?
     @State private var isLegendShown = false
+    @State private var isCommitBodyExpanded = false
 
     var body: some View {
         // 跟 ChangesView 同理：HSplitView 不会自己撑满父容器，得显式声明。
@@ -29,6 +30,9 @@ struct HistoryView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onChange(of: model.selectedCommit) { _, _ in
+            isCommitBodyExpanded = false
+        }
     }
 
     /// 筛选栏。参照 IDEA 的 git log：搜索框 + 提交人 + 更多条件。
@@ -271,7 +275,7 @@ struct HistoryView: View {
         if let oid = model.selectedCommit {
             VStack(spacing: 0) {
                 if let commit = model.commits.first(where: { $0.oid == oid }) {
-                    CommitHeader(commit: commit) {
+                    CommitHeader(commit: commit, isBodyExpanded: $isCommitBodyExpanded) {
                         sheet = .newTag(model, commit)
                     }
                     Divider()
@@ -595,8 +599,9 @@ private struct CommitGraphCell: View {
     }
 }
 
-private struct CommitHeader: View {
+struct CommitHeader: View {
     let commit: CommitSummary
+    @Binding var isBodyExpanded: Bool
     var onCreateTag: () -> Void = {}
 
     var body: some View {
@@ -631,18 +636,54 @@ private struct CommitHeader: View {
 
             // 提交正文（标题之后的完整信息）。只有标题的提交不占这块地方。
             if !commit.body.isEmpty {
-                Text(commit.body)
+                DisclosureGroup("提交说明", isExpanded: $isBodyExpanded) {
+                    CommitBodyScrollView(text: commit.body)
+                        .frame(height: 180)
+                }
                     .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 3)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+}
+
+private struct CommitBodyScrollView: NSViewRepresentable {
+    let text: String
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = false
+        scrollView.scrollerStyle = .legacy
+        scrollView.drawsBackground = false
+
+        let textView = NSTextView(frame: .zero)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.drawsBackground = false
+        textView.font = .systemFont(ofSize: 11.5)
+        textView.textColor = .secondaryLabelColor
+        textView.textContainerInset = NSSize(width: 0, height: 4)
+        textView.autoresizingMask = [.width]
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        scrollView.documentView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView,
+              textView.string != text else { return }
+        textView.string = text
+        textView.scrollToBeginningOfDocument(nil)
     }
 }
 

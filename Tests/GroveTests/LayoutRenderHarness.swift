@@ -113,6 +113,57 @@ final class LayoutRenderHarness: XCTestCase {
         }
     }
 
+    func testRenderLongCommitBody() throws {
+        try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
+        let commit = CommitSummary(
+            oid: String(repeating: "a", count: 40), subject: "feat: 超长提交说明",
+            authorName: "测试", authorEmail: "test@example.com", date: Date(),
+            parents: [], refs: [],
+            body: (1...100).map { "第 \($0) 行：提交说明不应挤走文件列表和差异视图。" }.joined(separator: "\n")
+        )
+        func descendants(of view: NSView) -> [NSView] {
+            view.subviews.flatMap { [$0] + descendants(of: $0) }
+        }
+        for isExpanded in [false, true] {
+            let header = CommitHeader(commit: commit, isBodyExpanded: .constant(isExpanded))
+            let hosting = try render(
+                VStack(spacing: 0) {
+                    header.fixedSize(horizontal: false, vertical: true)
+                    Divider()
+                    Color.gray.opacity(0.1)
+                }
+                    .environment(\.colorScheme, .light)
+                    .background(Color.white),
+                size: CGSize(width: 600, height: 400),
+                to: "/tmp/grove-render-commit-body-\(isExpanded ? "expanded" : "collapsed").png"
+            )
+            let scrollViews = descendants(of: hosting).compactMap { $0 as? NSScrollView }
+                .filter { $0.documentView is NSTextView }
+            if isExpanded {
+                let scrollView = try XCTUnwrap(scrollViews.first)
+                let textView = try XCTUnwrap(scrollView.documentView as? NSTextView)
+                XCTAssertEqual(textView.string, commit.body)
+                XCTAssertFalse(textView.isEditable)
+                XCTAssertTrue(textView.isSelectable)
+                XCTAssertTrue(scrollView.hasVerticalScroller)
+                XCTAssertFalse(scrollView.autohidesScrollers)
+                XCTAssertEqual(scrollView.scrollerStyle, .legacy)
+                let scroller = try XCTUnwrap(scrollView.verticalScroller)
+                XCTAssertFalse(scroller.isHidden, "展开后必须显示滚动条")
+                XCTAssertLessThan(scroller.knobProportion, 1, "超长正文应显示可拖动的滚动条")
+                XCTAssertEqual(scrollView.frame.height, 180, accuracy: 1)
+                let frame = scrollView.convert(scrollView.bounds, to: hosting)
+                XCTAssertTrue(hosting.bounds.contains(frame), "正文滚动区必须留在窗口内")
+                XCTAssertGreaterThan(textView.frame.height, scrollView.contentView.bounds.height)
+                textView.scrollToEndOfDocument(nil)
+                XCTAssertGreaterThan(scrollView.contentView.bounds.minY, 0, "必须能滚动到正文末尾")
+                XCTAssertEqual(textView.visibleRect.maxY, textView.bounds.maxY, accuracy: 5)
+            } else {
+                XCTAssertTrue(scrollViews.isEmpty, "默认收起时不应显示正文滚动区")
+            }
+        }
+    }
+
     func testRenderHistoryLongBranch() async throws {
         try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
         let git = try await GitClient.resolve()
