@@ -353,6 +353,54 @@ final class AIReviewAutomationTests: XCTestCase {
         XCTAssertTrue(context.contains("不能视为已解决或已核实"))
     }
 
+    func testDiscussionContextOmitsThreadsOnRenamedSecretFile() {
+        // 平台把重命名文件的讨论挂在新路径上（GitLab 记 position 新侧），
+        // 只按名字匹配会漏掉，必须对照 diff 的两侧路径。
+        let files = DiffParser.parse("""
+        diff --git a/.env b/config.txt
+        similarity index 80%
+        rename from .env
+        rename to config.txt
+        --- a/.env
+        +++ b/config.txt
+        @@ -1,1 +1,1 @@
+        -SECRET_TOKEN=abc123
+        +APP_NAME=grove
+        """)
+        let newSideThread = ReviewThread(
+            id: "new-side",
+            notes: [.init(id: "1", authorName: "作者", authorLogin: "author",
+                          body: "轮换说明", createdAt: nil, isSystem: false)],
+            filePath: "config.txt", line: 1, isResolved: false, isResolvable: true,
+            diffHunk: "-SECRET_TOKEN=abc123\n+APP_NAME=grove"
+        )
+        let oldSideThread = ReviewThread(
+            id: "old-side",
+            notes: [.init(id: "2", authorName: "审查者", authorLogin: "reviewer",
+                          body: "过期讨论", createdAt: nil, isSystem: false)],
+            filePath: ".env", line: 1, isResolved: true, isResolvable: true,
+            diffHunk: "-SECRET_TOKEN=abc123"
+        )
+        let normalThread = ReviewThread(
+            id: "code-thread",
+            notes: [.init(id: "3", authorName: "审查者", authorLogin: "reviewer",
+                          body: "旧接口删除影响调用方", createdAt: nil, isSystem: false)],
+            filePath: "a.swift", line: 1, isResolved: false, isResolvable: true,
+            diffHunk: "+new"
+        )
+        let context = AIReviewAutomation.discussionContext(
+            [newSideThread, oldSideThread, normalThread], files: files
+        )
+
+        XCTAssertTrue(context.contains("旧接口删除影响调用方"))
+        XCTAssertTrue(context.contains("a.swift"))
+        XCTAssertFalse(context.contains("SECRET_TOKEN"))
+        XCTAssertFalse(context.contains("APP_NAME=grove"))
+        XCTAssertFalse(context.contains("轮换说明"))
+        XCTAssertFalse(context.contains("过期讨论"))
+        XCTAssertTrue(context.contains("凭据或密钥文件"))
+    }
+
     func testLocationSnapsToNearestChangedLineWithinTolerance() {
         let additions = (1...10).map { "+line \($0)" }.joined(separator: "\n")
         let files = DiffParser.parse("""

@@ -23,11 +23,18 @@ enum AIReviewAutomation {
         }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    static func discussionContext(_ threads: [ReviewThread]) -> String {
+    static func discussionContext(_ threads: [ReviewThread], files: [FileDiff] = []) -> String {
         // 凭据或密钥文件上的行内讨论带着原始 diffHunk 和评论正文，整条跳过，
-        // 不让敏感内容绕过确定性排除从讨论侧混进提示词。
+        // 不让敏感内容绕过确定性排除从讨论侧混进提示词。托管平台把重命名
+        // 文件的讨论挂在某一侧路径上（GitLab 记新路径），只按名字匹配会漏掉
+        // 「.env 改名成 config.txt」这种讨论，所以要对照敏感文件 diff 的两侧。
+        let taintedPaths: Set<String> = Set(
+            files.filter(DiffBudget.isSecretFile)
+                .flatMap { [$0.oldPath, $0.newPath, $0.displayPath].compactMap { $0 } }
+        )
         func isOnSecretPath(_ thread: ReviewThread) -> Bool {
-            thread.filePath.map { DiffBudget.isSecret($0) } ?? false
+            guard let path = thread.filePath else { return false }
+            return DiffBudget.isSecret(path) || taintedPaths.contains(path)
         }
         let secretThreads = threads.filter { !$0.isSystemOnly && isOnSecretPath($0) }
         let discussions = threads.filter { !$0.isSystemOnly && !isOnSecretPath($0) }.sorted {

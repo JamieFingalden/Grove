@@ -237,6 +237,50 @@ final class PullRequestReviewPromptBuilderTests: XCTestCase {
             wasTruncated: false, selectedAreas: areas))
     }
 
+    func testDecodeDiscardsFindingsOutsideTheReviewedScope() throws {
+        let areas: Set<PullRequestAIReview.Assessment.Area> = [.compilation, .performance]
+        func finding(_ file: String, _ summary: String) -> [String: Any] {
+            ["area": "compilation_integration", "status": "risk", "summary": summary,
+             "evidence": "接口缺少旧参数", "file": file, "line": 1, "discussionID": NSNull()]
+        }
+        let risk: [String: Any] = ["status": "risk", "summary": "接口存在兼容问题",
+            "evidence": NSNull(), "file": NSNull(), "line": NSNull()]
+        var clear = risk
+        clear["status"] = "clear"
+        clear["summary"] = "性能没有退化"
+        var output: [String: Any] = [
+            "verdict": "ready", "summary": "接口需要修改",
+            "assessments": ["compilation_integration": risk, "performance_complexity": clear],
+            "findings": [finding("core/engine.swift", "本组文件的调用方会编译失败"),
+                         finding("ui/view.swift", "别组文件的问题不该由本组报告")]
+        ]
+
+        // 范围外的 finding 被丢弃，范围内的保留；risk 区域仍有覆盖，校验通过。
+        let review = try CodexPullRequestReviewGenerator.decode(
+            JSONSerialization.data(withJSONObject: output),
+            wasTruncated: false, selectedAreas: areas,
+            allowedPaths: ["core/engine.swift", "core/old.swift"]
+        )
+        XCTAssertEqual(review.findings?.map(\.file), ["core/engine.swift"])
+        XCTAssertEqual(review.verdict, .needsChanges)
+
+        // 某个 risk 区域的 finding 全部在范围外时，丢弃后覆盖关系破坏，
+        // 整份输出按无效处理，不能让幻觉定位混进合并结果。
+        output["findings"] = [finding("ui/view.swift", "唯一的问题在别组文件上")]
+        XCTAssertThrowsError(try CodexPullRequestReviewGenerator.decode(
+            JSONSerialization.data(withJSONObject: output),
+            wasTruncated: false, selectedAreas: areas,
+            allowedPaths: ["core/engine.swift"]
+        ))
+
+        // 不传范围（单次完整审查的旧路径）不限制。
+        let unrestricted = try CodexPullRequestReviewGenerator.decode(
+            JSONSerialization.data(withJSONObject: output),
+            wasTruncated: false, selectedAreas: areas
+        )
+        XCTAssertEqual(unrestricted.findings?.map(\.file), ["ui/view.swift"])
+    }
+
     private func makePullRequest(title: String = "修复边界条件") -> PullRequest {
         PullRequest(
             number: 1,
