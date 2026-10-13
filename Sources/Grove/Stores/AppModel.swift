@@ -17,7 +17,7 @@ struct AIReviewGenerationRequest: Sendable {
 typealias AIReviewGenerator = @Sendable (AIReviewGenerationRequest) async throws -> PullRequestAIReview
 typealias AIReviewUpdateNotifier = @Sendable (URL, PullRequest, String) async -> Void
 
-/// 一次操作失败的记录，用来在界面上显示横幅。
+/// 一次操作失败的记录，用于系统通知和用户主动打开的错误详情。
 struct GroveFailure: Identifiable, Sendable {
     let id = UUID()
     var title: String
@@ -172,6 +172,7 @@ final class AppModel {
     private(set) var remoteServers: [RemoteServer] = []
     var selection: Selection?
     var failures: [GroveFailure] = []
+    var presentedFailure: GroveFailure?
     private(set) var isAIGenerationEnabled: Bool
     private(set) var aiProvider: AIGenerationProvider
     private(set) var aiCommitModel: AIGenerationModel
@@ -210,6 +211,7 @@ final class AppModel {
     @ObservationIgnored private let aiReviewCache: AIReviewCache
     @ObservationIgnored private let aiReviewGenerator: AIReviewGenerator
     @ObservationIgnored private let aiReviewUpdateNotifier: AIReviewUpdateNotifier
+    @ObservationIgnored private let failureNotifier: @Sendable (GroveFailure) async -> Void
     @ObservationIgnored private var aiReviewTasks: [AIReviewJobKey: Task<Void, Never>] = [:]
 
     @ObservationIgnored private var automaticAIReviewTask: Task<Void, Never>?
@@ -221,6 +223,7 @@ final class AppModel {
         aiReviewCache: AIReviewCache = AIReviewCache(),
         remoteServerStore: RemoteServerStore = RemoteServerStore(),
         remoteProjectStore: RemoteProjectStore = RemoteProjectStore(),
+        failureNotifier: @escaping @Sendable (GroveFailure) async -> Void = { _ in },
         aiReviewUpdateNotifier: @escaping AIReviewUpdateNotifier = { root, request, head in
             await AIReviewNotifier.notify(repositoryRoot: root, request: request, head: head)
         },
@@ -240,6 +243,7 @@ final class AppModel {
         }
     ) {
         self.aiGenerationSettings = aiGenerationSettings
+        self.failureNotifier = failureNotifier
         self.aiReviewUpdateNotifier = aiReviewUpdateNotifier
         self.aiReviewCache = aiReviewCache
         self.remoteServerStore = remoteServerStore
@@ -502,7 +506,7 @@ final class AppModel {
             var step = "读取开放 PR 列表"
             do {
                 // ponytail: 每轮最多检查 1000 个开放请求；超大仓库可改为平台事件订阅。
-                let requests = try await forge.pullRequests(in: repository.root, limit: 1000, state: .open)
+                let requests = try await forge.pullRequests(in: repository.root, limit: RepositoryModel.openPullRequestLimit, state: .open)
                 guard repository.origin == expectedOrigin, repositories.contains(where: { $0 === repository }) else { continue }
                 repository.updateOpenPullRequests(requests, fromOrigin: expectedOrigin)
                 let activeNumbers = Set(requests.filter(\.isActive).map(\.number))
@@ -726,12 +730,6 @@ final class AppModel {
         // 这一步即使网络慢，仓库和工作树也早已可以使用。
         for repository in repositories {
             await repository.refreshForgeMetadata()
-        }
-
-        // 上面的循环结束前，主页的分栏可能已经带着空 slug 试过一次加载（被跳过）。
-        // 托管商标识就位后补一次，选中项恢复成「项目主页」时打开 app 就有数据。
-        if case .repositoryHome(let id) = selection, let repository = repository(matching: id) {
-            await repository.refreshPullRequests()
         }
 
         startAutomaticAIReviewMonitoring()
@@ -1241,16 +1239,18 @@ final class AppModel {
         guard !failures.contains(where: {
             $0.title == failure.title && $0.repositoryID == failure.repositoryID && $0.context == failure.context
                 && $0.detail == failure.detail && $0.technicalDetail == failure.technicalDetail
+                && failure.date.timeIntervalSince($0.date) < 60
         }) else { return }
         failures.append(failure)
-        // 只留最近几条。错误横幅堆到十几条就把界面挤没了，而旧的那些用户早就不看了。
+        // 最近记录只用于短时间去重；详情随通知保存，不依赖这份缓存。
         if failures.count > 4 { failures.removeFirst(failures.count - 4) }
+        Task { [failureNotifier, failure] in await failureNotifier(failure) }
     }
 
     func report(title: String, error: Error, repository: RepositoryModel? = nil, context: String? = nil) {
         // 取消不是失败：SwiftUI 的 .task 在视图切走 / 选中项变化时会取消
         // 进行中的请求，ProcessRunner 忠实地抛 CancellationError。把它当失败
-        // 弹横幅，用户看到的就是那句莫名其妙的「未能完成操作」。
+        // 发通知，用户看到的就是那句莫名其妙的「未能完成操作」。
         guard !(error is CancellationError) else { return }
         report(GroveFailure(title: title, error: error), repository: repository, context: context)
     }

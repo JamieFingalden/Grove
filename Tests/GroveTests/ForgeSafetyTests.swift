@@ -3,6 +3,34 @@ import XCTest
 
 @MainActor
 final class ForgeSafetyTests: XCTestCase {
+    func testOpenPullRequestCountIncludesDraftsAndIgnoresHistoryFilter() {
+        let repository = RepositoryModel(root: URL(fileURLWithPath: "/tmp/Grove"),
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: nil)
+        XCTAssertNil(repository.openPullRequestCountLabel, "加载前不能把未知数量显示成零")
+        let request = PullRequest(number: 1, title: "测试请求", state: "OPEN", isDraft: false,
+            headRefName: "feature", baseRefName: "main", url: "u", author: nil, updatedAt: Date(),
+            additions: 0, deletions: 0, changedFiles: 0, isCrossRepository: false, labels: [])
+        var draft = request
+        draft.number = 2
+        draft.isDraft = true
+        var closed = request
+        closed.number = 3
+        closed.state = "CLOSED"
+        repository.listState = .closed
+        repository.listPullRequests = [closed]
+        repository.updateOpenPullRequests([request, draft], fromOrigin: nil)
+        XCTAssertEqual(repository.openPullRequestCountLabel, "2")
+        XCTAssertEqual(repository.listPullRequests, [closed])
+        repository.updateOpenPullRequests([], fromOrigin: nil)
+        XCTAssertNil(repository.openPullRequestCountLabel, "没有开放请求时不显示角标")
+        repository.updateOpenPullRequests((1...RepositoryModel.openPullRequestLimit).map { number in
+            var copy = request
+            copy.number = number
+            return copy
+        }, fromOrigin: nil)
+        XCTAssertEqual(repository.openPullRequestCountLabel, "1000+")
+    }
+
     func testSidebarPullRequestsIncludeHistoryWithoutChangingActiveLinks() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -84,12 +84,49 @@ enum AIReviewNotifier {
     }
 }
 
+/// 异常使用系统横幅，完整错误随通知保存，点击后才打开详情。
+enum FailureNotifier {
+    static func content(for failure: GroveFailure) -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        content.title = failure.title
+        content.subtitle = failure.context?.components(separatedBy: .newlines).first ?? "Grove"
+        content.body = failure.detail
+        content.sound = .default
+        content.threadIdentifier = failure.repositoryID?.identityKey ?? "grove-failures"
+        var info: [String: String] = ["failureTitle": failure.title, "failureDetail": failure.detail]
+        info["failureContext"] = failure.context
+        info["failureTechnicalDetail"] = failure.technicalDetail
+        info["repositoryIdentity"] = failure.repositoryID?.identityKey
+        content.userInfo = info
+        return content
+    }
+
+    static func failure(from content: UNNotificationContent) -> GroveFailure? {
+        guard let title = content.userInfo["failureTitle"] as? String,
+              let detail = content.userInfo["failureDetail"] as? String else { return nil }
+        var failure = GroveFailure(title: title, detail: detail)
+        failure.context = content.userInfo["failureContext"] as? String
+        failure.technicalDetail = content.userInfo["failureTechnicalDetail"] as? String
+        return failure
+    }
+
+    static func notify(_ failure: GroveFailure) async {
+        await PipelineNotifier.requestAuthorization()
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
+        _ = try? await center.add(UNNotificationRequest(identifier: "failure-\(failure.id.uuidString)",
+                                                       content: content(for: failure), trigger: nil))
+    }
+}
+
 /// 通知点击的路由：打开项目，或者执行用户明确点击的重新审查。
 /// delegate 必须是个长命的 NSObject，挂在 GroveApp 上。
 @MainActor
 final class PipelineNotificationRouter: NSObject, @preconcurrency UNUserNotificationCenterDelegate {
     var openRepository: ((URL) -> Void)?
     var reviewPullRequest: ((URL, Int) -> Void)?
+    var openFailure: ((GroveFailure, String?) -> Void)?
 
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
@@ -97,7 +134,7 @@ final class PipelineNotificationRouter: NSObject, @preconcurrency UNUserNotifica
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         // app 开着也要弹横幅，不然盯梢白盯。
-        completionHandler([.banner, .sound])
+        completionHandler([.banner, .list, .sound])
     }
 
     func userNotificationCenter(
@@ -105,6 +142,13 @@ final class PipelineNotificationRouter: NSObject, @preconcurrency UNUserNotifica
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
+        let content = response.notification.request.content
+        if response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+           let failure = FailureNotifier.failure(from: content) {
+            openFailure?(failure, content.userInfo["repositoryIdentity"] as? String)
+            completionHandler()
+            return
+        }
         if let path = response.notification.request.content.userInfo["repositoryRoot"] as? String {
             let root = URL(fileURLWithPath: path)
             if response.actionIdentifier == AIReviewNotifier.reviewAction,

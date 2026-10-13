@@ -3,6 +3,44 @@ import XCTest
 
 final class GroveFailureTests: XCTestCase {
     @MainActor
+    func testFailureNotifierDeduplicatesAndAllowsLaterFailures() async {
+        let delivered = expectation(description: "异常通知发送")
+        delivered.expectedFulfillmentCount = 2
+        delivered.assertForOverFulfill = true
+        let app = AppModel(failureNotifier: { failure in
+            XCTAssertEqual(failure.title, "操作失败")
+            XCTAssertEqual(failure.context, "设置 · AI")
+            delivered.fulfill()
+        })
+        app.report(title: "操作失败", detail: "测试错误", context: "设置 · AI")
+        app.report(title: "操作失败", detail: "测试错误", context: "设置 · AI")
+        app.report(title: "取消", error: CancellationError())
+        XCTAssertEqual(app.failures.count, 1)
+        XCTAssertNil(app.presentedFailure, "异常不应自动打开详情")
+        app.failures[0].date = .distantPast
+        app.report(title: "操作失败", detail: "测试错误", context: "设置 · AI")
+        await fulfillment(of: [delivered], timeout: 2)
+    }
+
+    @MainActor
+    func testNotificationPreservesDetailsAndRemoteRepositoryAfterCacheIsCleared() throws {
+        let app = AppModel()
+        let repository = RepositoryModel(root: URL(fileURLWithPath: "/srv/Grove"),
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: app,
+            server: RemoteServer(alias: "开发服务器", host: "dev.example"))
+        app.report(title: "推送失败", error: commandFailure("unexpected failure"), repository: repository)
+        let original = try XCTUnwrap(app.failures.first)
+        let content = FailureNotifier.content(for: original)
+        app.failures.removeAll()
+        let restored = try XCTUnwrap(FailureNotifier.failure(from: content))
+        XCTAssertEqual(restored.title, original.title)
+        XCTAssertEqual(restored.detail, original.detail)
+        XCTAssertEqual(restored.context, original.context)
+        XCTAssertEqual(restored.technicalDetail, original.technicalDetail)
+        XCTAssertEqual(content.userInfo["repositoryIdentity"] as? String, repository.id.identityKey)
+    }
+
+    @MainActor
     func testPullRequestReadFailureIdentifiesRepository() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

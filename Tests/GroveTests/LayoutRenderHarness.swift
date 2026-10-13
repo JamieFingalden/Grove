@@ -28,6 +28,23 @@ final class LayoutRenderHarness: XCTestCase {
         ProcessInfo.processInfo.environment["GROVE_RENDER"] == "1"
     }
 
+    func testRenderSidebarPullRequestCount() throws {
+        try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
+        let app = AppModel()
+        let repository = RepositoryModel(root: URL(fileURLWithPath: "/tmp/Grove"),
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: app)
+        let requests = (1...3).map { number in
+            PullRequest(number: number, title: "测试请求", state: "OPEN", isDraft: number == 3,
+                headRefName: "feature-\(number)", baseRefName: "main", url: "u", author: nil, updatedAt: Date(),
+                additions: 0, deletions: 0, changedFiles: 0, isCrossRepository: false, labels: [])
+        }
+        repository.updateOpenPullRequests(requests, fromOrigin: nil)
+        app.repositories = [repository]
+        app.selection = .repositoryHome(repository: repository.id)
+        try render(SidebarView(sheet: .constant(nil)).environment(app),
+                   size: CGSize(width: 280, height: 140), to: "/tmp/grove-render-sidebar-pr-count.png")
+    }
+
     func testRenderFailureContext() throws {
         try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
         let app = AppModel()

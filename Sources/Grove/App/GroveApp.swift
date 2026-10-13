@@ -5,14 +5,14 @@ import UserNotifications
 @MainActor
 struct GroveApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var model = AppModel()
+    @State private var model: AppModel
 
     /// 通知点击路由：挂住 delegate 的长命对象。
     /// 点击「CI 失败」通知 → 打开对应仓库的项目主页。
     private let notificationRouter: PipelineNotificationRouter
 
     init() {
-        let model = AppModel()
+        let model = AppModel(failureNotifier: { failure in await FailureNotifier.notify(failure) })
         _model = State(initialValue: model)
 
         let router = PipelineNotificationRouter()
@@ -25,6 +25,14 @@ struct GroveApp: App {
         }
         router.reviewPullRequest = { root, number in
             model.startRequestedAIReview(for: root, pullRequestNumber: number)
+        }
+        router.openFailure = { failure, identity in
+            if let repository = model.allRepositories.first(where: { $0.id.identityKey == identity }) {
+                model.selection = .repositoryHome(repository: repository.id)
+            }
+            model.presentedFailure = failure
+            NSApp.windows.first(where: { $0.canBecomeKey })?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
         }
         UNUserNotificationCenter.current().delegate = router
         notificationRouter = router

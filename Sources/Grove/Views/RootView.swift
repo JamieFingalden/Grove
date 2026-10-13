@@ -38,6 +38,8 @@ struct RootView: View {
     }
 
     var body: some View {
+        @Bindable var model = model
+
         NavigationSplitView(columnVisibility: $sidebarVisibility) {
             SidebarView(sheet: $sheet)
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 380)
@@ -46,8 +48,15 @@ struct RootView: View {
         }
         .toolbar { toolbarContent }
         .overlay(alignment: .leading) { hoverSidebar }
-        .overlay(alignment: .bottom) { failureBanner }
         .sheet(item: $sheet)
+        .sheet(item: $model.presentedFailure) { failure in
+            ScrollView {
+                FailureBanner(failure: failure) { model.presentedFailure = nil }
+                    .padding(20)
+            }
+            .frame(width: 600)
+            .frame(minHeight: 180, maxHeight: 500)
+        }
         .task(id: refreshTrigger) { await refreshSelection() }
         .onChange(of: sidebarVisibility) { _, visibility in
             guard visibility != .detailOnly else { return }
@@ -235,22 +244,6 @@ struct RootView: View {
                         .controlSize(.small)
                 }
             }
-        }
-    }
-
-    // MARK: - 错误横幅
-
-    @ViewBuilder
-    private var failureBanner: some View {
-        if !model.failures.isEmpty {
-            VStack(spacing: 8) {
-                ForEach(model.failures) { failure in
-                    FailureBanner(failure: failure) { model.dismiss(failure) }
-                }
-            }
-            .padding(16)
-            .transition(.move(edge: .bottom).combined(with: .opacity))
-            .animation(.snappy, value: model.failures.count)
         }
     }
 
