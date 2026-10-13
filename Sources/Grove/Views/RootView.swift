@@ -6,6 +6,7 @@ struct RootView: View {
     @State private var sidebarVisibility: NavigationSplitViewVisibility = .automatic
     @State private var showsHoverSidebar = false
     @State private var sidebarDismissTask: Task<Void, Never>?
+    @State private var dismissedFallbackID: UUID?
 
     /// 用一个枚举驱动所有弹窗，而不是给每个 sheet 一个 Bool ——
     /// 多个 Bool 会出现「两个都为 true」的非法状态，SwiftUI 那时的表现是未定义的。
@@ -48,6 +49,7 @@ struct RootView: View {
         }
         .toolbar { toolbarContent }
         .overlay(alignment: .leading) { hoverSidebar }
+        .overlay(alignment: .bottom) { notificationFallback }
         .sheet(item: $sheet)
         .sheet(item: $model.presentedFailure) { failure in
             ScrollView {
@@ -61,6 +63,28 @@ struct RootView: View {
         .onChange(of: sidebarVisibility) { _, visibility in
             guard visibility != .detailOnly else { return }
             dismissHoverSidebar()
+        }
+    }
+
+    // MARK: - 通知兜底
+
+    /// 系统通知不可用时短暂提示；提示消失后仍可从工具栏查看完整错误。
+    @ViewBuilder
+    private var notificationFallback: some View {
+        if let failure = model.notificationFallbackFailure, dismissedFallbackID != failure.id {
+            HStack(spacing: 12) {
+                Label(failure.title, systemImage: "exclamationmark.triangle.fill")
+                    .lineLimit(2)
+                Button("查看详情") { model.presentedFailure = failure }
+            }
+            .font(.callout)
+            .padding(12)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .padding(16)
+            .task(id: failure.id) {
+                do { try await Task.sleep(for: .seconds(8)) } catch { return }
+                dismissedFallbackID = failure.id
+            }
         }
     }
 
@@ -180,6 +204,17 @@ struct RootView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        ToolbarItem {
+            if let failure = model.notificationFallbackFailure {
+                Button { model.presentedFailure = failure } label: {
+                    Label("查看最近错误", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                }
+                .labelStyle(.iconOnly)
+                .help("查看最近错误：\(failure.title)")
+            }
+        }
+
         ToolbarItem(placement: .navigation) {
             Button {
                 Task { await FolderPicker.openRepository(into: model) }

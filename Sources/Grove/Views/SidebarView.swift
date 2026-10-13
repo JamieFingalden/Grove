@@ -400,7 +400,8 @@ private struct RepositoryHomeRow: View {
 
     // 同一项目的副本共享远端，使用已加载的本机副本，不能把各副本数量相加。
     private var reviewRepository: RepositoryModel {
-        copies.first { !$0.isRemote && $0.hasLoadedPullRequests } ?? repository
+        if !repository.isRemote && repository.hasLoadedPullRequests { return repository }
+        return copies.first { !$0.isRemote && $0.hasLoadedPullRequests } ?? repository
     }
 
     var body: some View {

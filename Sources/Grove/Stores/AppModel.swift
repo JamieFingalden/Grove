@@ -173,6 +173,7 @@ final class AppModel {
     var selection: Selection?
     var failures: [GroveFailure] = []
     var presentedFailure: GroveFailure?
+    var notificationFallbackFailure: GroveFailure?
     private(set) var isAIGenerationEnabled: Bool
     private(set) var aiProvider: AIGenerationProvider
     private(set) var aiCommitModel: AIGenerationModel
@@ -211,7 +212,7 @@ final class AppModel {
     @ObservationIgnored private let aiReviewCache: AIReviewCache
     @ObservationIgnored private let aiReviewGenerator: AIReviewGenerator
     @ObservationIgnored private let aiReviewUpdateNotifier: AIReviewUpdateNotifier
-    @ObservationIgnored private let failureNotifier: @Sendable (GroveFailure) async -> Void
+    @ObservationIgnored private let failureNotifier: @Sendable (GroveFailure) async -> Bool
     @ObservationIgnored private var aiReviewTasks: [AIReviewJobKey: Task<Void, Never>] = [:]
 
     @ObservationIgnored private var automaticAIReviewTask: Task<Void, Never>?
@@ -223,7 +224,7 @@ final class AppModel {
         aiReviewCache: AIReviewCache = AIReviewCache(),
         remoteServerStore: RemoteServerStore = RemoteServerStore(),
         remoteProjectStore: RemoteProjectStore = RemoteProjectStore(),
-        failureNotifier: @escaping @Sendable (GroveFailure) async -> Void = { _ in },
+        failureNotifier: @escaping @Sendable (GroveFailure) async -> Bool = { _ in false },
         aiReviewUpdateNotifier: @escaping AIReviewUpdateNotifier = { root, request, head in
             await AIReviewNotifier.notify(repositoryRoot: root, request: request, head: head)
         },
@@ -1244,7 +1245,12 @@ final class AppModel {
         failures.append(failure)
         // 最近记录只用于短时间去重；详情随通知保存，不依赖这份缓存。
         if failures.count > 4 { failures.removeFirst(failures.count - 4) }
-        Task { [failureNotifier, failure] in await failureNotifier(failure) }
+        Task { [weak self, failureNotifier, failure] in
+            guard !(await failureNotifier(failure)), let self else { return }
+            // 授权等待可能让旧请求晚于新请求返回，不能把最新的兜底错误覆盖掉。
+            guard (notificationFallbackFailure?.date ?? .distantPast) <= failure.date else { return }
+            notificationFallbackFailure = failure
+        }
     }
 
     func report(title: String, error: Error, repository: RepositoryModel? = nil, context: String? = nil) {

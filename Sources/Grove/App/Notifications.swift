@@ -110,13 +110,31 @@ enum FailureNotifier {
         return failure
     }
 
-    static func notify(_ failure: GroveFailure) async {
-        await PipelineNotifier.requestAuthorization()
-        let center = UNUserNotificationCenter.current()
-        let settings = await center.notificationSettings()
-        guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
-        _ = try? await center.add(UNNotificationRequest(identifier: "failure-\(failure.id.uuidString)",
-                                                       content: content(for: failure), trigger: nil))
+    /// 返回是否成功提交可显示的通知，让调用方在权限或发送失败时提供应用内反馈。
+    static func notify(
+        _ failure: GroveFailure,
+        canPresent: @Sendable () async throws -> Bool = {
+            let center = UNUserNotificationCenter.current()
+            var settings = await center.notificationSettings()
+            if settings.authorizationStatus == .notDetermined {
+                _ = try await center.requestAuthorization(options: [.alert, .sound])
+                settings = await center.notificationSettings()
+            }
+            return (settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional)
+                && settings.alertSetting == .enabled
+        },
+        deliver: @Sendable (UNNotificationRequest) async throws -> Void = { request in
+            try await UNUserNotificationCenter.current().add(request)
+        }
+    ) async -> Bool {
+        do {
+            guard try await canPresent() else { return false }
+            try await deliver(UNNotificationRequest(identifier: "failure-\(failure.id.uuidString)",
+                                                    content: content(for: failure), trigger: nil))
+            return true
+        } catch {
+            return false
+        }
     }
 }
 

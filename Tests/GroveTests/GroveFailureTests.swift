@@ -1,3 +1,4 @@
+import Observation
 import XCTest
 @testable import Grove
 
@@ -11,6 +12,7 @@ final class GroveFailureTests: XCTestCase {
             XCTAssertEqual(failure.title, "操作失败")
             XCTAssertEqual(failure.context, "设置 · AI")
             delivered.fulfill()
+            return true
         })
         app.report(title: "操作失败", detail: "测试错误", context: "设置 · AI")
         app.report(title: "操作失败", detail: "测试错误", context: "设置 · AI")
@@ -20,6 +22,55 @@ final class GroveFailureTests: XCTestCase {
         app.failures[0].date = .distantPast
         app.report(title: "操作失败", detail: "测试错误", context: "设置 · AI")
         await fulfillment(of: [delivered], timeout: 2)
+        XCTAssertNil(app.notificationFallbackFailure, "发送成功时不应显示应用内兜底提示")
+    }
+
+    func testFailureNotifierReportsAuthorizationAndDeliveryFailures() async {
+        let failure = GroveFailure(title: "操作失败", detail: "测试错误")
+        let denied = await FailureNotifier.notify(failure, canPresent: { false }, deliver: { _ in
+            XCTFail("没有通知权限时不应尝试发送")
+        })
+        XCTAssertFalse(denied)
+        let unavailable = await FailureNotifier.notify(failure, canPresent: {
+            throw NSError(domain: "通知授权测试", code: 1)
+        }, deliver: { _ in XCTFail("通知不可用时不应尝试发送") })
+        XCTAssertFalse(unavailable)
+        let rejected = await FailureNotifier.notify(failure, canPresent: { true }, deliver: { _ in
+            throw NSError(domain: "通知发送测试", code: 1)
+        })
+        XCTAssertFalse(rejected)
+        let delivered = await FailureNotifier.notify(failure, canPresent: { true }, deliver: { request in
+            XCTAssertEqual(request.content.title, failure.title)
+            XCTAssertEqual(request.content.body, failure.detail)
+        })
+        XCTAssertTrue(delivered)
+    }
+
+    @MainActor
+    func testUnavailableNotificationsKeepFullErrorForInAppFeedback() async throws {
+        let attempted = expectation(description: "尝试发送失败通知")
+        attempted.assertForOverFulfill = true
+        let app = AppModel(failureNotifier: { _ in
+            attempted.fulfill()
+            return false
+        })
+        let fallbackReady = expectation(description: "应用内兜底错误已更新")
+        withObservationTracking {
+            _ = app.notificationFallbackFailure
+        } onChange: {
+            fallbackReady.fulfill()
+        }
+        app.report(title: "推送失败", error: commandFailure("unexpected failure"), context: "测试仓库")
+        app.report(title: "推送失败", error: commandFailure("unexpected failure"), context: "测试仓库")
+        app.report(title: "取消", error: CancellationError())
+        await fulfillment(of: [attempted, fallbackReady], timeout: 2)
+        let fallback = try XCTUnwrap(app.notificationFallbackFailure)
+        XCTAssertEqual(fallback.id, app.failures.first?.id)
+        XCTAssertEqual(fallback.context, "测试仓库")
+        XCTAssertTrue(fallback.technicalDetail?.contains("unexpected failure") == true)
+        XCTAssertNil(app.presentedFailure, "兜底提示不能自动打开需要手动关闭的详情")
+        app.failures.removeAll()
+        XCTAssertEqual(app.notificationFallbackFailure?.id, fallback.id, "提示消失或缓存清空后仍可查看错误详情")
     }
 
     @MainActor

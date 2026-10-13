@@ -38,11 +38,32 @@ final class LayoutRenderHarness: XCTestCase {
                 headRefName: "feature-\(number)", baseRefName: "main", url: "u", author: nil, updatedAt: Date(),
                 additions: 0, deletions: 0, changedFiles: 0, isCrossRepository: false, labels: [])
         }
-        repository.updateOpenPullRequests(requests, fromOrigin: nil)
-        app.repositories = [repository]
+        repository.origin = GitRemote.parse("https://github.com/example/Grove.git")
+        repository.updateOpenPullRequests(requests, fromOrigin: repository.origin)
+        let staleCopy = RepositoryModel(root: URL(fileURLWithPath: "/tmp/old/Grove"),
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: app)
+        staleCopy.origin = repository.origin
+        staleCopy.updateOpenPullRequests(Array(requests.prefix(1)), fromOrigin: staleCopy.origin)
+        app.repositories = [staleCopy, repository]
         app.selection = .repositoryHome(repository: repository.id)
         try render(SidebarView(sheet: .constant(nil)).environment(app),
                    size: CGSize(width: 280, height: 140), to: "/tmp/grove-render-sidebar-pr-count.png")
+        let text = VNRecognizeTextRequest()
+        text.recognitionLanguages = ["en-US"]
+        text.usesLanguageCorrection = false
+        try VNImageRequestHandler(url: URL(fileURLWithPath: "/tmp/grove-render-sidebar-pr-count.png"), options: [:])
+            .perform([text])
+        let labels = (text.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+        XCTAssertTrue(labels.contains { $0.replacingOccurrences(of: " ", with: "").contains("PR3") },
+                      "应显示当前副本的 PR 数量，实际文字：\(labels)")
+    }
+
+    func testRenderUnavailableNotificationFallback() throws {
+        try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
+        let app = AppModel()
+        app.notificationFallbackFailure = GroveFailure(title: "推送失败", detail: "远端拒绝推送，请先同步远端改动。")
+        try render(RootView().environment(app).environment(\.colorScheme, .light),
+                   size: CGSize(width: 1280, height: 800), to: "/tmp/grove-render-notification-fallback.png")
     }
 
     func testRenderFailureContext() throws {
