@@ -398,6 +398,12 @@ private struct RepositoryHomeRow: View {
     let isSelected: Bool
     @Binding var sheet: RootView.ActiveSheet?
 
+    // 同一项目的副本共享远端，使用已加载的本机副本，不能把各副本数量相加。
+    private var reviewRepository: RepositoryModel {
+        if !repository.isRemote && repository.hasLoadedPullRequests { return repository }
+        return copies.first { !$0.isRemote && $0.hasLoadedPullRequests } ?? repository
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "house")
@@ -416,6 +422,13 @@ private struct RepositoryHomeRow: View {
             }
 
             Spacer(minLength: 4)
+
+            if let count = reviewRepository.openPullRequestCountLabel {
+                Badge(text: "\(reviewRepository.forge?.kind.shortTerm ?? "PR") \(count)", tint: .green)
+                    .fixedSize()
+                    .help("开放中的\(reviewRepository.reviewTerm)：\(count) 个（包含草稿）")
+                    .accessibilityLabel("开放中的\(reviewRepository.reviewTerm) \(count) 个，包含草稿")
+            }
 
             Menu {
                 if copies.count > 1 {

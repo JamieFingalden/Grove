@@ -28,6 +28,15 @@ final class RepositoryModel: Identifiable {
     /// 开放的 PR/MR。侧边栏数量角标和工作树的 PR 关联都靠它，
     /// 不随列表视图的状态筛选变化 —— 否则翻历史时角标会突然消失。
     var pullRequests: [PullRequest] = []
+    // ponytail: 每次最多读取 1000 个开放请求；达到上限显示「1000+」，更大规模可改查平台总数。
+    static let openPullRequestLimit = 1000
+    private(set) var hasLoadedPullRequests = false
+    var openPullRequestCountLabel: String? {
+        guard hasLoadedPullRequests else { return nil }
+        let count = pullRequests.filter(\.isActive).count
+        guard count > 0 else { return nil }
+        return "\(count)" + (count >= Self.openPullRequestLimit ? "+" : "")
+    }
     /// PR 列表视图当前显示的内容，按 `listState` 过滤。
     var listPullRequests: [PullRequest] = []
     private(set) var worktreePullRequests: [String: PullRequest] = [:]
@@ -239,7 +248,7 @@ final class RepositoryModel: Identifiable {
             guard origin == expectedOrigin, self.forge?.kind == forge.kind else { return }
             slug = resolvedSlug
         }
-        await refreshWorktreePullRequests()
+        if slug != nil { await refreshPullRequests() }
     }
 
     private func clearForgeState() {
@@ -247,6 +256,7 @@ final class RepositoryModel: Identifiable {
         isRefreshingPullRequests = false
         slug = nil
         pullRequests = []
+        hasLoadedPullRequests = false
         listPullRequests = []
         worktreePullRequests = [:]
         worktreePullRequestRefreshID = UUID()
@@ -262,6 +272,7 @@ final class RepositoryModel: Identifiable {
         // 这里自己补一次解析，保证打开 app 就能加载列表，不用手动点刷新。
         if forge == nil || slug == nil {
             await refreshForgeMetadata()
+            return
         }
         guard let forge, slug != nil else { return }
         let requestID = UUID()
@@ -278,10 +289,10 @@ final class RepositoryModel: Identifiable {
             let loadedOpen: [PullRequest]
             let loadedList: [PullRequest]
             if requestedState == .open {
-                loadedOpen = try await forge.pullRequests(in: root, limit: 50, state: .open)
+                loadedOpen = try await forge.pullRequests(in: root, limit: Self.openPullRequestLimit, state: .open)
                 loadedList = loadedOpen
             } else {
-                async let open = try await forge.pullRequests(in: root, limit: 50, state: .open)
+                async let open = try await forge.pullRequests(in: root, limit: Self.openPullRequestLimit, state: .open)
                 async let filtered = try await forge.pullRequests(in: root, limit: 50, state: requestedState)
                 (loadedOpen, loadedList) = try await (open, filtered)
             }
@@ -289,17 +300,18 @@ final class RepositoryModel: Identifiable {
                   origin == requestedOrigin, listState == requestedState else { return }
             listPullRequests = loadedList
             updateOpenPullRequests(loadedOpen, fromOrigin: requestedOrigin)
-            await refreshWorktreePullRequests()
         } catch {
             guard pullRequestRefreshID == requestID, origin == requestedOrigin else { return }
             app?.report(title: "读取 PR 列表失败", error: error, repository: self)
         }
+        await refreshWorktreePullRequests()
     }
 
     /// 后台监测与手动刷新共用列表状态，更新时仍保留详情接口的审批结果。
     func updateOpenPullRequests(_ requests: [PullRequest], fromOrigin expectedOrigin: GitRemote?) {
         guard origin == expectedOrigin else { return }
         pullRequests = requests
+        hasLoadedPullRequests = true
         if listState == .open { listPullRequests = requests }
         applyDetailState()
     }
