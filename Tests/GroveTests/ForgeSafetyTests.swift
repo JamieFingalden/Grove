@@ -213,6 +213,84 @@ final class ForgeSafetyTests: XCTestCase {
         ])
     }
 
+    func testGitHubMergePreservesOccupiedLocalBranchAndWorktree() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = directory.appendingPathComponent("repo")
+        let worktree = directory.appendingPathComponent("feature")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var environment = ProcessInfo.processInfo.environment
+        environment["GROVE_TEST_REPOSITORY"] = "https://github.example.com/team/project"
+        let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: environment)
+        try await git.run(["init", "--quiet", "-b", "main"], in: root)
+        try await git.run(["-c", "user.name=测试", "-c", "user.email=test@example.invalid",
+                           "commit", "--allow-empty", "-m", "初始提交"], in: root)
+        try await git.run(["worktree", "add", "-b", "feature/new-ui", worktree.path], in: root)
+        let localFile = worktree.appendingPathComponent("local.txt")
+        try Data("未提交的改动\n".utf8).write(to: localFile)
+
+        let executable = directory.appendingPathComponent("gh")
+        let script = #"""
+        #!/bin/sh
+        if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
+          [ "$GROVE_TEST_FAIL" = "查询" ] && exit 2
+          printf '%s\n' "$GROVE_TEST_REPOSITORY"
+          exit 0
+        fi
+        if [ "$1" = "pr" ] && [ "$2" = "merge" ] && [ "$3" = "9" ]; then
+          case "$4" in --squash|--merge|--rebase) ;; *) exit 2 ;; esac
+          if [ "$GROVE_TEST_FAIL" = "合并" ]; then
+            printf '合并被保护规则拒绝\n' >&2
+            exit 3
+          fi
+          touch merged
+          if [ "$5" = "--delete-branch" ]; then
+            /usr/bin/git branch -D feature/new-ui
+            exit $?
+          fi
+          if [ "$5" = "--repo" ] && [ "$6" = "$GROVE_TEST_REPOSITORY" ] && [ "$7" = "--delete-branch" ]; then
+            touch remote-deleted
+            exit 0
+          fi
+          [ "$#" -eq 4 ] && exit 0
+        fi
+        printf '非预期的命令\n' >&2
+        exit 2
+        """#
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let merged = root.appendingPathComponent("merged")
+        let remoteDeleted = root.appendingPathComponent("remote-deleted")
+
+        for strategy in MergeStrategy.allCases {
+            let client = GitHubClient(executable: executable, environment: environment)
+            try await client.merge(number: 9, strategy: strategy, deleteBranch: true, in: root)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: merged.path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: remoteDeleted.path))
+            try FileManager.default.removeItem(at: remoteDeleted)
+            try await client.merge(number: 9, strategy: strategy, deleteBranch: false, in: root)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: remoteDeleted.path))
+        }
+        let branch = try await git.run(["branch", "--show-current"], in: worktree)
+        XCTAssertEqual(branch.trimmingCharacters(in: .whitespacesAndNewlines), "feature/new-ui")
+        XCTAssertEqual(try String(contentsOf: localFile, encoding: .utf8), "未提交的改动\n")
+        let mainBranch = try await git.run(["branch", "--show-current"], in: root)
+        XCTAssertEqual(mainBranch.trimmingCharacters(in: .whitespacesAndNewlines), "main")
+
+        try FileManager.default.removeItem(at: merged)
+        for failure in ["查询", "合并"] {
+            environment["GROVE_TEST_FAIL"] = failure
+            let client = GitHubClient(executable: executable, environment: environment)
+            do {
+                try await client.merge(number: 9, strategy: .squash, deleteBranch: true, in: root)
+                XCTFail("查询或合并失败时必须保留错误")
+            } catch let error as CommandFailure {
+                XCTAssertEqual(error.exitCode, failure == "查询" ? 2 : 3)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: merged.path))
+        }
+    }
+
     func testForkCheckoutPreservesExistingLocalBranchCommit() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let root = directory.appendingPathComponent("repo")

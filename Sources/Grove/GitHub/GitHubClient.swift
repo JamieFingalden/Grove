@@ -224,7 +224,16 @@ struct GitHubClient: ForgeClient {
         in directory: URL
     ) async throws {
         var arguments = ["pr", "merge", String(number), "--\(strategy.rawValue)"]
-        if deleteBranch { arguments.append("--delete-branch") }
+        if deleteBranch {
+            // 显式指定仓库时，gh 只删除远端分支，不切换或删除本地分支及工作树。
+            // 使用完整 URL 保留 Enterprise 主机；不能把清理本地分支失败当成合并失败。
+            let repository = try await ghChecked(
+                ["repo", "view", "--json", "url", "--jq", ".url"],
+                in: directory
+            )
+            guard !repository.trimmedStdout.isEmpty else { throw GroveError.noGitHubRemote }
+            arguments.append(contentsOf: ["--repo", repository.trimmedStdout, "--delete-branch"])
+        }
         try await ghChecked(arguments, in: directory)
     }
 
