@@ -732,15 +732,12 @@ final class AppModel {
         await repositoryRestore
         overviewReady = true
         sshExecutable = await sshLocation
-        await restoreRemoteRepositories()
-
-        // 启动恢复刻意只读本地 Git 状态；托管商探测完成后再补仓库标识。
-        // 这一步即使网络慢，仓库和工作树也早已可以使用。
-        for repository in repositories {
-            await repository.refreshForgeMetadata()
-        }
-
+        // 本地评审入口不等 SSH 环境恢复，也不等其他项目的网络请求。
         navigation.restore(in: self)
+        async let forgeRefresh: Void = refreshLocalForgeMetadata()
+        await restoreRemoteRepositories()
+        navigation.restore(in: self)
+        await forgeRefresh
         startAutomaticAIReviewMonitoring()
 
         // CI 状态点（工作树行的绿红点）也在这个时候首次拉取；
@@ -881,9 +878,22 @@ final class AppModel {
     func redetectForges() async {
         await detectForges()
 
-        // 每个仓库都要重新判一次归属，否则刚登录的那台还是灰的。
-        for repository in repositories {
-            await repository.refreshForgeMetadata()
+        await refreshLocalForgeMetadata()
+    }
+
+    /// 所有本地入口先更新，再限制并发加载列表，单个项目不会挡住其他项目。
+    private func refreshLocalForgeMetadata() async {
+        let locals = repositories
+        for repository in locals { repository.resolveForgeMetadata() }
+        await withTaskGroup(of: Void.self) { group in
+            var iterator = locals.filter { $0.forge != nil && $0.slug != nil }.makeIterator()
+            for _ in 0..<3 {
+                if let repository = iterator.next() { group.addTask { await repository.refreshPullRequests() } }
+            }
+            while await group.next() != nil {
+                guard !Task.isCancelled else { group.cancelAll(); return }
+                if let repository = iterator.next() { group.addTask { await repository.refreshPullRequests() } }
+            }
         }
     }
 
