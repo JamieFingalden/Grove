@@ -27,7 +27,9 @@ struct WorktreeDetailView: View {
         VStack(spacing: 0) {
             WorktreeHeader(model: model, sheet: $sheet)
 
-            Divider()
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor).opacity(0.45))
+                .frame(height: 1)
 
             Picker("视图", selection: $tab) {
                 ForEach(Tab.allCases) { tab in
@@ -36,14 +38,17 @@ struct WorktreeDetailView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .controlSize(.small)
             .fixedSize()
             // 跟标题、内容一样左对齐。放在 VStack 里不管的话会居中，
             // 页面上其他东西全都靠左，只有它飘在中间，看着像没写完。
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 18)
-            .padding(.vertical, 8)
+            .padding(.horizontal, GroveStyle.Space.lg)
+            .padding(.vertical, 6)
 
-            Divider()
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor).opacity(0.45))
+                .frame(height: 1)
 
             switch tab {
             case .changes:
@@ -55,7 +60,7 @@ struct WorktreeDetailView: View {
         // 撑满详情区。VStack 默认只占内容需要的高度，然后被父容器垂直居中，
         // 结果就是上下各留一大片空白。
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.35))
+        .background(GroveStyle.content)
         .alert("需要安全强制推送", isPresented: showsSafeForcePushConfirmation) {
             Button("取消", role: .cancel) {
                 model.dismissSafeForcePushProposal()
@@ -87,56 +92,15 @@ private struct WorktreeHeader: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 8) {
-                        Text(model.worktree.name)
-                            .font(.system(size: 19, weight: .semibold, design: .rounded))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-
-                        if model.worktree.isPrimary {
-                            Text("主工作树")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(.quaternary, in: Capsule())
-                                .fixedSize()
-                        }
-                        // 远程服务器上的工作树：标明在哪台机器上，
-                        // 免得和本地的同名项目混在一起认不出来。
-                        if let server = model.repository?.server {
-                            Label(server.displayName, systemImage: "server.rack")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(.quaternary, in: Capsule())
-                                .fixedSize()
-                                .help("\(server.destination):\(model.path.path)")
-                        }
-                        if let operation = model.status.operation {
-                            Label(operation.rawValue, systemImage: operation.systemImage)
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.orange)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(.orange.opacity(0.15), in: Capsule())
-                                .fixedSize()
-                        }
-                    }
-
-                    branchLine
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: GroveStyle.Space.lg) {
+                    context.frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+                    actions.fixedSize()
                 }
-                // 占满同步按钮以外的全部宽度：长分支名在这块里截断自己，
-                // 而不是把右侧按钮挤出可视区。没有这个约束，HStack 只会
-                // 一直向外扩张直到内容被裁 —— 名字多长都不该牵连别人。
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                Spacer(minLength: 12)
-
-                actions
+                VStack(alignment: .leading, spacing: GroveStyle.Space.md) {
+                    context
+                    ScrollView(.horizontal) { actions.fixedSize() }.scrollIndicators(.hidden)
+                }
             }
 
             if let operation = model.steppableOperation { operationBanner(operation) }
@@ -152,15 +116,91 @@ private struct WorktreeHeader: View {
                 }
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 14)
-        .padding(.bottom, 12)
+        .padding(.horizontal, GroveStyle.Space.lg)
+        .padding(.top, GroveStyle.Space.md)
+        .padding(.bottom, GroveStyle.Space.md)
+        .background(.bar)
+    }
+
+    private var context: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(model.worktree.name)
+                    .font(GroveStyle.title)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(model.worktree.name + "\n" + model.path.path)
+
+                if model.worktree.isPrimary {
+                    Badge(text: "主工作树", tint: .secondary).fixedSize()
+                }
+                // 远程服务器上的工作树：标明在哪台机器上，
+                // 免得和本地的同名项目混在一起认不出来。
+                if let server = model.repository?.server {
+                    Badge(text: server.displayName, systemImage: "server.rack", tint: .secondary)
+                        .lineLimit(1)
+                        .help("\(server.destination):\(model.path.path)")
+                }
+                if let operation = model.status.operation {
+                    Badge(text: operation.rawValue, systemImage: operation.systemImage, tint: .orange)
+                        .fixedSize()
+                }
+            }
+
+            branchLine
+        }
+    }
+
+    private var branchLine: some View {
+        HStack(spacing: 6) {
+            // 长分支名中间截断 —— 保头保尾（`JamieFing…/dev-tag`），
+            // 完整名字看悬停或右边的复制按钮。它是这一行的主体，让位顺序排最后。
+            Label(model.worktree.checkoutLabel, symbol: .branch, size: .xs, role: .secondary)
+                .font(.system(size: 11, weight: .regular))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .layoutPriority(1)
+                .help(model.worktree.checkoutLabel)
+
+            if let upstream = model.status.upstream {
+                // 上游名先于分支名让位：分支是身份，上游只是指向。
+                Text("→ \(upstream)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(upstream)
+            } else if model.worktree.branch != nil {
+                Text("未设上游")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+
+            if model.status.ahead > 0 {
+                Badge(text: "\(model.status.ahead)", systemImage: "arrow.up", tint: .secondary)
+                    .fixedSize()
+            }
+            if model.status.behind > 0 {
+                Badge(text: "\(model.status.behind)", systemImage: "arrow.down", tint: .purple)
+                    .fixedSize()
+            }
+
+            Button {
+                SystemActions.copyToPasteboard(model.path.path)
+            } label: {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 9))
+                    .frame(width: 14, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tertiary)
+            .help("复制路径")
+        }
     }
 
     /// 合并 / 变基 / 拣选 / 回退中途停下来时的出路条。
-    ///
-    /// 没有它的话，一遇冲突用户就被卡在半截状态里只能回终端 ——
-    /// 那等于这个功能只做了一半。
     private func operationBanner(_ operation: RepositoryOperation) -> some View {
         HStack(spacing: 10) {
             Image(systemName: operation.systemImage)
@@ -192,57 +232,10 @@ private struct WorktreeHeader: View {
         }
         .disabled(model.activity != nil)
         .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+        .padding(.vertical, 8)
+        .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
         .overlay {
-            RoundedRectangle(cornerRadius: 9).stroke(.orange.opacity(0.35), lineWidth: 1)
-        }
-    }
-
-    private var branchLine: some View {
-        HStack(spacing: 8) {
-            // 长分支名中间截断 —— 保头保尾（`JamieFing…/dev-tag`），
-            // 完整名字看悬停或右边的复制按钮。它是这一行的主体，让位顺序排最后。
-            Label(model.worktree.checkoutLabel, systemImage: "arrow.triangle.branch")
-                .font(.system(size: 11.5))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .layoutPriority(1)
-                .help(model.worktree.checkoutLabel)
-
-            if let upstream = model.status.upstream {
-                // 上游名先于分支名让位：分支是身份，上游只是指向。
-                Text("→ \(upstream)")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(upstream)
-            } else if model.worktree.branch != nil {
-                Text("未设上游")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-            }
-
-            if model.status.ahead > 0 {
-                Badge(text: "\(model.status.ahead)", systemImage: "arrow.up", tint: .blue)
-                    .fixedSize()
-            }
-            if model.status.behind > 0 {
-                Badge(text: "\(model.status.behind)", systemImage: "arrow.down", tint: .purple)
-                    .fixedSize()
-            }
-
-            Button {
-                SystemActions.copyToPasteboard(model.path.path)
-            } label: {
-                Image(systemName: "doc.on.doc")
-                    .font(.system(size: 9.5))
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.tertiary)
-            .help(model.path.path)
+            RoundedRectangle(cornerRadius: 8).stroke(.orange.opacity(0.3), lineWidth: 0.5)
         }
     }
 
@@ -284,7 +277,7 @@ private struct WorktreeHeader: View {
                     }
                 }
             } label: {
-                syncLabel(for: .pull, title: "拉取", systemImage: "arrow.down")
+                syncLabel(for: .pull, title: "拉取", symbol: .pull)
             } primaryAction: {
                 Task { await model.pull() }
             }
@@ -297,8 +290,9 @@ private struct WorktreeHeader: View {
             Button {
                 Task { await model.pull() }
             } label: {
-                syncLabel(for: .pull, title: "拉取", systemImage: "arrow.down")
+                syncLabel(for: .pull, title: "拉取", symbol: .pull)
             }
+            .buttonStyle(.bordered)
             .tint(syncTint(for: .pull))
             .disabled(isBusy || !canPull)
             .help("git pull --rebase --autostash：本地提交重放到远端最新之上，不产生合并提交；工作区改动自动暂存恢复")
@@ -334,7 +328,7 @@ private struct WorktreeHeader: View {
                     }
                 }
             } label: {
-                syncLabel(for: .push, title: "推送", systemImage: "arrow.up")
+                syncLabel(for: .push, title: "推送", symbol: .push)
             } primaryAction: {
                 Task { await model.push(to: model.defaultRemote) }
             }
@@ -347,8 +341,9 @@ private struct WorktreeHeader: View {
             Button {
                 Task { await model.push() }
             } label: {
-                syncLabel(for: .push, title: "推送", systemImage: "arrow.up")
+                syncLabel(for: .push, title: "推送", symbol: .push)
             }
+            .buttonStyle(.bordered)
             .tint(syncTint(for: .push))
             .disabled(isBusy)
             .help(model.status.upstream == nil ? "推送并建立上游跟踪" : "git push")
@@ -356,13 +351,15 @@ private struct WorktreeHeader: View {
     }
 
     /// 变基按钮。跟拉取、推送并排 —— 这三个都是「跟远端对齐」的动作，
+    /// 变基按钮。跟拉取、推送并排 —— 这三个都是「跟远端对齐」的动作，
     /// 属于同一组，藏进菜单里等于让人猜它在哪。
     private var rebaseControl: some View {
         Button {
             sheet = .rebase(model)
         } label: {
-            Label("变基", systemImage: "arrow.triangle.branch")
+            Label("变基", symbol: .rebase, size: .small)
         }
+        .buttonStyle(.bordered)
         .disabled(model.worktree.branch == nil || model.status.operation != nil || model.activity != nil)
         .help(rebaseHelp)
     }
@@ -388,8 +385,9 @@ private struct WorktreeHeader: View {
                 }
             }
         } label: {
-            Label("标签", systemImage: "tag")
+            Label("标签", symbol: .tag, size: .small)
         }
+        .buttonStyle(.bordered)
         .disabled(model.status.operation != nil || model.activity != nil)
         .help("在当前分支最新提交（HEAD）上创建标签，名字自动预填下一个版本号")
     }
@@ -403,24 +401,26 @@ private struct WorktreeHeader: View {
             Button {
                 SystemActions.openInBrowser(pullRequest.url)
             } label: {
-                Label("查看 \(pullRequest.displayNumber)", systemImage: "arrow.up.forward.square")
+                Label("查看 \(pullRequest.displayNumber)", symbol: .external, size: .small)
             }
+            .buttonStyle(.bordered)
             .help(pullRequest.title)
 
         case .create(let term):
             Button {
                 sheet = .createPullRequest(model)
             } label: {
-                Label("提\(term)", systemImage: "arrow.triangle.pull")
+                Label("提\(term)", symbol: .pullRequest(status: .open), size: .small)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.bordered)
             .disabled(model.activity != nil)
 
         case .unavailable(let reason):
             Button {
             } label: {
-                Label("提交评审", systemImage: "arrow.triangle.pull")
+                Label("提交评审", symbol: .pullRequest(status: .open), size: .small)
             }
+            .buttonStyle(.bordered)
             .disabled(true)
             .help(reason)
         }
@@ -437,16 +437,30 @@ private struct WorktreeHeader: View {
 
     private var actions: some View {
         HStack(spacing: 8) {
-            pullControl
+            // Group 1: 远端同步
+            HStack(spacing: 4) {
+                pullControl
+                pushControl
+            }
 
-            rebaseControl
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor).opacity(0.4))
+                .frame(width: 1, height: 16)
 
-            tagControl
+            // Group 2: 分支操作
+            HStack(spacing: 4) {
+                rebaseControl
+                tagControl
+            }
 
-            pushControl
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor).opacity(0.4))
+                .frame(width: 1, height: 16)
 
+            // Group 3: 评审与主操作
             reviewControl
 
+            // Group 4: 更多操作
             Menu {
                 // 远程工作树没有本机动作，复制给 user@host:path 形态。
                 if model.isRemote {
@@ -463,19 +477,24 @@ private struct WorktreeHeader: View {
                 Divider()
                 Button("刷新") { Task { await model.refresh() } }
             } label: {
-                Image(systemName: "ellipsis.circle")
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 12, weight: .regular))
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
+            .help("工作树操作")
         }
+        .controlSize(.small)
     }
 
     @ViewBuilder
     private func syncLabel(
         for action: WorktreeModel.SyncFeedback.Action,
         title: String,
-        systemImage: String
+        symbol: GroveSymbol
     ) -> some View {
         if let feedback = model.syncFeedback, feedback.action == action {
             switch feedback.phase {
@@ -485,12 +504,12 @@ private struct WorktreeHeader: View {
                     Text("\(title)中")
                 }
             case .succeeded:
-                Label("\(title)完成", systemImage: "checkmark")
+                Label("\(title)完成", symbol: .checkmark, size: .small)
             case .failed:
-                Label("\(title)失败", systemImage: "exclamationmark.triangle.fill")
+                Label("\(title)失败", symbol: .conflict, size: .small)
             }
         } else {
-            Label(title, systemImage: systemImage)
+            Label(title, symbol: symbol, size: .small)
         }
     }
 
@@ -511,9 +530,7 @@ struct PullRequestSummaryCard: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: pullRequest.status.systemImage)
-                .font(.system(size: 14))
-                .foregroundStyle(statusTint)
+            GroveSymbolView(.pullRequest(status: pullRequest.status), size: .medium, role: .custom(statusTint))
                 .frame(width: 18)
 
             VStack(alignment: .leading, spacing: 2) {

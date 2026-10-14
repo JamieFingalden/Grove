@@ -239,7 +239,7 @@ enum ConflictColors {
     /// 当前侧用青色、传入侧用蓝色，跟 VS Code 的冲突编辑器一致 ——
     /// 用红绿的话会被误读成「删除 / 新增」。
     static let ours = Color.teal
-    static let theirs = Color.blue
+    static let theirs = Color.purple
     static let base = Color.gray
 }
 

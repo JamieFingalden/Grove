@@ -177,7 +177,7 @@ enum RepositoryOperation: String, Sendable, Hashable {
     var systemImage: String {
         switch self {
         case .merge: "arrow.triangle.merge"
-        case .rebase: "arrow.triangle.branch"
+        case .rebase: "arrow.triangle.swap"
         case .cherryPick: "hand.point.up.left"
         case .revert: "arrow.uturn.backward"
         case .bisect: "magnifyingglass"

@@ -6,6 +6,7 @@ import SwiftUI
 /// 平台自己的 Runner —— Grove 不解析配置、不执行步骤、不变成 CI。
 struct CIView: View {
     let repository: RepositoryModel
+    var projectTab: Binding<ProjectHomeTab>? = nil
 
     @State private var pipelines: [CIPipeline] = []
     @State private var selectedPipelineID: Int?
@@ -19,6 +20,8 @@ struct CIView: View {
     @State private var logJob: CIJob?
     @State private var showsRunSheet = false
     @State private var didLoadOnce = false
+    @State private var showsCompactDetail = false
+    @State private var isCompact = false
 
     private var selectedPipeline: CIPipeline? {
         pipelines.first { $0.id == selectedPipelineID }
@@ -32,25 +35,28 @@ struct CIView: View {
                 if repository.forge == nil {
                     unavailableView
                 } else if pipelines.isEmpty && (isLoading || !didLoadOnce) {
-                    ProgressView("正在加载流水线…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    GroveLoadingState(title: "正在加载流水线…")
                 } else if let failureText, pipelines.isEmpty {
                     loadFailureView(failureText)
                 } else if pipelines.isEmpty && didLoadOnce {
-                    ContentUnavailableView {
-                        Label("没有流水线记录", systemImage: "bolt.horizontal")
-                    } description: {
-                        Text("推送提交或手动触发后，平台的 Runner 会在这里出现记录。")
-                    }
+                    GroveEmptyState(title: "没有流水线记录", systemImage: "bolt.horizontal",
+                                    description: "推送提交或手动触发后，平台的 Runner 会在这里出现记录。")
                 } else {
-                    HSplitView {
-                        pipelineList
-                        pipelineDetail
+                    GeometryReader { geometry in
+                        GroveAdaptiveSplit(showsDetail: showsCompactDetail && selectedPipeline != nil) {
+                            pipelineList
+                        } detail: {
+                            pipelineDetail
+                        }
+                        .onChange(of: geometry.size.width, initial: true) { _, width in
+                            isCompact = width < 740
+                        }
                     }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .background(GroveStyle.content)
         .task {
             guard !didLoadOnce else { return }
             await reload()
@@ -104,14 +110,26 @@ struct CIView: View {
 
     private var toolbar: some View {
         HStack(spacing: 8) {
-            Image(systemName: "bolt.horizontal")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            Text("CI/CD")
-                .font(.system(size: 12, weight: .semibold))
-            Text(repository.root.lastPathComponent)
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
+            if let projectTab {
+                ProjectHomeNavigation(repository: repository, selection: projectTab)
+            }
+            if isCompact && showsCompactDetail {
+                Button { showsCompactDetail = false } label: {
+                    Label("返回列表", systemImage: "chevron.left")
+                }
+                .help("返回流水线列表")
+            } else if isCompact && selectedPipeline != nil {
+                Button { showsCompactDetail = true } label: {
+                    Label("查看详情", systemImage: "chevron.right")
+                }
+            }
+            if projectTab == nil {
+                Text("CI/CD").font(GroveStyle.sectionTitle)
+            }
+            // 0 条时不挂「0」徽标，理由同拉取请求列表的计数徽标。
+            if !pipelines.isEmpty {
+                Badge(text: "\(pipelines.count)", tint: .secondary)
+            }
 
             Spacer(minLength: 12)
 
@@ -125,8 +143,6 @@ struct CIView: View {
                 .controlSize(.small)
             }
 
-            if isLoading { ProgressView().controlSize(.small) }
-
             if let failureText, !pipelines.isEmpty {
                 Label("刷新失败", systemImage: "exclamationmark.triangle")
                     .font(.system(size: 10.5))
@@ -137,30 +153,38 @@ struct CIView: View {
             Button {
                 Task { await reload() }
             } label: {
-                Label("刷新", systemImage: "arrow.clockwise")
+                Group {
+                    if isLoading {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Label("刷新", systemImage: "arrow.clockwise").labelStyle(.iconOnly)
+                            .font(GroveStyle.toolIcon)
+                    }
+                }
+                .frame(width: GroveStyle.toolHitArea, height: GroveStyle.toolHitArea)
             }
+            .buttonStyle(.borderless)
+            .modifier(GroveRowHover())
+            .tint(.secondary)
+            .help("刷新流水线列表")
             .controlSize(.small)
             .disabled(isLoading || repository.forge == nil)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
+        .padding(.horizontal, GroveStyle.Space.lg)
+        .frame(height: GroveStyle.toolbarHeight)
+        .background(.bar)
     }
 
     private var unavailableView: some View {
-        ContentUnavailableView {
-            Label("没有识别出托管平台", systemImage: "bolt.slash")
-        } description: {
-            Text("CI/CD 状态需要 GitHub 或 GitLab 远端。\(ForgeKind.github.setupHint)")
-        }
+        GroveEmptyState(title: "CI/CD 不可用", systemImage: "bolt.slash",
+                        description: repository.pullRequestUnavailableReason
+                            ?? "CI/CD 状态需要 GitHub 或 GitLab 远端。\(ForgeKind.github.setupHint)")
     }
 
     private func loadFailureView(_ text: String) -> some View {
-        ContentUnavailableView {
-            Label("流水线加载失败", systemImage: "exclamationmark.triangle")
-        } description: {
-            Text(text)
-        } actions: {
-            Button("重试") { Task { await reload() } }
+        GroveEmptyState(title: "流水线加载失败", systemImage: "exclamationmark.triangle",
+                        description: text, isError: true) {
+            Button("重试") { Task { await reload() } }.buttonStyle(.borderedProminent)
         }
     }
 
@@ -170,6 +194,11 @@ struct CIView: View {
         List(pipelines, selection: $selectedPipelineID) { pipeline in
             PipelineRow(pipeline: pipeline)
                 .tag(pipeline.id)
+                .simultaneousGesture(TapGesture().onEnded {
+                    selectedPipelineID = pipeline.id
+                    showsCompactDetail = true
+                })
+                .modifier(GroveRowHover(isSelected: selectedPipelineID == pipeline.id))
                 .contextMenu {
                     if let urlString = pipeline.webURL, let url = URL(string: urlString) {
                         Button("在浏览器打开") { NSWorkspace.shared.open(url) }
@@ -183,7 +212,7 @@ struct CIView: View {
                 }
         }
         .listStyle(.inset)
-        .frame(minWidth: 260, idealWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: pipelines, initial: true) { _, newValue in
             // 刷新后选中的可能没了（列表变短），保住选择或回落到第一条。
             if let id = selectedPipelineID, newValue.contains(where: { $0.id == id }) { return }
@@ -198,15 +227,11 @@ struct CIView: View {
             if let pipeline = selectedPipeline {
                 detailContent(pipeline)
             } else {
-                ContentUnavailableView {
-                    Label("选择一条流水线", systemImage: "bolt.horizontal")
-                } description: {
-                    Text("看它的阶段、任务和日志。")
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                GroveEmptyState(title: "选择一条流水线", systemImage: "bolt.horizontal",
+                                description: "看它的阶段、任务和日志。")
             }
         }
-        .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: selectedPipelineID) {
             await loadJobs()
         }
@@ -216,12 +241,13 @@ struct CIView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 headerBlock(pipeline)
+                Divider()
                 jobsBlock(pipeline)
             }
-            .padding(16)
+            .padding(GroveStyle.Space.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(GroveStyle.content)
     }
 
     private func headerBlock(_ pipeline: CIPipeline) -> some View {
@@ -298,17 +324,16 @@ struct CIView: View {
     @ViewBuilder
     private func jobsBlock(_ pipeline: CIPipeline) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("任务")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
+            Text("任务").font(GroveStyle.sectionTitle)
 
             if jobsPipelineID != pipeline.id || (isLoadingJobs && jobs.isEmpty) {
                 ProgressView("正在加载任务…")
                     .controlSize(.small)
             } else if let jobsFailureText, jobs.isEmpty {
                 Label(jobsFailureText, systemImage: "exclamationmark.triangle")
-                    .font(.system(size: 11))
+                    .font(GroveStyle.metadata)
                     .foregroundStyle(.red)
+                Button("重试加载任务") { Task { await loadJobs() } }
             } else if jobs.isEmpty {
                 Text("没有任务。")
                     .font(.system(size: 11))
@@ -471,7 +496,7 @@ private struct PipelineRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(pipeline.ref.isEmpty ? "（无分支）" : pipeline.ref)
-                        .font(.system(size: 11.5, design: .monospaced))
+                        .font(GroveStyle.body.weight(.medium))
                         .lineLimit(1)
                     Text(pipeline.shortSHA)
                         .font(.system(size: 10.5, design: .monospaced))
@@ -479,7 +504,7 @@ private struct PipelineRow: View {
                 }
                 if let title = pipeline.title, !title.isEmpty {
                     Text(title)
-                        .font(.system(size: 10.5))
+                        .font(GroveStyle.metadata)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -494,11 +519,11 @@ private struct PipelineRow: View {
                     .monospacedDigit()
                     .foregroundStyle(.tertiary)
                 Text(CIFormat.relative(pipeline.createdAt))
-                    .font(.system(size: 10))
+                    .font(GroveStyle.caption)
                     .foregroundStyle(.tertiary)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, GroveStyle.Space.sm)
         .help(pipeline.webURL ?? "")
     }
 }
@@ -864,7 +889,7 @@ private struct JobLogSheet: View {
                 }
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(GroveStyle.content)
     }
 
     private var bottomBar: some View {

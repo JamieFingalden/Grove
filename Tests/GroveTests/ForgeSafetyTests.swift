@@ -21,6 +21,8 @@ final class ForgeSafetyTests: XCTestCase {
         repository.updateOpenPullRequests([request, draft], fromOrigin: nil)
         XCTAssertEqual(repository.openPullRequestCountLabel, "2")
         XCTAssertEqual(repository.listPullRequests, [closed])
+        XCTAssertTrue(repository.hasLoadedOpenPullRequests)
+        XCTAssertFalse(repository.hasLoadedPullRequests, "后台更新开放请求不能把历史筛选标记为已加载")
         repository.updateOpenPullRequests([], fromOrigin: nil)
         XCTAssertNil(repository.openPullRequestCountLabel, "没有开放请求时不显示角标")
         repository.updateOpenPullRequests((1...RepositoryModel.openPullRequestLimit).map { number in

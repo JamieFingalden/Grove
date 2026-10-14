@@ -36,22 +36,29 @@ struct DiffReadingControls: View {
             .controlSize(.small)
             .help("统一：传统 ± 行；分栏：左旧右新对照")
 
-            HStack(spacing: 1) {
+            HStack(spacing: 2) {
                 Button {
                     fontSize = max(DiffReading.minFontSize, fontSize - 0.5)
                 } label: {
                     Image(systemName: "textformat.size.smaller")
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
+                        .frame(width: 20, height: 20)
                 }
                 Button {
                     fontSize = min(DiffReading.maxFontSize, fontSize + 0.5)
                 } label: {
                     Image(systemName: "textformat.size.larger")
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
+                        .frame(width: 20, height: 20)
                 }
             }
             .buttonStyle(.borderless)
-            .disabled(fontSize <= DiffReading.minFontSize && false)
+            .padding(.horizontal, 2)
+            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+            }
             .help("调整代码字号（\(Int(fontSize))pt）")
         }
     }
@@ -264,7 +271,7 @@ private struct SplitPairRow: View {
             )
 
             Rectangle()
-                .fill(.separator)
+                .fill(Color(nsColor: .separatorColor).opacity(0.45))
                 .frame(width: 1)
 
             SplitSideCell(
@@ -319,7 +326,9 @@ private struct SplitSideCell: View {
                 gutter
                     .padding(.top, 1)
                 Text(marker)
-                    .frame(width: 10, alignment: .leading)
+                    .font(.system(size: fontSize, weight: .medium, design: .monospaced))
+                    .foregroundStyle(markerColor)
+                    .frame(width: 12, alignment: .center)
                     .padding(.top, 1)
                 if let line {
                     Text(CodeSyntax.attributed(
@@ -355,7 +364,7 @@ private struct SplitSideCell: View {
         .overlay(alignment: .leading) {
             if line?.kind == .addition || line?.kind == .deletion {
                 Rectangle()
-                    .fill(line?.kind == .addition ? Color.green.opacity(0.7) : Color.red.opacity(0.7))
+                    .fill(line?.kind == .addition ? GroveStyle.Diff.addedBar : GroveStyle.Diff.deletedBar)
                     .frame(width: 2.5)
             }
         }
@@ -378,6 +387,7 @@ private struct SplitSideCell: View {
                         .frame(width: 16)
                     Text(line[keyPath: side.number].map(String.init) ?? "")
                         .frame(width: 38, alignment: .trailing)
+                        .foregroundStyle(GroveStyle.Diff.gutterText)
                 }
                 .padding(.leading, 4)
                 .padding(.vertical, 1)
@@ -406,9 +416,9 @@ private struct SplitSideCell: View {
                 }
                 Text(line[keyPath: side.number].map(String.init) ?? "")
                     .frame(width: 38, alignment: .trailing)
+                    .foregroundStyle(GroveStyle.Diff.gutterText)
             }
             .padding(.leading, 4)
-            .foregroundStyle(.tertiary)
         } else {
             Color.clear.frame(width: gutterWidth, height: 1)
         }
@@ -422,26 +432,28 @@ private struct SplitSideCell: View {
         }
     }
 
-    @ViewBuilder
-    private var rowBackground: some View {
-        // 空侧用中性淡底标记「此处无对应行」，有行的一侧按增/删着色。
-        let base = rowTint
-        Rectangle().fill(base.map { Color($0).opacity(0.13) } ?? Color.clear)
+    private var markerColor: Color {
+        switch line?.kind {
+        case .addition: GroveStyle.Diff.addedFg
+        case .deletion: GroveStyle.Diff.deletedFg
+        default: .secondary.opacity(0.7)
+        }
     }
 
-    private var rowTint: Color? {
+    @ViewBuilder
+    private var rowBackground: some View {
         switch line?.kind {
-        case .deletion: .red
-        case .addition: .green
-        default: nil
+        case .addition: GroveStyle.Diff.addedBg
+        case .deletion: GroveStyle.Diff.deletedBg
+        default: Color.clear
         }
     }
 
     /// 词级高亮底色：跟行的增/删属性走。
     private var highlightTint: Color? {
         switch line?.kind {
-        case .deletion: .red.opacity(0.22)
-        case .addition: .green.opacity(0.28)
+        case .deletion: GroveStyle.Diff.deletedHighlight
+        case .addition: GroveStyle.Diff.addedHighlight
         default: nil
         }
     }
