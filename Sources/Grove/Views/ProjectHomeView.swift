@@ -27,9 +27,9 @@ struct ProjectHomeView: View {
             Group {
                 switch tab {
                 case .pullRequests:
-                    PullRequestListView(repository: repository)
+                    PullRequestListView(repository: repository, projectTab: $tab)
                 case .ci:
-                    CIView(repository: repository)
+                    CIView(repository: repository, projectTab: $tab)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -39,76 +39,94 @@ struct ProjectHomeView: View {
     // MARK: - 头部
 
     private var header: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(repository.root.lastPathComponent)
-                    .font(.system(size: 12.5, weight: .semibold))
-                HStack(spacing: 5) {
-                    Text(repository.root.path)
+        VStack(spacing: 0) {
+            HStack(spacing: GroveStyle.Space.md) {
+                VStack(alignment: .leading, spacing: GroveStyle.Space.xs) {
+                    Text(repository.name)
+                        .font(GroveStyle.title)
                         .lineLimit(1)
-                        .truncationMode(.middle)
-                    // 远端身份跟在路径后面：这页上的功能都作用于这个远端。
-                    if let forge = repository.forge {
-                        Text("·")
-                            .foregroundStyle(.quaternary)
-                        Text(forge.kind.displayName)
+                        .truncationMode(.tail)
+                        .help(repository.name)
+                    HStack(spacing: GroveStyle.Space.xs) {
+                        if let forge = repository.forge {
+                            Text(forge.kind.displayName).fixedSize()
+                            Text("·")
+                        }
+                        Text(repository.slug ?? repository.root.path)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
-                    if let slug = repository.slug {
-                        Text("·")
-                            .foregroundStyle(.quaternary)
-                        Text(slug)
-                    }
+                    .font(GroveStyle.caption)
+                    .foregroundStyle(.secondary)
+                    .help(repository.root.path)
                 }
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-            }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            Spacer(minLength: 12)
-
-            if repository.forge != nil {
-                let enabled = appModel.automaticAIReviewEnabled(for: repository.root)
-                let status = !enabled ? "已关闭" : appModel.canUseAIGeneration ? "已开启" : "已暂停"
-                Toggle(isOn: Binding(
-                    get: { appModel.automaticAIReviewEnabled(for: repository.root) },
-                    set: { appModel.setAutomaticAIReviewEnabled($0, for: repository.root) }
-                )) {
-                    HStack(spacing: 6) {
-                        Label("自动审查", systemImage: "sparkles")
-                        Text(status)
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(.secondary)
+                if repository.forge != nil {
+                    ViewThatFits(in: .horizontal) {
+                        automaticReviewToggle(compact: false)
+                        automaticReviewToggle(compact: true)
                     }
                 }
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .fixedSize()
-                .disabled(!appModel.canUseAIGeneration)
-                .accessibilityValue(status)
-                .help(appModel.canUseAIGeneration
-                      ? "Grove 运行期间自动审查新 PR；后续推送只通知你，由你决定是否重新审查。"
-                      : "AI 功能当前不可用，自动审查已暂停。请在设置中启用 AI 并配置服务。")
-            }
 
-            if let remote = remoteURL {
-                Button {
-                    NSWorkspace.shared.open(remote)
-                } label: {
-                    Label("浏览器", systemImage: "safari")
+                if let remote = remoteURL {
+                    Button { NSWorkspace.shared.open(remote) } label: {
+                        Label("浏览器", systemImage: "arrow.up.forward.square")
+                            .labelStyle(.iconOnly)
+                            .font(GroveStyle.toolIcon)
+                            .frame(width: GroveStyle.toolHitArea, height: GroveStyle.toolHitArea)
+                    }
+                    .buttonStyle(.borderless)
+                    .modifier(GroveRowHover())
+                    .tint(.secondary)
+                    .help("在平台的网页上打开这个仓库")
+                    .accessibilityLabel("在浏览器打开仓库")
                 }
-                .controlSize(.small)
-                .help("在平台的网页上打开这个仓库")
             }
-
-            Picker("分栏", selection: $tab) {
-                Text(repository.reviewTerm).tag(ProjectHomeTab.pullRequests)
-                Text("CI/CD").tag(ProjectHomeTab.ci)
-            }
-            .pickerStyle(.segmented)
             .controlSize(.small)
-            .frame(width: 220)
+            .padding(.horizontal, GroveStyle.Space.lg)
+            .frame(height: 56)
+
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .background(.bar)
+    }
+
+    private func automaticReviewToggle(compact: Bool) -> some View {
+        let enabled = appModel.automaticAIReviewEnabled(for: repository.root)
+        let running = repository.pullRequests.contains {
+            appModel.isAIReviewing(for: repository.root, pullRequestNumber: $0.number)
+        }
+        let status = !enabled ? "已关闭" : !appModel.canUseAIGeneration ? "已暂停" : running ? "审查中" : "已开启"
+        return Toggle(isOn: Binding(
+            get: { appModel.automaticAIReviewEnabled(for: repository.root) },
+            set: { appModel.setAutomaticAIReviewEnabled($0, for: repository.root) }
+        )) {
+            HStack(spacing: GroveStyle.Space.xs) {
+                if running && enabled && appModel.canUseAIGeneration {
+                    ProgressView().controlSize(.mini)
+                        .frame(width: GroveStyle.Space.lg, height: GroveStyle.Space.lg)
+                        .help(status)
+                } else {
+                    Image(systemName: "sparkles").font(GroveStyle.toolIcon).foregroundStyle(.secondary)
+                        .frame(width: GroveStyle.Space.lg, height: GroveStyle.Space.lg)
+                }
+                if !compact {
+                    Text("自动审查").font(GroveStyle.metadata)
+                    if enabled && !appModel.canUseAIGeneration {
+                        Image(systemName: "pause.circle").foregroundStyle(.secondary).help(status)
+                    }
+                }
+            }
+        }
+        .toggleStyle(.switch)
+        .controlSize(.small)
+        .fixedSize()
+        .disabled(!appModel.canUseAIGeneration)
+        .accessibilityLabel("当前仓库自动审查")
+        .accessibilityValue(status)
+        .help(appModel.canUseAIGeneration
+              ? "当前仓库自动审查\(status)。Grove 运行期间自动审查新 PR；后续推送只通知你，由你决定是否重新审查。"
+              : "AI 功能当前不可用，自动审查已暂停。请在设置中启用 AI 并配置服务。")
     }
 
     /// 远端网页地址：从 origin 的 host/path 拼，不依赖平台接口。
@@ -121,5 +139,22 @@ struct ProjectHomeView: View {
         if let port = origin.port { components.port = port }
         components.path = "/\(origin.path)"
         return components.url
+    }
+}
+
+/// 项目导航与内容操作共用一条工具栏，避免重复标题占用纵向空间。
+struct ProjectHomeNavigation: View {
+    let repository: RepositoryModel
+    @Binding var selection: ProjectHomeTab
+
+    var body: some View {
+        Picker("项目导航", selection: $selection) {
+            Text(repository.reviewTerm).tag(ProjectHomeTab.pullRequests)
+            Text("CI/CD").tag(ProjectHomeTab.ci)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.regular)
+        .fixedSize()
     }
 }

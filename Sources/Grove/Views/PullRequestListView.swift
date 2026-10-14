@@ -3,50 +3,107 @@ import SwiftUI
 
 struct PullRequestListView: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.controlActiveState) private var controlActiveState
     @Bindable var repository: RepositoryModel
     /// 进入时默认选中的编号。深链接（从别处跳到某个具体请求）和离屏渲染都要用它 ——
     /// 选中状态是视图内部的 @State，外面没有别的办法预置。
     var initialSelection: Int?
+    var projectTab: Binding<ProjectHomeTab>? = nil
+    enum WorkspaceMode {
+        case list
+        case review
+    }
+
+    @State private var mode: WorkspaceMode = .list
     @State private var selection: Int?
     @State private var searchText = ""
     @State private var mergeTarget: PullRequest?
+    @State private var isDetecting = false
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         // 平台都认不出来时，整块换成「怎么接进来」的指引 ——
         // 这时候列表和详情都没有内容可显示，留着两栏只是浪费地方。
         if let setup = repository.forgeSetup {
-            ForgeSetupView(repository: repository, setup: setup)
+            VStack(spacing: 0) {
+                projectNavigation
+                ForgeSetupView(repository: repository, setup: setup)
+            }
         } else {
-            splitBody
+            workspaceBody
         }
     }
 
-    private var splitBody: some View {
-        GeometryReader { geometry in
-            // geometry 已经是扣掉左侧项目菜单后的内容区。列表默认按比例但封顶
-            // （两行式文件行不需要 30% 那么宽），空间留给右侧详情。
-            let defaultListWidth = min(max(260, geometry.size.width * 0.22), 360)
-            HSplitView {
-                list
-                    .frame(
-                        minWidth: defaultListWidth,
-                        idealWidth: defaultListWidth,
-                        maxWidth: geometry.size.width * 0.45,
-                        maxHeight: .infinity
-                    )
+    @ViewBuilder
+    private var projectNavigation: some View {
+        if let projectTab {
+            HStack {
+                ProjectHomeNavigation(repository: repository, selection: projectTab)
+                Spacer()
+            }
+            .padding(.horizontal, GroveStyle.Space.lg)
+            .frame(height: GroveStyle.toolbarHeight)
+            .background(.bar)
+            Divider()
+        }
+    }
 
-                detail
-                    .frame(
-                        minWidth: 380,
-                        idealWidth: geometry.size.width * 0.7,
-                        maxHeight: .infinity
-                    )
-                    .layoutPriority(1)
+    @ViewBuilder
+    private var workspaceBody: some View {
+        VStack(spacing: 0) {
+            if let message = repository.pullRequestUnavailableReason {
+                projectNavigation
+                GroveEmptyState(title: "\(repository.reviewTerm)不可用",
+                                systemImage: "exclamationmark.triangle", description: message,
+                                isError: true) {
+                    Button("重新检测") {
+                        Task {
+                            isDetecting = true
+                            await appModel.redetectForges()
+                            isDetecting = false
+                        }
+                    }
+                    .disabled(isDetecting || repository.isRefreshingPullRequests)
+                }
+            } else if repository.listPullRequests.isEmpty {
+                listHeader
+                Divider()
+                listStateView
+            } else {
+                switch mode {
+                case .list:
+                    listView
+                case .review:
+                    if let selection, let pullRequest = repository.listPullRequests.first(where: { $0.number == selection }) {
+                        PullRequestDetailView(
+                            repository: repository,
+                            pullRequest: pullRequest,
+                            existingWorktree: worktree(for: pullRequest),
+                            onMerge: { mergeTarget = pullRequest },
+                            onBackToList: {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    mode = .list
+                                }
+                            },
+                            canGoPrevious: canGoPreviousPR,
+                            canGoNext: canGoNextPR,
+                            onPreviousPR: { goToPreviousPR() },
+                            onNextPR: { goToNextPR() }
+                        )
+                        .id(pullRequest.number)
+                    } else {
+                        listView
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(GroveStyle.content)
         .task {
-            selection = selection ?? initialSelection
+            if selection == nil, let initialSelection {
+                selection = initialSelection
+                mode = .review
+            }
             await repository.refreshPullRequests()
         }
         .sheet(item: $mergeTarget) { pullRequest in
@@ -54,73 +111,148 @@ struct PullRequestListView: View {
         }
     }
 
+    private var currentIndex: Int? {
+        guard let selection else { return nil }
+        return filtered.firstIndex(where: { $0.number == selection })
+    }
+
+    private var canGoPreviousPR: Bool {
+        guard let idx = currentIndex else { return false }
+        return idx > 0
+    }
+
+    private var canGoNextPR: Bool {
+        guard let idx = currentIndex else { return false }
+        return idx < filtered.count - 1
+    }
+
+    private func goToPreviousPR() {
+        guard let idx = currentIndex, idx > 0 else { return }
+        selection = filtered[idx - 1].number
+    }
+
+    private func goToNextPR() {
+        guard let idx = currentIndex, idx < filtered.count - 1 else { return }
+        selection = filtered[idx + 1].number
+    }
+
     // MARK: - 列表
 
-    private var list: some View {
-        VStack(spacing: 0) {
-            header
+    @ViewBuilder
+    private var listStateView: some View {
+        if repository.isRefreshingPullRequests {
+            GroveLoadingState(title: "正在加载\(repository.reviewTerm)…")
+        } else if let error = repository.pullRequestLoadError {
+            GroveEmptyState(title: "\(repository.reviewTerm)加载失败",
+                            systemImage: "exclamationmark.triangle", description: error, isError: true) {
+                Button("重试") { Task { await repository.refreshPullRequests() } }
+            }
+        } else if !repository.hasLoadedPullRequests {
+            GroveLoadingState(title: "正在加载\(repository.reviewTerm)…")
+        } else {
+            GroveEmptyState(title: emptyTitle,
+                            systemImage: repository.listState == .merged ? "arrow.triangle.merge" : "arrow.triangle.pull",
+                            description: repository.listState == .all
+                                ? "当前仓库暂无\(repository.reviewTerm)。"
+                                : "当前「\(repository.listState.label)」筛选下没有\(repository.reviewTerm)，可切换到「全部」查看其他状态。") {
+                if repository.listState != .all {
+                    Button("查看全部") {
+                        selection = nil
+                        Task { await repository.setPullRequestListState(.all) }
+                    }
+                }
+            }
+        }
+    }
 
-            if let message = repository.pullRequestUnavailableReason {
-                ContentUnavailableView {
-                    Label("\(repository.reviewTerm)不可用", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(message)
+    private var emptyTitle: String {
+        repository.listState == .all ? "没有\(repository.reviewTerm)" : "没有\(repository.listState.label)的\(repository.reviewTerm)"
+    }
+
+    private var listView: some View {
+        VStack(spacing: 0) {
+            listHeader
+            Divider()
+            if filtered.isEmpty {
+                GroveEmptyState(title: "没有匹配的请求", systemImage: "magnifyingglass",
+                                description: "尝试其他标题、分支、作者或请求编号。") {
+                    Button("清除搜索") { searchText = "" }
                 }
-                // 不撑满的话 VStack 会缩成「头部 + 空态」那么高然后整体居中，
-                // 头部就跑到列中间去了。
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if repository.listPullRequests.isEmpty {
-                ContentUnavailableView {
-                    Label(repository.isRefreshingPullRequests ? "正在加载…" : repository.listState.emptyTitle,
-                          systemImage: repository.listState == .merged ? "arrow.triangle.merge"
-                          : repository.listState == .closed ? "xmark.circle"
-                          : "arrow.triangle.pull")
-                } description: {
-                    Text(repository.slug.map { "仓库：\($0)" } ?? "")
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
                     ForEach(filtered) { pullRequest in
-                        let isSelected = selection == pullRequest.number
-                        Button {
+                        PullRequestRow(
+                            pullRequest: pullRequest,
+                            worktree: worktree(for: pullRequest),
+                            isSelected: selection == pullRequest.number,
+                            isAIReviewing: appModel.isAIReviewing(
+                                for: repository.root, pullRequestNumber: pullRequest.number
+                            ),
+                            aiVerdict: appModel.cachedAIReview(
+                                for: repository.root, pullRequestNumber: pullRequest.number
+                            )?.review.verdict
+                        )
+                        .tag(pullRequest.number)
+                        .simultaneousGesture(TapGesture().onEnded {
                             selection = pullRequest.number
-                        } label: {
-                            PullRequestRow(
-                                pullRequest: pullRequest,
-                                worktree: worktree(for: pullRequest),
-                                isSelected: isSelected,
-                                isAIReviewing: appModel.isAIReviewing(
-                                    for: repository.root,
-                                    pullRequestNumber: pullRequest.number
-                                ),
-                                aiVerdict: appModel.cachedAIReview(
-                                    for: repository.root,
-                                    pullRequestNumber: pullRequest.number
-                                )?.review.verdict
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .listRowBackground(selectionBackground(isSelected))
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                mode = .review
+                            }
+                        })
+                        .listRowBackground(selectionBackground(selection == pullRequest.number))
                         .contextMenu { menu(for: pullRequest) }
                     }
                 }
                 .listStyle(.inset)
-                .searchable(text: $searchText, placement: .sidebar, prompt: "搜索标题、分支、作者")
+                .accessibilityLabel(repository.reviewTerm)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var header: some View {
-        HStack(spacing: 8) {
-            Text(repository.slug ?? repository.name)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+    private var listHeader: some View {
+        HStack(spacing: GroveStyle.Space.sm) {
+            if let projectTab {
+                ProjectHomeNavigation(repository: repository, selection: projectTab)
+            } else {
+                Text(repository.reviewTerm).font(GroveStyle.sectionTitle)
+            }
 
-            Spacer()
+            if !filtered.isEmpty {
+                Badge(text: "\(filtered.count)", tint: .secondary)
+                    .help("当前搜索结果数量；平台列表最多加载 50 条")
+            }
+
+            Spacer(minLength: GroveStyle.Space.sm)
+
+            HStack(spacing: GroveStyle.Space.compact) {
+                Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                TextField("搜索标题、分支、作者或编号…", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(GroveStyle.metadata)
+                    .focused($searchFocused)
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, GroveStyle.Space.sm)
+            .frame(minWidth: 120, maxWidth: 220)
+            .frame(height: GroveStyle.toolHitArea)
+            .background(GroveStyle.secondarySurface, in: RoundedRectangle(cornerRadius: GroveStyle.smallRadius))
+            .overlay {
+                RoundedRectangle(cornerRadius: GroveStyle.smallRadius)
+                    .stroke(searchFocused && controlActiveState != .inactive ? Color(nsColor: .keyboardFocusIndicatorColor)
+                            : Color(nsColor: .separatorColor).opacity(0.5),
+                            lineWidth: searchFocused && controlActiveState != .inactive ? 2 : 0.5)
+            }
+            .help("按标题、分支、作者或编号搜索")
 
             Picker("状态筛选", selection: listStateBinding) {
                 ForEach(PullRequestListState.allCases) { state in
@@ -129,25 +261,37 @@ struct PullRequestListView: View {
             }
             .pickerStyle(.menu)
             .labelsHidden()
-            .controlSize(.small)
+            .controlSize(.regular)
             .fixedSize()
             .help("按状态筛选：开放、已合并、已关闭或全部")
 
+            if let error = repository.pullRequestLoadError, !repository.listPullRequests.isEmpty {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .help("刷新失败，保留上次结果：\(error)")
+                    .accessibilityLabel("刷新失败，显示上次结果")
+            }
             if repository.isRefreshingPullRequests {
                 ProgressView().controlSize(.mini)
+                    .frame(width: GroveStyle.toolHitArea, height: GroveStyle.toolHitArea)
             } else {
                 Button {
                     Task { await repository.refreshPullRequests() }
                 } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 10))
+                    Label("刷新", systemImage: "arrow.clockwise").labelStyle(.iconOnly)
+                        .font(GroveStyle.toolIcon)
+                        .frame(width: GroveStyle.toolHitArea, height: GroveStyle.toolHitArea)
                 }
                 .buttonStyle(.borderless)
+                .modifier(GroveRowHover())
+                .tint(.secondary)
                 .help("重新加载 PR 列表")
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
+        .controlSize(.small)
+        .padding(.horizontal, GroveStyle.Space.lg)
+        .frame(height: GroveStyle.toolbarHeight)
+        .background(.bar)
     }
 
     private var filtered: [PullRequest] {
@@ -161,46 +305,18 @@ struct PullRequestListView: View {
         }
     }
 
-    /// 跟 Finder 侧栏一致：浅灰圆角底配强调色文字，不使用整块高饱和蓝色。
+    /// 跟 Finder 侧栏一致：浅灰圆角底，不使用整块高饱和蓝色。
     private func selectionBackground(_ isSelected: Bool) -> some View {
-        RoundedRectangle(cornerRadius: 9, style: .continuous)
-            .fill(isSelected
-                  ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
-                  : .clear)
+        RoundedRectangle(cornerRadius: GroveStyle.radius, style: .continuous)
+            .fill(isSelected ? Color.primary.opacity(0.08) : .clear)
     }
 
-    /// 这个 PR 的分支有没有已经检出成本地工作树。有的话就直接给「跳过去」的入口，
-    /// 而不是让用户再建一个（git 也不会允许）。
     private func worktree(for pullRequest: PullRequest) -> Worktree? {
         let candidates = [pullRequest.headRefName, "pr-\(pullRequest.number)"]
         return repository.worktrees.first { worktree in
             guard let branch = worktree.branch else { return false }
             return candidates.contains(branch)
         }
-    }
-
-    // MARK: - 详情
-
-    @ViewBuilder
-    private var detail: some View {
-        Group {
-            if let selection, let pullRequest = repository.listPullRequests.first(where: { $0.number == selection }) {
-                PullRequestDetailView(
-                    repository: repository,
-                    pullRequest: pullRequest,
-                    existingWorktree: worktree(for: pullRequest),
-                    onMerge: { mergeTarget = pullRequest }
-                )
-                .id(pullRequest.number)
-            } else {
-                ContentUnavailableView {
-                    Label("选择一个 PR", systemImage: "arrow.triangle.pull")
-                } description: {
-                    Text("查看检查状态，或者把它检出成一个工作树。")
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
@@ -225,8 +341,6 @@ struct PullRequestListView: View {
         appModel.selection = .worktree(repository: repository.id, worktree: worktree.path)
     }
 
-    /// 切状态筛选时清掉选中项：旧选中大概率不在新列表里，
-    /// 留着只会让详情区显示一个莫名的「选择一个 PR」。
     private var listStateBinding: Binding<PullRequestListState> {
         Binding(
             get: { repository.listState },
@@ -246,65 +360,59 @@ private struct PullRequestRow: View {
     let worktree: Worktree?
     let isSelected: Bool
     let isAIReviewing: Bool
-    /// 本地已缓存的 AI Review 结论。平台不知道它存在；行里要亮出来，
-    /// 不然「AI 都审完了还写着未评审」看着自相矛盾。
     let aiVerdict: PullRequestAIReview.Verdict?
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: GroveStyle.Space.sm) {
             Image(systemName: pullRequest.status.systemImage)
-                .font(.system(size: 12))
-                .foregroundStyle(isSelected ? Color.accentColor : statusTint)
-                .frame(width: 15)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(statusTint)
+                .frame(width: 16, height: 18)
+                .help(pullRequest.status.label)
 
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
-                    Text(pullRequest.displayNumber)
-                        .font(.system(size: 10.5, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(
-                            isSelected
-                                ? Color.accentColor.opacity(0.75)
-                                : Color(nsColor: .tertiaryLabelColor)
-                        )
+            VStack(alignment: .leading, spacing: GroveStyle.Space.xs) {
+                HStack(alignment: .firstTextBaseline, spacing: GroveStyle.Space.xs) {
                     Text(pullRequest.title)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(isSelected ? Color.accentColor : .primary)
-                        // 单行。两行标题会让行高随内容漂移，NSTableCellView 量错后
-                        // 相邻行就叠在一起 —— 改单行后行高只由结构决定，彻底稳定。
+                        .font(GroveStyle.body.weight(.medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                        .help(pullRequest.title)
+
+                    Spacer(minLength: GroveStyle.Space.xs)
+
+                    Text(RelativeDate.format(pullRequest.updatedAt))
+                        .font(GroveStyle.caption)
+                        .foregroundStyle(.tertiary)
                         .lineLimit(1)
-                        .truncationMode(.middle)
+                        .help("更新时间：\(pullRequest.updatedAt.formatted())")
                 }
 
-                HStack(spacing: 6) {
+                HStack(spacing: GroveStyle.Space.sm) {
+                    Text(pullRequest.displayNumber).monospacedDigit()
                     if let author = pullRequest.author {
                         Text(author.displayName).lineLimit(1)
                     }
-                    Text(pullRequest.headRefName)
-                        .font(.system(size: 9.5, design: .monospaced))
+                    Text("·")
+                    Text("\(pullRequest.headRefName) → \(pullRequest.baseRefName)")
+                        .font(.system(size: 11, design: .monospaced))
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Text(RelativeDate.format(pullRequest.listTimestamp))
+                        .help("\(pullRequest.headRefName) → \(pullRequest.baseRefName)")
                 }
-                .font(.system(size: 9.5))
-                .foregroundStyle(.tertiary)
+                .font(GroveStyle.caption)
+                .foregroundStyle(.secondary)
 
                 HStack(spacing: 5) {
-                    if isAIReviewing {
-                        MiniBadge(text: "Review 中", systemImage: "sparkles", tint: .purple)
+                    if pullRequest.status != .open {
+                        MiniBadge(text: pullRequest.status.label, systemImage: pullRequest.status.systemImage, tint: statusTint)
                     }
 
-                    // 开放中的请求才需要看状态；已合并/已关闭的是历史记录，
-                    // 徽标堆上去只会把行撑长。
                     if pullRequest.isActive {
-                        // 冲突是硬阻断，红色放在最前面 —— 合不了就是白等。
                         if pullRequest.mergeable?.uppercased() == "CONFLICTING" {
-                            MiniBadge(text: "有冲突", systemImage: "exclamationmark.triangle.fill", tint: .red)
+                            MiniBadge(text: "存在冲突", systemImage: "exclamationmark.triangle.fill", tint: .red)
                         }
 
-                        // 评审状态常显：没有徽标的话，列表里看不出哪些 PR
-                        // 还没人看过（旧版 GitLab 列表接口不回审批数据，
-                        // 映射不出来时也要明确说「未评审」，而不是什么都不显示）。
                         switch pullRequest.review {
                         case .approved:
                             MiniBadge(text: "已批准", systemImage: "checkmark.seal.fill", tint: .green)
@@ -313,8 +421,6 @@ private struct PullRequestRow: View {
                         case .pending:
                             MiniBadge(text: "待评审", systemImage: "clock.fill", tint: .orange)
                         case .none:
-                            // 自己批过也算：有些自建实例不回传整体审批规则，
-                            // 但「你已批准」这件事 Grove 自己知道。
                             if pullRequest.viewerHasApproved {
                                 MiniBadge(text: "已批准", systemImage: "checkmark.seal.fill", tint: .green)
                             } else if !isAIReviewing && aiVerdict == nil {
@@ -322,7 +428,9 @@ private struct PullRequestRow: View {
                             }
                         }
 
-                        if let aiVerdict, !isAIReviewing {
+                        if isAIReviewing {
+                            MiniBadge(text: "AI 审查中", systemImage: "sparkles", tint: .purple)
+                        } else if let aiVerdict {
                             MiniBadge(
                                 text: aiVerdictLabel(aiVerdict),
                                 systemImage: "sparkles",
@@ -341,15 +449,14 @@ private struct PullRequestRow: View {
                         MiniBadge(text: "fork", systemImage: "tuningfork", tint: .indigo)
                     }
                 }
-                .lineLimit(1)
+                .padding(.top, 2)
             }
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, GroveStyle.Space.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // `List` 包着 plain Button 时会按压缩后的 label 高度创建 NSTableCellView；
-        // 有 Review 徽标的行会因此被下一行盖住。
         .fixedSize(horizontal: false, vertical: true)
         .contentShape(Rectangle())
+        .modifier(GroveRowHover(isSelected: isSelected))
     }
 
     private var statusTint: Color {
@@ -372,7 +479,7 @@ private struct PullRequestRow: View {
 
     private func aiVerdictLabel(_ verdict: PullRequestAIReview.Verdict) -> String {
         switch verdict {
-        case .ready: "AI 可合并"
+        case .ready: "AI 审核通过"
         case .needsChanges: "AI 建议修改"
         case .uncertain: "AI 无法判断"
         }
@@ -393,14 +500,7 @@ struct MiniBadge: View {
     let tint: Color
 
     var body: some View {
-        HStack(spacing: 2) {
-            Image(systemName: systemImage).font(.system(size: 7.5, weight: .bold))
-            Text(text).font(.system(size: 9, weight: .medium))
-        }
-        .foregroundStyle(tint)
-        .padding(.horizontal, 4)
-        .padding(.vertical, 1)
-        .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 3.5))
+        Badge(text: text, systemImage: systemImage, tint: tint)
     }
 }
 
@@ -412,21 +512,32 @@ private struct PullRequestDetailView: View {
     let pullRequest: PullRequest
     let existingWorktree: Worktree?
     let onMerge: () -> Void
+    var onBackToList: (() -> Void)? = nil
+    var canGoPrevious: Bool? = nil
+    var canGoNext: Bool? = nil
+    var onPreviousPR: (() -> Void)? = nil
+    var onNextPR: (() -> Void)? = nil
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var detailed: PullRequest?
+    @State private var detailLoadError: String?
+    @State private var isLoadingDetail = false
     @State private var threads: [ReviewThread] = []
     @State private var diffFiles: [FileDiff] = []
     @State private var selectedDiffFileID: String?
 
-    /// 详情分区：讨论流 / 代码查看器。代码查看器要撑满剩余高度，
-    /// 放不进页面的 ScrollView 里（那只能得到固定 520pt 的小盒子，
-    /// 文件列表和 diff 拼在半高窗口里，review 体验和变更视图差一大截）——
-    /// 分页是结构需要，不只是导航偏好。
-    private enum DetailTab { case conversation, code }
-    @State private var activeDetailTab: DetailTab = .conversation
+    private enum DetailTab: Hashable {
+        case overview
+        case code
+        case checks
+        case review
+    }
+    @State private var activeDetailTab: DetailTab = .overview
+    @State private var isFileListCollapsed: Bool = false
     @State private var isLoadingThreads = false
     @State private var isLoadingDiff = false
     @State private var didFailDiff = false
+    @State private var diffLoadError: String?
     @State private var commentText = ""
     @State private var isWorking = false
     @State private var showsCloseConfirmation = false
@@ -464,37 +575,20 @@ private struct PullRequestDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // 头部固定：标题、操作、标签、统计。不跟内容一起滚 ——
-            // 在对话和代码之间来回切时，标题栏一直在原位。
-            VStack(alignment: .leading, spacing: 14) {
-                titleBlock
-                ScrollView(.horizontal) { actionBar.fixedSize(horizontal: true, vertical: false) }
-                    .scrollIndicators(.hidden)
-                if !current.labels.isEmpty { labelRow }
-                statsRow
-            }
-            .padding(.horizontal, 18)
-            .padding(.top, 16)
-            .padding(.bottom, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-
+            prHeader
             Divider()
-
-            Picker("分区", selection: $activeDetailTab) {
-                Text("概览").tag(DetailTab.conversation)
-                Text("代码变更\(diffFiles.isEmpty ? "" : " · \(diffFiles.count)")")
-                    .tag(DetailTab.code)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 18)
-            .padding(.vertical, 8)
-
+            tabPicker
+            Divider()
             Group {
-                if activeDetailTab == .conversation {
-                    conversationSection
-                } else {
+                switch activeDetailTab {
+                case .overview:
+                    overviewTab
+                case .code:
                     codeSection
+                case .checks:
+                    checksTab
+                case .review:
+                    reviewTab
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -520,84 +614,380 @@ private struct PullRequestDetailView: View {
         .sheet(isPresented: $showsDiscussionComposer) { discussionComposer }
     }
 
-    private var conversationSection: some View {
-        GeometryReader { geometry in
-            ScrollViewReader { proxy in
-                HStack(alignment: .top, spacing: 24) {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 24) {
-                            bodySection
-                            if geometry.size.width < 920 {
-                                DisclosureGroup("审查状态与讨论导航") { reviewStatusSidebar.padding(.top, 12) }
-                                    .font(.system(size: 12))
-                            }
-                            if isReviewingAI || aiReview != nil || appModel.hasPendingAIReview(for: repository.root, pullRequestNumber: current.number) {
-                                aiReviewSection
-                            }
-                            reviewSection
+    // MARK: - 顶部标题与操作栏
+
+    private var prHeader: some View {
+        VStack(alignment: .leading, spacing: GroveStyle.Space.sm) {
+            // 第一层：返回、序号、标题、主要操作
+            HStack(spacing: GroveStyle.Space.sm) {
+                if let onBackToList {
+                    Button {
+                        onBackToList()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("全部\(repository.reviewTerm)")
+                                .font(GroveStyle.metadata)
                         }
-                        .padding(24)
-                        .frame(maxWidth: 780, alignment: .leading)
-                        .frame(maxWidth: .infinity)
                     }
-                    if geometry.size.width >= 920 {
-                        ScrollView { reviewStatusSidebar.padding(.vertical, 24).padding(.trailing, 20) }
-                            .frame(width: 260)
-                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("返回请求列表 (保留选择与筛选)")
                 }
-                .frame(maxWidth: 1120)
-                .frame(maxWidth: .infinity)
-                .onChange(of: scrollTarget) { _, target in
-                    if let target { withAnimation { proxy.scrollTo(target, anchor: .top) }; scrollTarget = nil }
+
+                if let onPreviousPR, let onNextPR {
+                    HStack(spacing: 1) {
+                        Button { onPreviousPR() } label: {
+                            Image(systemName: "chevron.up").font(.system(size: 10))
+                        }
+                        .disabled(!(canGoPrevious ?? false))
+                        .help("上一个请求")
+
+                        Button { onNextPR() } label: {
+                            Image(systemName: "chevron.down").font(.system(size: 10))
+                        }
+                        .disabled(!(canGoNext ?? false))
+                        .help("下一个请求")
+                    }
+                    .buttonStyle(.borderless)
+                    .frame(height: GroveStyle.toolHitArea)
+                }
+
+                Divider().frame(height: 16)
+
+                MiniBadge(text: current.status.label, systemImage: current.status.systemImage, tint: statusTint)
+
+                Text(current.displayNumber)
+                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+
+                Text(current.title)
+                    .font(GroveStyle.title)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .textSelection(.enabled)
+                    .help(current.title)
+
+                Spacer(minLength: GroveStyle.Space.sm)
+
+                headerActions
+            }
+
+            // 第二层：元信息（作者、时间、分支流转）、业务状态徽标
+            HStack(spacing: GroveStyle.Space.md) {
+                HStack(spacing: GroveStyle.Space.xs) {
+                    Image(systemName: "person.circle").foregroundStyle(.secondary)
+                    if let author = current.author {
+                        Text(author.displayName).fontWeight(.medium)
+                    }
+                    Text("·")
+                    Text("更新于 \(RelativeDate.format(current.updatedAt))")
+                }
+                .font(GroveStyle.caption)
+                .foregroundStyle(.secondary)
+
+                HStack(spacing: 4) {
+                    Text(current.headRefName)
+                        .font(.system(size: 11, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(GroveStyle.secondarySurface, in: RoundedRectangle(cornerRadius: 4))
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                    Text(current.baseRefName)
+                        .font(.system(size: 11, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(GroveStyle.secondarySurface, in: RoundedRectangle(cornerRadius: 4))
+                }
+
+                Spacer(minLength: GroveStyle.Space.sm)
+
+                HStack(spacing: 6) {
+                    gitMergeableBadge
+
+                    if let checks = current.checks.label, let icon = current.checks.systemImage {
+                        MiniBadge(text: checks, systemImage: icon, tint: checksTint)
+                    }
+
+                    switch current.review {
+                    case .approved:
+                        MiniBadge(text: "已批准", systemImage: "checkmark.seal.fill", tint: .green)
+                    case .changesRequested:
+                        MiniBadge(text: "要求修改", systemImage: "exclamationmark.bubble.fill", tint: .orange)
+                    case .pending:
+                        MiniBadge(text: "待评审", systemImage: "clock.fill", tint: .orange)
+                    case .none:
+                        if current.viewerHasApproved {
+                            MiniBadge(text: "已批准", systemImage: "checkmark.seal.fill", tint: .green)
+                        }
+                    }
+
+                    if let aiReview {
+                        MiniBadge(
+                            text: verdictLabel(aiReview.verdict),
+                            systemImage: verdictIcon(aiReview.verdict),
+                            tint: verdictTint(aiReview.verdict)
+                        )
+                    }
+
+                    if current.isCrossRepository, let owner = current.headRepositoryOwner {
+                        MiniBadge(text: "来自 \(owner.login) 的 fork", systemImage: "tuningfork", tint: .indigo)
+                    }
                 }
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .padding(.horizontal, GroveStyle.Space.xl)
+        .padding(.vertical, GroveStyle.Space.md)
+        .background(.bar)
     }
 
-    private var reviewStatusSidebar: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("合并状态").font(.system(size: 11)).foregroundStyle(.secondary)
-                Label(current.mergeable.map(mergeableLabel) ?? "计算中", systemImage: current.mergeable?.uppercased() == "MERGEABLE" ? "checkmark.circle.fill" : "exclamationmark.circle")
-                    .foregroundStyle(current.mergeable?.uppercased() == "MERGEABLE" ? Color.green : .orange)
-                    .font(.system(size: 12))
-            }
-            Divider()
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("讨论").foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(threads.filter { $0.isResolvable && !$0.isResolved }.count) 待解决").foregroundStyle(.secondary)
+    private var headerActions: some View {
+        HStack(spacing: 8) {
+            if let existingWorktree {
+                Button {
+                    appModel.selection = .worktree(repository: repository.id, worktree: existingWorktree.path)
+                } label: {
+                    Label("跳到工作树", systemImage: "leaf.fill")
                 }
-                .font(.system(size: 11))
-                ForEach(threads.filter { !$0.isSystemOnly }) { thread in
-                    Button {
-                        discussionFilter = .all
-                        scrollTarget = thread.id
-                    } label: {
-                        HStack(alignment: .top, spacing: 7) {
-                            Image(systemName: thread.isResolved ? "checkmark.circle.fill" : "bubble.left")
-                                .foregroundStyle(thread.isResolved ? Color.green : .secondary)
-                            Text(.init(thread.firstNote.map { AIReviewAutomation.visibleBody($0.body) }?.components(separatedBy: "\n").first ?? "讨论")).lineLimit(2)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .font(.system(size: 11))
+                .buttonStyle(.bordered)
+            } else {
+                Button {
+                    Task {
+                        guard let worktree = await repository.createWorktree(forPullRequest: current) else { return }
+                        appModel.selection = .worktree(repository: repository.id, worktree: worktree.path)
                     }
-                    .buttonStyle(.plain)
+                } label: {
+                    Label("检出工作树", systemImage: "plus.rectangle.on.rectangle")
                 }
-                if let aiReview {
-                    ForEach(Array(aiReview.discussionFindings.enumerated()), id: \.offset) { _, assessment in
-                        Button { scrollTarget = "ai-\(AIReviewAutomation.issueKey(assessment))" } label: {
-                            Label(assessment.summary, systemImage: "sparkles").lineLimit(2).font(.system(size: 11))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
+                .buttonStyle(.bordered)
+                .help("抓取这个 PR 的分支并创建一个新工作树，不影响你当前的工作")
+                .disabled(repository.activity != nil)
             }
-            if let checks = current.statusCheckRollup, !checks.isEmpty {
+
+            if current.status == .open || current.status == .draft {
+                Button {
+                    onMerge()
+                } label: {
+                    Label("合并…", systemImage: "arrow.triangle.merge")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(current.status == .draft || current.mergeable?.uppercased() == "CONFLICTING" || isWorking)
+                .help(current.status == .draft ? "草稿状态不可合并" : current.mergeable?.uppercased() == "CONFLICTING" ? "代码存在冲突，无法直接合并" : "合并该请求")
+            }
+
+            if isReviewingAI {
+                Button {
+                    cancelAIReview()
+                } label: {
+                    Label("取消 Review", systemImage: "xmark.circle")
+                }
+                .buttonStyle(.bordered)
+            } else {
+                Button {
+                    startAIReview()
+                } label: {
+                    Label(aiReview == nil ? "AI Review" : "重新 Review", systemImage: "sparkles")
+                }
+                .buttonStyle(.bordered)
+                .disabled(!canStartAIReview)
+                .help(aiReviewHelp)
+            }
+
+            Menu {
+                Button {
+                    showsAIReviewOptions = true
+                } label: {
+                    Label("AI Review 选项…", systemImage: "slider.horizontal.3")
+                }
+                .disabled(!appModel.canUseAIGeneration)
+
                 Divider()
-                checksSection(checks)
+
+                Button {
+                    SystemActions.openInBrowser(current.url)
+                } label: {
+                    Label("在浏览器打开", systemImage: "arrow.up.forward.square")
+                }
+
+                Button {
+                    SystemActions.copyToPasteboard(current.url)
+                } label: {
+                    Label("复制链接", systemImage: "doc.on.doc")
+                }
+
+                Button {
+                    SystemActions.copyToPasteboard(current.headRefName)
+                } label: {
+                    Label("复制分支名", systemImage: "arrow.triangle.branch")
+                }
+
+                if current.status == .open || current.status == .draft {
+                    Divider()
+                    Button(role: .destructive) {
+                        showsCloseConfirmation = true
+                    } label: {
+                        Label("关闭请求", systemImage: "xmark.circle")
+                    }
+                    .disabled(isWorking)
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(GroveStyle.toolIcon)
+                    .frame(width: GroveStyle.toolHitArea, height: GroveStyle.toolHitArea)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("更多操作")
+            .popover(isPresented: $showsAIReviewOptions) {
+                aiReviewOptions
+            }
+
+            if let activity = repository.activity {
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.mini)
+                    Text(activity).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var gitMergeableBadge: some View {
+        if let mergeable = current.mergeable {
+            switch mergeable.uppercased() {
+            case "CONFLICTING":
+                MiniBadge(text: "存在代码冲突", systemImage: "exclamationmark.triangle.fill", tint: .red)
+                    .help("源分支与目标分支存在冲突，无法自动合并")
+            case "MERGEABLE":
+                MiniBadge(text: "无冲突可合并", systemImage: "checkmark.circle.fill", tint: .green)
+                    .help("源分支可直接合并到目标分支")
+            default:
+                MiniBadge(text: "合并状态计算中", systemImage: "clock", tint: .secondary)
+                    .help("托管平台正在计算分支可合并性…")
+            }
+        }
+    }
+
+    // MARK: - 次级分区分割
+
+    private var tabPicker: some View {
+        HStack {
+            Picker("分区", selection: $activeDetailTab) {
+                Text("概览").tag(DetailTab.overview)
+                Text("代码变更\(diffFiles.isEmpty ? "" : " · \(diffFiles.count)")").tag(DetailTab.code)
+                if let checks = current.statusCheckRollup, !checks.isEmpty {
+                    Text("检查 · \(checks.count)").tag(DetailTab.checks)
+                }
+                let threadsCount = threads.filter { !$0.isSystemOnly }.count
+                Text("评审与讨论\(threadsCount > 0 ? " · \(threadsCount)" : "")").tag(DetailTab.review)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.regular)
+            .fixedSize()
+
+            Spacer()
+
+            if activeDetailTab == .code, let file = selectedDiffFile {
+                Text(file.displayPath)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(.horizontal, GroveStyle.Space.xl)
+        .padding(.vertical, 8)
+        .background(.bar)
+    }
+
+    // MARK: - 概览 Tab
+
+    @ViewBuilder
+    private var overviewTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: GroveStyle.Space.section) {
+                if isLoadingDetail {
+                    HStack(spacing: GroveStyle.Space.sm) {
+                        ProgressView().controlSize(.mini)
+                        Text("正在加载详情…").font(GroveStyle.metadata).foregroundStyle(.secondary)
+                    }
+                }
+                if let detailLoadError {
+                    VStack(alignment: .leading, spacing: GroveStyle.Space.sm) {
+                        Label("详情加载失败", systemImage: "exclamationmark.triangle")
+                            .font(GroveStyle.sectionTitle)
+                        Text(detailLoadError).font(GroveStyle.metadata).foregroundStyle(.secondary)
+                        Button("重试") { Task { await loadDetail() } }
+                            .disabled(isLoadingDetail)
+                    }
+                }
+
+                bodySection
+                statsRow
+                if !current.labels.isEmpty {
+                    labelRow
+                }
+            }
+            .padding(GroveStyle.Space.section)
+            .frame(maxWidth: 820, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(GroveStyle.content)
+    }
+
+    // MARK: - 检查 Tab
+
+    @ViewBuilder
+    private var checksTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: GroveStyle.Space.section) {
+                if let checks = current.statusCheckRollup, !checks.isEmpty {
+                    checksSection(checks)
+                } else {
+                    GroveEmptyState(
+                        title: "无检查记录",
+                        systemImage: "checkmark.shield",
+                        description: "当前请求未上报 CI / Checks 检查状态，或远端尚未运行检查工作流。"
+                    )
+                }
+            }
+            .padding(GroveStyle.Space.section)
+            .frame(maxWidth: 820, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(GroveStyle.content)
+    }
+
+    // MARK: - 评审与讨论 Tab
+
+    @ViewBuilder
+    private var reviewTab: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: GroveStyle.Space.section) {
+                    if isReviewingAI || aiReview != nil || appModel.hasPendingAIReview(for: repository.root, pullRequestNumber: current.number) {
+                        aiReviewSection
+                        Divider()
+                    }
+
+                    reviewSection
+                }
+                .padding(GroveStyle.Space.section)
+                .frame(maxWidth: 820, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(GroveStyle.content)
+            .onChange(of: scrollTarget) { _, target in
+                if let target {
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
+                        proxy.scrollTo(target, anchor: .top)
+                    }
+                    scrollTarget = nil
+                }
             }
         }
     }
@@ -610,24 +1000,33 @@ private struct PullRequestDetailView: View {
         isLoadingThreads = true
         isLoadingDiff = true
 
-        async let loadedDetail = try? await forge.pullRequest(
-            number: pullRequest.number,
-            in: repository.root
-        )
+        isLoadingDetail = true
+        detailLoadError = nil
+        defer { isLoadingDetail = false }
+        async let loadedDetail = fetchDetail(using: forge)
         async let loadedThreads = try? await forge.reviewThreads(
             number: pullRequest.number,
             in: repository.root
         )
-        async let loadedDiff = try? await loadReviewDiff(using: forge)
+        async let loadedDiff = fetchDiff(using: forge)
 
         // 完整详情不只补正文，还包含当前用户的审批状态。即使列表接口已经
         // 带了正文也必须加载，否则批准过的 MR 仍会错误显示「批准」。
         let detail = await loadedDetail
         guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
-        detailed = detail
+        let resolvedDetail: PullRequest?
+        switch detail {
+        case .success(let value):
+            resolvedDetail = value
+            detailed = value
+        case .failure(let error):
+            resolvedDetail = nil
+            detailLoadError = error.localizedDescription
+        }
+        isLoadingDetail = false
         // 详情里的审批/冲突状态并回列表行 —— 列表接口拿不到这些。
-        if let detail {
-            repository.mergeDetailIntoList(detail, fromOrigin: expectedOrigin)
+        if let resolvedDetail {
+            repository.mergeDetailIntoList(resolvedDetail, fromOrigin: expectedOrigin)
         }
 
         let loadedReviewThreads = await loadedThreads
@@ -638,17 +1037,36 @@ private struct PullRequestDetailView: View {
 
         let files = await loadedDiff
         guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
-        if let files {
+        switch files {
+        case .success(let files):
             diffFiles = files.files
             diffHead = files.head
             didFailDiff = false
+            diffLoadError = nil
             selectFirstDiffFileIfNeeded()
             restoreCachedAIReview(for: files.files)
-        } else {
+        case .failure(let error):
             diffFiles = []
             didFailDiff = true
+            diffLoadError = error.localizedDescription
         }
         isLoadingDiff = false
+    }
+
+    private func fetchDetail(using forge: any ForgeClient) async -> Result<PullRequest, Error> {
+        do {
+            return .success(try await forge.pullRequest(number: pullRequest.number, in: repository.root))
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func fetchDiff(using forge: any ForgeClient) async -> Result<(files: [FileDiff], head: String), Error> {
+        do {
+            return .success(try await loadReviewDiff(using: forge))
+        } catch {
+            return .failure(error)
+        }
     }
 
     private func reloadThreads() async {
@@ -681,11 +1099,13 @@ private struct PullRequestDetailView: View {
             diffFiles = loaded.files
             diffHead = loaded.head
             didFailDiff = false
+            diffLoadError = nil
             selectFirstDiffFileIfNeeded()
             restoreCachedAIReview(for: diffFiles)
         } catch {
             diffFiles = []
             didFailDiff = true
+            diffLoadError = error.localizedDescription
         }
         isLoadingDiff = false
     }
@@ -709,14 +1129,14 @@ private struct PullRequestDetailView: View {
                 Text("基于提交 \(draftHead.prefix(8))").font(.caption).foregroundStyle(.secondary)
             } else {
                 Text("针对整个请求提出意见，支持 Markdown。")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .font(GroveStyle.body).foregroundStyle(.secondary)
             }
             TextEditor(text: $draftBody)
                 .font(.system(size: 13)).frame(minHeight: 160).padding(8)
                 .overlay { RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5) }
                 .disabled(isPostingDiscussion)
             if let draftError {
-                Label(draftError, systemImage: "exclamationmark.triangle").font(.system(size: 12)).foregroundStyle(.red)
+                Label(draftError, systemImage: "exclamationmark.triangle").font(GroveStyle.body).foregroundStyle(.red)
             }
             HStack {
                 Button("取消") { showsDiscussionComposer = false }.keyboardShortcut(.cancelAction)
@@ -728,7 +1148,7 @@ private struct PullRequestDetailView: View {
             }
             .disabled(isPostingDiscussion)
         }
-        .padding(24).frame(width: 580)
+        .padding(GroveStyle.Space.section).frame(width: 580)
         .interactiveDismissDisabled(isPostingDiscussion)
     }
 
@@ -741,7 +1161,7 @@ private struct PullRequestDetailView: View {
                                              expectedHead: draftHead, in: repository.root)
             showsDiscussionComposer = false
             discussionFilter = .all
-            activeDetailTab = .conversation
+            activeDetailTab = .review
             await reloadThreads()
         } catch { draftError = error.localizedDescription }
     }
@@ -791,7 +1211,7 @@ private struct PullRequestDetailView: View {
     private var reviewSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Text("活动与讨论").font(.system(size: 14, weight: .semibold))
+                Text("活动与讨论").font(GroveStyle.sectionTitle)
                 if isLoadingThreads { ProgressView().controlSize(.mini) }
                 Spacer()
                 Picker("筛选讨论", selection: $discussionFilter) {
@@ -813,7 +1233,7 @@ private struct PullRequestDetailView: View {
                     Label(threadsError, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
                     Button("重试") { Task { await reloadThreads() } }.disabled(isLoadingThreads)
                 }
-                .font(.system(size: 12))
+                .font(GroveStyle.body)
             }
 
             // 系统自动生成的记录（"assigned to @x"、"changed title"）数量很大
@@ -840,15 +1260,15 @@ private struct PullRequestDetailView: View {
     private var commentComposer: some View {
         VStack(alignment: .leading, spacing: 6) {
             TextEditor(text: $commentText)
-                .font(.system(size: 11.5))
+                .font(GroveStyle.body)
                 .scrollContentBackground(.hidden)
                 .frame(height: 64)
                 .padding(6)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+                .background(GroveStyle.content, in: RoundedRectangle(cornerRadius: 7))
                 .overlay(alignment: .topLeading) {
                     if commentText.isEmpty {
                         Text("写点什么…")
-                            .font(.system(size: 11.5))
+                            .font(GroveStyle.body)
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 11)
                             .padding(.vertical, 12)
@@ -970,139 +1390,7 @@ private struct PullRequestDetailView: View {
         Task { await repository.refreshPullRequests() }
     }
 
-    private var titleBlock: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 8) {
-                Label(current.status.label, systemImage: current.status.systemImage)
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(statusTint, in: Capsule())
 
-                Text(current.displayNumber)
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-
-                if current.mergeable?.uppercased() == "CONFLICTING" {
-                    Label("有冲突", systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Capsule().fill(Color.red))
-                        .help("目标分支和源分支改了同一处，需要先解决冲突才能合并")
-                }
-
-                if current.isCrossRepository, let owner = current.headRepositoryOwner {
-                    MiniBadge(text: "来自 \(owner.login) 的 fork", systemImage: "tuningfork", tint: .indigo)
-                }
-            }
-
-            Text(current.title)
-                .font(.system(size: 18, weight: .semibold))
-                .textSelection(.enabled)
-
-            HStack(spacing: 6) {
-                if let author = current.author {
-                    Text(author.displayName).fontWeight(.medium)
-                }
-                Text("想把")
-                Text(current.headRefName)
-                    .font(.system(size: 11, design: .monospaced))
-                Text("合并进")
-                Text(current.baseRefName)
-                    .font(.system(size: 11, design: .monospaced))
-            }
-            .font(.system(size: 11.5))
-            .foregroundStyle(.secondary)
-        }
-    }
-
-    private var actionBar: some View {
-        HStack(spacing: 8) {
-            if let existingWorktree {
-                Button {
-                    appModel.selection = .worktree(repository: repository.id, worktree: existingWorktree.path)
-                } label: {
-                    Label("跳到工作树", systemImage: "leaf.fill")
-                }
-                .buttonStyle(.borderedProminent)
-            } else {
-                Button {
-                    Task {
-                        guard let worktree = await repository.createWorktree(forPullRequest: current) else { return }
-                        appModel.selection = .worktree(repository: repository.id, worktree: worktree.path)
-                    }
-                } label: {
-                    Label("检出为工作树", systemImage: "plus.rectangle.on.rectangle")
-                }
-                .buttonStyle(.borderedProminent)
-                .help("抓取这个 PR 的分支并创建一个新工作树，不影响你当前的工作")
-                .disabled(repository.activity != nil)
-            }
-
-            Button {
-                SystemActions.openInBrowser(current.url)
-            } label: {
-                Label("在浏览器打开", systemImage: "arrow.up.forward.square")
-            }
-
-            if isReviewingAI {
-                Button {
-                    cancelAIReview()
-                } label: {
-                    Label("取消 Review", systemImage: "xmark.circle")
-                }
-            } else {
-                Button {
-                    startAIReview()
-                } label: {
-                    Label(aiReview == nil ? "AI Review" : "重新 Review", systemImage: "sparkles")
-                }
-                .disabled(!canStartAIReview)
-                .help(aiReviewHelp)
-
-                Button {
-                    showsAIReviewOptions.toggle()
-                } label: {
-                    Image(systemName: "slider.horizontal.3")
-                }
-                .help("设置本次 AI Review 的补充提示词")
-                .popover(isPresented: $showsAIReviewOptions) {
-                    aiReviewOptions
-                }
-            }
-
-            if current.status == .open || current.status == .draft {
-                Button {
-                    onMerge()
-                } label: {
-                    Label("合并…", systemImage: "arrow.triangle.merge")
-                }
-                .disabled(current.status == .draft)
-                .help(current.status == .draft ? "草稿状态的 PR 不能合并" : "gh pr merge")
-
-                Button(role: .destructive) {
-                    showsCloseConfirmation = true
-                } label: {
-                    Label("关闭", systemImage: "xmark.circle")
-                }
-                .disabled(isWorking)
-                .help("关闭这个 \(current.forge.shortTerm)，不会合并改动")
-            }
-
-            Spacer()
-
-            if let activity = repository.activity {
-                HStack(spacing: 5) {
-                    ProgressView().controlSize(.mini)
-                    Text(activity).font(.caption).foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
 
     private var canStartAIReview: Bool {
         appModel.canUseAIGeneration && !isLoadingDiff && !diffFiles.isEmpty
@@ -1156,10 +1444,10 @@ private struct PullRequestDetailView: View {
                     aiReviewAreas = Set(PullRequestAIReview.Assessment.Area.allCases)
                 }
                 .buttonStyle(.borderless)
-                .font(.system(size: 10.5))
+                .font(GroveStyle.caption)
             }
             Text("只会分析并输出勾选项；开始后会记作这个项目的默认选择。")
-                .font(.system(size: 10.5))
+                .font(GroveStyle.caption)
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 7) {
@@ -1183,16 +1471,16 @@ private struct PullRequestDetailView: View {
             Text("本次 AI Review 提示词")
                 .font(.system(size: 13, weight: .semibold))
             Text("当前内容来自项目默认提示词，可以针对这次改动临时修改。安全边界和 JSON 输出格式由 Grove 固定管理。")
-                .font(.system(size: 10.5))
+                .font(GroveStyle.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             TextEditor(text: $aiReviewInstructions)
-                .font(.system(size: 11.5))
+                .font(GroveStyle.body)
                 .scrollContentBackground(.hidden)
                 .frame(height: 150)
                 .padding(6)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+                .background(GroveStyle.content, in: RoundedRectangle(cornerRadius: 7))
                 .overlay { RoundedRectangle(cornerRadius: 7).stroke(.separator, lineWidth: 0.5) }
 
             HStack {
@@ -1293,95 +1581,184 @@ private struct PullRequestDetailView: View {
     private var statsRow: some View {
         HStack(spacing: 14) {
             statItem("文件", "\(current.changedFiles)", "doc.text")
-            // GitLab 的 MR 接口不返回增删行数。显示 "+0 −0" 会让人以为这个
-            // 请求什么都没改，不如干脆不显示。
             if current.additions > 0 || current.deletions > 0 {
                 statItem("新增", "+\(current.additions)", "plus", tint: .green)
                 statItem("删除", "−\(current.deletions)", "minus", tint: .red)
             }
             if let mergeable = current.mergeable {
-                statItem("可合并性", mergeableLabel(mergeable), "arrow.triangle.merge",
-                         tint: mergeable == "CONFLICTING" ? .red : .secondary)
+                statItem(
+                    "Git 合并状态",
+                    mergeableLabel(mergeable),
+                    "arrow.triangle.merge",
+                    tint: mergeable.uppercased() == "CONFLICTING" ? .red : (mergeable.uppercased() == "MERGEABLE" ? .green : .secondary)
+                )
             }
         }
     }
 
-    // MARK: - 代码评审
+    // MARK: - 代码改动
 
     private var codeSection: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 6) {
-                Text("点击代码行旁的讨论按钮，针对具体改动提出意见。")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                if isLoadingDiff { ProgressView().controlSize(.mini) }
-                Spacer()
-                if !diffFiles.isEmpty {
-                    DiffReadingControls()
-                }
-                if didFailDiff {
-                    Button("重试") { Task { await reloadDiff() } }
-                        .buttonStyle(.borderless)
-                        .font(.system(size: 10.5))
-                }
-            }
-
-            Group {
-                if isLoadingDiff {
-                    ProgressView("正在加载代码改动…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if didFailDiff {
-                    ContentUnavailableView {
-                        Label("代码改动加载失败", systemImage: "exclamationmark.triangle")
-                    } description: {
-                        Text("可以重试，或者暂时在浏览器里查看。")
-                    }
-                } else if diffFiles.isEmpty {
-                    ContentUnavailableView {
-                        Label("没有代码改动", systemImage: "equal.circle")
-                    } description: {
-                        Text("这个请求可能只修改了提交记录，或者服务端没有返回 diff。")
-                    }
-                } else {
-                    GeometryReader { geometry in
-                        // 代码评审的文件列表同样封顶：它是导航不是主角，
-                        // 默认给足看清文件名即可，代码区拿大头。
-                        let defaultFileListWidth = min(max(200, geometry.size.width * 0.2), 320)
-                        HSplitView {
-                            List(diffFiles, selection: $selectedDiffFileID) { file in
-                                DiffFileRow(file: file)
-                                    .tag(file.id)
-                            }
-                            .listStyle(.inset)
-                            .frame(
-                                minWidth: defaultFileListWidth,
-                                idealWidth: defaultFileListWidth,
-                                maxWidth: max(defaultFileListWidth, geometry.size.width * 0.45),
-                                maxHeight: .infinity
-                            )
-
-                            if let file = selectedDiffFile {
-                                DiffContentView(files: [file], showsFileHeaders: true,
-                                                onDiscussLine: { file, line, oldSide in
-                                                    if let location = ReviewLocation(file: file, line: line, isOldSide: oldSide) {
-                                                        openDiscussion(location: location)
-                                                    }
-                                                }, focusedLineID: focusedDiffLineID)
-                                    .frame(
-                                        minWidth: 320,
-                                        idealWidth: geometry.size.width * 0.7,
-                                        maxHeight: .infinity
-                                    )
-                                    .layoutPriority(1)
-                            }
-                        }
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay { RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5) }
+        VStack(spacing: 0) {
+            codeToolbar
+            Divider()
+            codeBody
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(GroveStyle.content)
+    }
+
+    private var codeToolbar: some View {
+        HStack(spacing: GroveStyle.Space.sm) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isFileListCollapsed.toggle()
+                }
+            } label: {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 12))
+                    .foregroundStyle(isFileListCollapsed ? .secondary : .primary)
+                    .frame(width: GroveStyle.toolHitArea, height: GroveStyle.toolHitArea)
+            }
+            .buttonStyle(.borderless)
+            .modifier(GroveRowHover())
+            .help(isFileListCollapsed ? "展开变更文件列表" : "收起变更文件列表 (最大化代码宽度)")
+
+            if let file = selectedDiffFile {
+                Text(file.displayPath)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(file.displayPath)
+
+                if diffFiles.count > 1 {
+                    HStack(spacing: 2) {
+                        Button { selectPreviousFile() } label: {
+                            Image(systemName: "chevron.up").font(.system(size: 10))
+                        }
+                        .disabled(!canSelectPreviousFile)
+                        .help("上一个变更文件")
+
+                        Button { selectNextFile() } label: {
+                            Image(systemName: "chevron.down").font(.system(size: 10))
+                        }
+                        .disabled(!canSelectNextFile)
+                        .help("下一个变更文件")
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+
+            if isLoadingDiff {
+                ProgressView().controlSize(.mini)
+                Text("正在加载代码…").font(GroveStyle.caption).foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: GroveStyle.Space.sm)
+
+            if !diffFiles.isEmpty {
+                DiffReadingControls()
+            }
+
+            if didFailDiff {
+                Button("重试") { Task { await reloadDiff() } }
+                    .buttonStyle(.borderless)
+                    .font(GroveStyle.caption)
+            }
+        }
+        .padding(.horizontal, GroveStyle.Space.md)
+        .frame(height: 36)
+        .background(GroveStyle.secondarySurface)
+    }
+
+    @ViewBuilder
+    private var codeBody: some View {
+        if isLoadingDiff {
+            GroveLoadingState(title: "正在加载代码改动…")
+        } else if didFailDiff {
+            GroveEmptyState(title: "代码改动加载失败", systemImage: "exclamationmark.triangle",
+                            description: diffLoadError ?? "可以重试，或者暂时在浏览器里查看。", isError: true) {
+                Button("重试") { Task { await reloadDiff() } }
+            }
+        } else if diffFiles.isEmpty {
+            GroveEmptyState(title: "没有代码改动", systemImage: "equal.circle",
+                            description: "这个请求可能只修改了提交记录，或者服务端没有返回 diff。")
+        } else if isFileListCollapsed {
+            if let file = selectedDiffFile {
+                DiffContentView(
+                    files: [file],
+                    showsFileHeaders: true,
+                    onDiscussLine: { file, line, oldSide in
+                        if let location = ReviewLocation(file: file, line: line, isOldSide: oldSide) {
+                            openDiscussion(location: location)
+                        }
+                    },
+                    focusedLineID: focusedDiffLineID
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                GroveEmptyState(title: "选择一个文件", systemImage: "doc.text", description: "从列表选择一个文件查看 Diff。")
+            }
+        } else {
+            GeometryReader { geometry in
+                let defaultFileListWidth: CGFloat = min(max(200, geometry.size.width * 0.22), 280)
+                HSplitView {
+                    List(diffFiles, selection: $selectedDiffFileID) { file in
+                        DiffFileRow(file: file)
+                            .tag(file.id)
+                    }
+                    .listStyle(.inset)
+                    .frame(
+                        minWidth: 180,
+                        idealWidth: defaultFileListWidth,
+                        maxWidth: max(defaultFileListWidth, geometry.size.width * 0.4),
+                        maxHeight: .infinity
+                    )
+
+                    if let file = selectedDiffFile {
+                        DiffContentView(
+                            files: [file],
+                            showsFileHeaders: true,
+                            onDiscussLine: { file, line, oldSide in
+                                if let location = ReviewLocation(file: file, line: line, isOldSide: oldSide) {
+                                    openDiscussion(location: location)
+                                }
+                            },
+                            focusedLineID: focusedDiffLineID
+                        )
+                        .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+                        .layoutPriority(1)
+                    } else {
+                        GroveEmptyState(title: "选择一个文件", systemImage: "doc.text", description: "从列表选择一个文件查看 Diff。")
+                    }
+                }
+            }
+        }
+    }
+
+    private var selectedDiffFileIndex: Int? {
+        guard let id = selectedDiffFileID else { return nil }
+        return diffFiles.firstIndex(where: { $0.id == id })
+    }
+
+    private var canSelectPreviousFile: Bool {
+        guard let idx = selectedDiffFileIndex else { return false }
+        return idx > 0
+    }
+
+    private var canSelectNextFile: Bool {
+        guard let idx = selectedDiffFileIndex else { return false }
+        return idx < diffFiles.count - 1
+    }
+
+    private func selectPreviousFile() {
+        guard let idx = selectedDiffFileIndex, idx > 0 else { return }
+        selectedDiffFileID = diffFiles[idx - 1].id
+    }
+
+    private func selectNextFile() {
+        guard let idx = selectedDiffFileIndex, idx < diffFiles.count - 1 else { return }
+        selectedDiffFileID = diffFiles[idx + 1].id
     }
 
     @ViewBuilder
@@ -1389,16 +1766,16 @@ private struct PullRequestDetailView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 7) {
                 Label("AI Review", systemImage: "sparkles")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(GroveStyle.sectionTitle)
                 if isReviewingAI {
                     ProgressView().controlSize(.mini)
                     Text("正在用 \(activeAIReviewModel) 检查代码…")
-                        .font(.system(size: 10.5))
+                        .font(GroveStyle.caption)
                         .foregroundStyle(.secondary)
                 } else if let aiReview {
                     Spacer()
                     Label(verdictLabel(aiReview.verdict), systemImage: verdictIcon(aiReview.verdict))
-                        .font(.system(size: 10.5, weight: .semibold))
+                        .font(GroveStyle.caption.weight(.semibold))
                         .foregroundStyle(verdictTint(aiReview.verdict))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
@@ -1409,7 +1786,7 @@ private struct PullRequestDetailView: View {
             if appModel.hasPendingAIReview(for: repository.root, pullRequestNumber: current.number) {
                 HStack {
                     Label("检测到新提交，等待你决定是否重新审查。", systemImage: "bell.badge")
-                        .font(.system(size: 10.5, weight: .medium))
+                        .font(GroveStyle.caption.weight(.medium))
                         .foregroundStyle(.orange)
                     Spacer()
                     Button("重新审查") { startAIReview() }
@@ -1422,24 +1799,24 @@ private struct PullRequestDetailView: View {
                 if aiReviewIsStale {
                     Label("PR 代码已更新，这份结果基于旧 diff；建议重新 Review。",
                           systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90")
-                        .font(.system(size: 10.5, weight: .medium))
+                        .font(GroveStyle.caption.weight(.medium))
                         .foregroundStyle(.orange)
                 }
 
                 Text(aiReview.summary)
-                    .font(.system(size: 11.5))
+                    .font(GroveStyle.body)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
 
                 if let note = aiReview.truncationNote {
                     Label("\(note)结论已按信息不足处理。",
                           systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 10.5))
+                        .font(GroveStyle.caption)
                         .foregroundStyle(.orange)
                 } else if aiReview.wasTruncated {
                     Label("改动过大，只审查了按文件截取的片段；结论已按信息不足处理。",
                           systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 10.5))
+                        .font(GroveStyle.caption)
                         .foregroundStyle(.orange)
                 }
 
@@ -1454,14 +1831,11 @@ private struct PullRequestDetailView: View {
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 Text("AI Review 根据 PR diff 和仓库只读上下文判断合并风险，不能代替实际构建与测试。")
-                    .font(.system(size: 9.5))
+                    .font(GroveStyle.caption)
                     .foregroundStyle(.tertiary)
             }
         }
-        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 9))
-        .overlay { RoundedRectangle(cornerRadius: 9).stroke(.separator, lineWidth: 0.5) }
     }
 
     private var activeAIReviewModel: String {
@@ -1494,14 +1868,14 @@ private struct PullRequestDetailView: View {
                         .foregroundStyle(assessmentTint(assessment.status))
                 }
                 Text(assessment.summary)
-                    .font(.system(size: 10.5))
+                    .font(GroveStyle.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                 if let evidence = assessment.evidence,
                    !evidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text(evidence)
-                        .font(.system(size: 9.5))
+                        .font(GroveStyle.caption)
                         .foregroundStyle(.tertiary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1546,7 +1920,7 @@ private struct PullRequestDetailView: View {
         }
         }
         .padding(14)
-        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .background(GroveStyle.content, in: RoundedRectangle(cornerRadius: 10))
         .overlay { RoundedRectangle(cornerRadius: 10).stroke(.separator, lineWidth: 0.5) }
     }
 
@@ -1643,7 +2017,7 @@ private struct PullRequestDetailView: View {
     private func statItem(_ title: String, _ value: String, _ icon: String, tint: Color = .secondary) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(title)
-                .font(.system(size: 9.5))
+                .font(GroveStyle.caption)
                 .foregroundStyle(.tertiary)
             Label(value, systemImage: icon)
                 .font(.system(size: 11.5, weight: .medium))
@@ -1666,8 +2040,7 @@ private struct PullRequestDetailView: View {
     private func checksSection(_ checks: [StatusCheck]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("检查")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
+                .font(GroveStyle.sectionTitle)
 
             VStack(spacing: 0) {
                 ForEach(Array(checks.prefix(40))) { check in
@@ -1678,7 +2051,7 @@ private struct PullRequestDetailView: View {
                             .frame(width: 14)
 
                         Text(check.displayName)
-                            .font(.system(size: 11.5))
+                            .font(GroveStyle.body)
                             .lineLimit(1)
                             .truncationMode(.middle)
 
@@ -1689,10 +2062,11 @@ private struct PullRequestDetailView: View {
                                 SystemActions.openInBrowser(link.absoluteString)
                             } label: {
                                 Image(systemName: "arrow.up.forward.square")
-                                    .font(.system(size: 9.5))
+                                    .font(GroveStyle.caption)
                             }
                             .buttonStyle(.borderless)
                             .foregroundStyle(.tertiary)
+                            .help("在浏览器查看检查结果")
                         }
                     }
                     .padding(.horizontal, 10)
@@ -1703,7 +2077,7 @@ private struct PullRequestDetailView: View {
                     }
                 }
             }
-            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+            .background(GroveStyle.secondarySurface, in: RoundedRectangle(cornerRadius: GroveStyle.radius))
 
             if checks.count > 40 {
                 Text("还有 \(checks.count - 40) 项未显示，在浏览器里查看完整列表。")
@@ -1717,14 +2091,11 @@ private struct PullRequestDetailView: View {
     private var bodySection: some View {
         if let body = current.body, !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             VStack(alignment: .leading, spacing: 6) {
-                Text("描述")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                Text("描述").font(GroveStyle.sectionTitle)
 
                 ReviewMarkdownView(text: body)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+                    .font(GroveStyle.body)
             }
         }
     }
@@ -1753,6 +2124,15 @@ private struct PullRequestDetailView: View {
         case .draft: .gray
         case .merged: .purple
         case .closed: .red
+        }
+    }
+
+    private var checksTint: Color {
+        switch current.checks {
+        case .passing: .green
+        case .failing: .red
+        case .running: .orange
+        case .none: .secondary
         }
     }
 }
@@ -1838,7 +2218,7 @@ struct ForgeSetupView: View {
                                     .help("复制命令")
                                 }
                                 .padding(9)
-                                .background(Color(nsColor: .textBackgroundColor),
+                                .background(GroveStyle.content,
                                             in: RoundedRectangle(cornerRadius: 7))
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 7).stroke(.separator, lineWidth: 0.5)

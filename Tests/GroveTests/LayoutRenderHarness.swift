@@ -28,6 +28,24 @@ final class LayoutRenderHarness: XCTestCase {
         ProcessInfo.processInfo.environment["GROVE_RENDER"] == "1"
     }
 
+    func testUnavailablePullRequestsKeepProjectNavigation() throws {
+        try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
+        let repository = RepositoryModel(root: URL(fileURLWithPath: "/tmp/Grove"),
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: nil)
+        var selectedTab = ProjectHomeTab.pullRequests
+        let hosting = try render(PullRequestListView(repository: repository,
+            projectTab: Binding(get: { selectedTab }, set: { selectedTab = $0 })).environment(AppModel()),
+            size: CGSize(width: 660, height: 460), to: "/tmp/grove-render-pr-unavailable-navigation.png")
+        func descendants(_ view: NSView) -> [NSView] {
+            view.subviews.flatMap { [$0] + descendants($0) }
+        }
+        let navigation = try XCTUnwrap(descendants(hosting).compactMap { $0 as? NSSegmentedControl }
+            .first { $0.segmentCount == 2 && $0.label(forSegment: 1) == "CI/CD" })
+        navigation.selectedSegment = 1
+        XCTAssertTrue(navigation.sendAction(try XCTUnwrap(navigation.action), to: navigation.target))
+        XCTAssertEqual(selectedTab, .ci, "PR 不可用时仍必须能切换到 CI")
+    }
+
     func testRenderSidebarPullRequestCount() throws {
         try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
         let app = AppModel()
@@ -202,6 +220,64 @@ final class LayoutRenderHarness: XCTestCase {
         )
     }
 
+    func testRenderRepositoryLoadingEmptyAndError() async throws {
+        try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appendingPathComponent("gh")
+        let failure = directory.appendingPathComponent("failure")
+        // 状态截图只需要空响应，不创建任何 PR、CI 或审查示例数据。
+        try """
+        #!/bin/sh
+        if [ -f "\(failure.path)" ]; then
+          echo 'HTTP 403: Resource not accessible' >&2
+          exit 1
+        fi
+        printf '[]'
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let app = AppModel()
+        let repository = RepositoryModel(root: directory,
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: nil,
+            forge: GitHubClient(executable: executable, environment: [:]))
+        repository.slug = "group/project"
+        repository.origin = GitRemote.parse("https://github.com/group/project.git")
+        repository.hasRemote = true
+        repository.hasOrigin = true
+        await repository.refreshPullRequests()
+        func renderPage(_ view: some View, to path: String) async throws {
+            let hosting = NSHostingView(rootView: view)
+            hosting.frame = CGRect(x: 0, y: 0, width: 660, height: 620)
+            let window = NSWindow(contentRect: hosting.frame, styleMask: [.titled, .resizable],
+                                  backing: .buffered, defer: false)
+            window.contentView = hosting
+            defer { window.contentView = nil }
+            // 挂载后让异步加载真正完成；同步转 RunLoop 会挡住主 actor 的收尾。
+            try await Task.sleep(for: .milliseconds(600))
+            hosting.layoutSubtreeIfNeeded()
+            func hasSplit(_ view: NSView) -> Bool {
+                view is NSSplitView || view.subviews.contains(where: hasSplit)
+            }
+            XCTAssertFalse(hasSplit(hosting), "空数据或失败时不应保留 PR 分栏")
+            let bitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+            hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+            let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+            try data.write(to: URL(fileURLWithPath: path))
+            print("已渲染：\(path)")
+        }
+        for (scheme, suffix) in [(ColorScheme.light, "light"), (.dark, "dark")] {
+            try await renderPage(ProjectHomeView(repository: repository).environment(app).environment(\.colorScheme, scheme),
+                                 to: "/tmp/grove-render-empty-\(suffix).png")
+        }
+        try Data().write(to: failure)
+        await repository.refreshPullRequests()
+        try await renderPage(ProjectHomeView(repository: repository).environment(app).environment(\.colorScheme, .light),
+                             to: "/tmp/grove-render-pr-error.png")
+        try await renderPage(GroveLoadingState(title: "正在加载合并请求…").environment(\.colorScheme, .light),
+                             to: "/tmp/grove-render-pr-loading.png")
+    }
+
     func testSidebarSelectionInsets() throws {
         try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
         try render(
@@ -222,6 +298,46 @@ final class LayoutRenderHarness: XCTestCase {
             size: CGSize(width: 280, height: 160),
             to: "/tmp/grove-render-sidebar-selection-insets.png"
         )
+    }
+
+    func testSidebarRepositorySelectionAlignment() throws {
+        try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
+        let app = AppModel()
+        let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:])
+        let first = RepositoryModel(root: URL(fileURLWithPath: "/tmp/sidebar-alignment/Alpha"), git: git, app: nil)
+        let grove = RepositoryModel(root: URL(fileURLWithPath: "/tmp/sidebar-alignment/Grove"), git: git, app: nil)
+        grove.worktrees = [Worktree(path: grove.root, head: nil, branch: "main", isBare: false,
+            isDetached: false, lockReason: nil, prunableReason: nil)]
+        app.repositories = [first, grove]
+        for selected in [first, grove] {
+            app.selection = .repositoryHome(repository: selected.id)
+            let hosting = try render(SidebarView(sheet: .constant(nil)).environment(app)
+                .environment(\.colorScheme, .light), size: CGSize(width: 280, height: 300),
+                to: "/tmp/grove-render-sidebar-alignment-\(selected.name).png")
+            let bitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+            hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+            let request = VNRecognizeTextRequest()
+            request.recognitionLanguages = ["en-US"]
+            request.usesLanguageCorrection = false
+            try VNImageRequestHandler(cgImage: XCTUnwrap(bitmap.cgImage), options: [:]).perform([request])
+            let label = try XCTUnwrap(request.results?.first {
+                $0.topCandidates(1).first?.string.contains(selected.name) == true
+            })
+            let textCenter = (1 - label.boundingBox.midY) * CGFloat(bitmap.pixelsHigh)
+            let sampleX = bitmap.pixelsWide * 3 / 4
+            let scale = CGFloat(bitmap.pixelsHigh) / hosting.bounds.height
+            // 从行内空白处识别灰色选中背景，检查它与文字共用中心，而非向下一行偏移。
+            let highlighted = (0..<bitmap.pixelsHigh).filter { y in
+                guard abs(CGFloat(y) - textCenter) < SidebarMetrics.repositoryHeight * scale,
+                      let inside = bitmap.colorAt(x: sampleX, y: y)?.usingColorSpace(.deviceRGB),
+                      let outside = bitmap.colorAt(x: 1, y: y)?.usingColorSpace(.deviceRGB) else { return false }
+                return abs(inside.redComponent - outside.redComponent) > 0.04
+            }
+            let top = try XCTUnwrap(highlighted.first)
+            let bottom = try XCTUnwrap(highlighted.last)
+            XCTAssertEqual(CGFloat(top + bottom) / 2, textCenter, accuracy: 3 * scale,
+                           "\(selected.name) 的选中背景必须与文字垂直居中")
+        }
     }
 
     func testSidebarPullRequestIcons() throws {
@@ -586,17 +702,21 @@ final class LivePullRequestRenderHarness: XCTestCase {
             ?? repository.pullRequests.first!.number
 
         let page = NavigationSplitView {
-            Text("侧栏")
+            SidebarView(sheet: .constant(nil))
+                .navigationSplitViewColumnWidth(min: 220, ideal: GroveStyle.sidebarWidth, max: 320)
         } detail: {
             PullRequestListView(repository: repository, initialSelection: target)
         }
         .environment(app)
 
         try await Task.sleep(for: .seconds(1))
-        try render(page, size: CGSize(width: 1280, height: 900), to: "/tmp/grove-render-pr.png")
+        try await render(page.environment(\.colorScheme, .light), size: CGSize(width: 1280, height: 900), to: "/tmp/grove-render-pr.png")
+        try await render(page.environment(\.colorScheme, .dark), size: CGSize(width: 980, height: 700), to: "/tmp/grove-render-pr-compact-dark.png")
+        try await render(ProjectHomeView(repository: repository).environment(app).environment(\.colorScheme, .light),
+                         size: CGSize(width: 660, height: 620), to: "/tmp/grove-render-project-compact.png")
     }
 
-    private func render(_ view: some View, size: CGSize, to path: String) throws {
+    private func render(_ view: some View, size: CGSize, to path: String) async throws {
         let hosting = NSHostingView(rootView: view)
         hosting.frame = CGRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: hosting.frame, styleMask: [.titled, .resizable],
@@ -604,7 +724,7 @@ final class LivePullRequestRenderHarness: XCTestCase {
         window.contentView = hosting
         window.layoutIfNeeded()
         hosting.layoutSubtreeIfNeeded()
-        RunLoop.current.run(until: Date().addingTimeInterval(4))
+        try await Task.sleep(for: .seconds(6))
         hosting.layoutSubtreeIfNeeded()
         guard let representation = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
             XCTFail("无法创建位图"); return

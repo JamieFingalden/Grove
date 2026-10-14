@@ -30,9 +30,9 @@ final class RepositoryModel: Identifiable {
     var pullRequests: [PullRequest] = []
     // ponytail: 每次最多读取 1000 个开放请求；达到上限显示「1000+」，更大规模可改查平台总数。
     static let openPullRequestLimit = 1000
-    private(set) var hasLoadedPullRequests = false
+    private(set) var hasLoadedOpenPullRequests = false
     var openPullRequestCountLabel: String? {
-        guard hasLoadedPullRequests else { return nil }
+        guard hasLoadedOpenPullRequests else { return nil }
         let count = pullRequests.filter(\.isActive).count
         guard count > 0 else { return nil }
         return "\(count)" + (count >= Self.openPullRequestLimit ? "+" : "")
@@ -92,6 +92,8 @@ final class RepositoryModel: Identifiable {
 
     var isRefreshing = false
     var isRefreshingPullRequests = false
+    private(set) var hasLoadedPullRequests = false
+    private(set) var pullRequestLoadError: String?
     @ObservationIgnored private var pullRequestRefreshID = UUID()
     /// 正在进行的长操作描述（"正在拉取…"）。nil 表示空闲。
     var activity: String?
@@ -254,9 +256,11 @@ final class RepositoryModel: Identifiable {
     private func clearForgeState() {
         pullRequestRefreshID = UUID()
         isRefreshingPullRequests = false
+        hasLoadedPullRequests = false
+        pullRequestLoadError = nil
         slug = nil
         pullRequests = []
-        hasLoadedPullRequests = false
+        hasLoadedOpenPullRequests = false
         listPullRequests = []
         worktreePullRequests = [:]
         worktreePullRequestRefreshID = UUID()
@@ -280,6 +284,7 @@ final class RepositoryModel: Identifiable {
         let requestedOrigin = origin
         let requestedState = listState
         isRefreshingPullRequests = true
+        pullRequestLoadError = nil
         defer {
             if pullRequestRefreshID == requestID { isRefreshingPullRequests = false }
         }
@@ -299,9 +304,15 @@ final class RepositoryModel: Identifiable {
             guard !Task.isCancelled, pullRequestRefreshID == requestID,
                   origin == requestedOrigin, listState == requestedState else { return }
             listPullRequests = loadedList
+            hasLoadedPullRequests = true
             updateOpenPullRequests(loadedOpen, fromOrigin: requestedOrigin)
+        } catch is CancellationError {
+            // 切换页面取消加载时保留原数据，不把取消当作网络失败。
+            return
         } catch {
-            guard pullRequestRefreshID == requestID, origin == requestedOrigin else { return }
+            guard !Task.isCancelled, pullRequestRefreshID == requestID,
+                  origin == requestedOrigin, listState == requestedState else { return }
+            pullRequestLoadError = error.localizedDescription
             app?.report(title: "读取 PR 列表失败", error: error, repository: self)
         }
         await refreshWorktreePullRequests()
@@ -311,8 +322,11 @@ final class RepositoryModel: Identifiable {
     func updateOpenPullRequests(_ requests: [PullRequest], fromOrigin expectedOrigin: GitRemote?) {
         guard origin == expectedOrigin else { return }
         pullRequests = requests
-        hasLoadedPullRequests = true
-        if listState == .open { listPullRequests = requests }
+        hasLoadedOpenPullRequests = true
+        if listState == .open {
+            listPullRequests = requests
+            hasLoadedPullRequests = true
+        }
         applyDetailState()
     }
 
@@ -320,6 +334,10 @@ final class RepositoryModel: Identifiable {
     func setPullRequestListState(_ state: PullRequestListState) async {
         guard state != listState else { return }
         listState = state
+        // 新筛选不能继续展示上一筛选的缓存，尤其不能把旧结果解释为空结果。
+        listPullRequests = []
+        hasLoadedPullRequests = false
+        pullRequestLoadError = nil
         await refreshPullRequests()
     }
 

@@ -131,7 +131,7 @@ struct NewWorktreeSheet: View {
                                 .font(.system(size: 11.5))
                                 .lineLimit(1)
 
-                            if branch.ahead > 0 { Badge(text: "\(branch.ahead)", systemImage: "arrow.up", tint: .blue) }
+                            if branch.ahead > 0 { Badge(text: "\(branch.ahead)", systemImage: "arrow.up", tint: .secondary) }
                             if branch.behind > 0 { Badge(text: "\(branch.behind)", systemImage: "arrow.down", tint: .purple) }
                             if branch.upstreamIsGone {
                                 MiniBadge(text: "上游已删", systemImage: "trash", tint: .orange)
