@@ -5,7 +5,7 @@ import Foundation
 /// GitHub 叫 Pull Request、GitLab 叫 Merge Request，但对使用者来说是同一件事：
 /// 「有人提了一批改动，等着被看和被合」。Grove 内部统一用 `PullRequest` 这个模型
 /// 表示两者，只在**界面文案**和**具体命令**上按托管商分流。
-enum ForgeKind: String, Sendable, Hashable, CaseIterable {
+enum ForgeKind: String, Sendable, Hashable, CaseIterable, Codable {
     case github
     case gitlab
 
@@ -170,6 +170,8 @@ protocol ForgeClient: Sendable {
     func isAuthenticated() async -> Bool
     /// CLI 配置过的主机列表。用来判断某个远端归哪个托管商管。
     func configuredHosts() async -> Set<String>
+    /// 使用仓库对应主机的认证身份，不能从其他主机猜测当前用户。
+    func currentUser(in directory: URL) async throws -> String?
 
     /// 当前目录对应的仓库标识（`owner/repo` 或 `group/project`）。
     /// 不属于这个托管商时返回 nil。
@@ -275,6 +277,8 @@ enum RemoteRepositoryCreationError: LocalizedError, Sendable {
 }
 
 extension ForgeClient {
+    func currentUser(in directory: URL) async throws -> String? { nil }
+
     func unapprove(number: Int, in directory: URL) async throws {
         throw ForgeReviewError.unapproveUnsupported
     }

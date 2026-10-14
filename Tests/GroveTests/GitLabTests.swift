@@ -120,7 +120,9 @@ final class GitLabMergeRequestTests: XCTestCase {
             "CONFLICTING"
         )
         XCTAssertEqual(GitLabMergeRequest.mergeable(status: "checking", hasConflicts: false), "UNKNOWN")
-        XCTAssertEqual(GitLabMergeRequest.mergeable(status: "cannot_be_merged", hasConflicts: nil), "CONFLICTING")
+        XCTAssertEqual(GitLabMergeRequest.mergeable(status: "cannot_be_merged", hasConflicts: false, detailedStatus: "conflict"), "CONFLICTING")
+        XCTAssertEqual(GitLabMergeRequest.mergeable(status: "cannot_be_merged", hasConflicts: false, detailedStatus: "ci_must_pass"), "UNKNOWN")
+        XCTAssertEqual(GitLabMergeRequest.mergeable(status: "cannot_be_merged", hasConflicts: nil), "UNKNOWN")
     }
 
     func testChangesCountAcceptsIntStringAndCapped() throws {

@@ -2,7 +2,7 @@ import SwiftUI
 
 /// CI 状态的规范化。两个平台各自的词表都折到这一套上，
 /// 展示层只认这套，不用每个页面都写一遍映射。
-enum CIStatus: String, Sendable, Hashable {
+enum CIStatus: String, Sendable, Hashable, Codable {
     case pending
     case running
     case success
@@ -91,7 +91,7 @@ enum CIStatus: String, Sendable, Hashable {
 }
 
 /// 一条流水线（GitLab pipeline / GitHub workflow run）。
-struct CIPipeline: Identifiable, Hashable, Sendable {
+struct CIPipeline: Identifiable, Hashable, Sendable, Codable {
     var id: Int
     var status: CIStatus
     /// 跑的分支。
@@ -104,6 +104,7 @@ struct CIPipeline: Identifiable, Hashable, Sendable {
     var createdAt: Date?
     var duration: TimeInterval?
     var webURL: String?
+    var updatedAt: Date? = nil
 
     var shortSHA: String { String(sha.prefix(8)) }
 }

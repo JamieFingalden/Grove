@@ -29,7 +29,7 @@ final class RepositoryModel: Identifiable {
     /// 不随列表视图的状态筛选变化 —— 否则翻历史时角标会突然消失。
     var pullRequests: [PullRequest] = []
     // ponytail: 每次最多读取 1000 个开放请求；达到上限显示「1000+」，更大规模可改查平台总数。
-    static let openPullRequestLimit = 1000
+    nonisolated static let openPullRequestLimit = 1000
     private(set) var hasLoadedOpenPullRequests = false
     var openPullRequestCountLabel: String? {
         guard hasLoadedOpenPullRequests else { return nil }

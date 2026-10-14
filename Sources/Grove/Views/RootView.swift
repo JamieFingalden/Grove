@@ -167,28 +167,34 @@ struct RootView: View {
         if !model.toolsReady {
             ProgressView("正在准备…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if model.allRepositories.isEmpty {
-            EmptyRepositoryView(connectServer: { sheet = .addRemoteServer })
         } else {
-            switch model.selection {
-            case .worktree:
-                if let worktree = model.selectedWorktreeModel {
-                    WorktreeDetailView(model: worktree, sheet: $sheet)
-                        // 机器或路径变了就重建页面状态，避免同路径工作树串用滚动位置和编辑草稿。
-                        .id(worktree.identityKey)
-                } else {
-                    placeholder
+            ZStack {
+                DailyView().retainedPage(model.navigation.page == .daily)
+                WorkspaceView().retainedPage(model.navigation.page == .workspace)
+                if model.allRepositories.isEmpty {
+                    EmptyRepositoryView(connectServer: { sheet = .addRemoteServer })
+                        .retainedPage(model.navigation.page == .repositories)
                 }
-            case .repositoryHome:
-                if let repository = model.selectedRepository {
-                    ProjectHomeView(repository: repository)
-                        .id(repository.origin)
-                        .id(repository.id)
-                } else {
-                    placeholder
+                ForEach(model.navigation.visited, id: \.self) { selection in
+                    let active = model.navigation.page == .repositories && model.selection == selection
+                    Group {
+                        switch selection {
+                        case .worktree(let id, let path):
+                            if let repository = model.repository(matching: id), let worktree = repository.worktreeModel(for: path) {
+                                WorktreeDetailView(model: worktree, sheet: $sheet)
+                            }
+                        case .repositoryHome(let id):
+                            if let repository = model.repository(matching: id) {
+                                ProjectHomeView(repository: repository).id(repository.origin)
+                            }
+                        }
+                    }
+                    .environment(\.repositoryPageActive, active)
+                    .retainedPage(active)
                 }
-            case nil:
-                placeholder
+                if model.selection == nil && !model.allRepositories.isEmpty {
+                    placeholder.retainedPage(model.navigation.page == .repositories)
+                }
             }
         }
     }
@@ -285,7 +291,8 @@ struct RootView: View {
 
     /// 选中项的稳定标识。`.task(id:)` 靠它判断要不要重跑。
     private var refreshTrigger: String {
-        switch model.selection {
+        guard model.navigation.page == .repositories else { return model.navigation.page.rawValue }
+        return switch model.selection {
         case .worktree(let repository, let path): "wt:\(repository.identityKey):\(path.path)"
         case .repositoryHome(let repository): "home:\(repository.identityKey)"
         case nil: "none"
@@ -293,6 +300,7 @@ struct RootView: View {
     }
 
     private func refreshSelection() async {
+        guard model.navigation.page == .repositories else { return }
         switch model.selection {
         case .worktree:
             await model.selectedWorktreeModel?.refresh()
@@ -439,5 +447,12 @@ struct FailureBanner: View {
                 .stroke(.separator, lineWidth: 0.5)
         }
         .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+    }
+}
+
+/// 保持视图身份与布局，切页时保留局部状态和滚动位置。
+extension View {
+    func retainedPage(_ active: Bool) -> some View {
+        opacity(active ? 1 : 0).allowsHitTesting(active).accessibilityHidden(!active).zIndex(active ? 1 : 0)
     }
 }

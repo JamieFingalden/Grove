@@ -164,13 +164,17 @@ final class AppModel {
     private(set) var githubHosts: Set<String> = []
     private(set) var gitlabHosts: Set<String> = []
     private(set) var toolsReady = false
+    private(set) var overviewReady = false
 
     var repositories: [RepositoryModel] = []
     /// 远程服务器上的仓库。跟本机的分开存：持久化键不同（路径 → 服务器+路径），
     /// 侧边栏分组也不同，但选中和详情视图共用同一套 `RepositoryModel`。
     var remoteRepositories: [RepositoryModel] = []
     private(set) var remoteServers: [RemoteServer] = []
-    var selection: Selection?
+    let navigation: AppNavigationState
+    let daily = DailyViewModel()
+    let workspace = WorkspaceAggregationService()
+    var selection: Selection? { didSet { navigation.selected(selection) } }
     var failures: [GroveFailure] = []
     var presentedFailure: GroveFailure?
     var notificationFallbackFailure: GroveFailure?
@@ -221,6 +225,7 @@ final class AppModel {
 
     init(
         aiGenerationSettings: AIGenerationSettings = AIGenerationSettings(),
+        navigation: AppNavigationState = AppNavigationState(),
         aiReviewCache: AIReviewCache = AIReviewCache(),
         remoteServerStore: RemoteServerStore = RemoteServerStore(),
         remoteProjectStore: RemoteProjectStore = RemoteProjectStore(),
@@ -243,6 +248,7 @@ final class AppModel {
             )
         }
     ) {
+        self.navigation = navigation
         self.aiGenerationSettings = aiGenerationSettings
         self.failureNotifier = failureNotifier
         self.aiReviewUpdateNotifier = aiReviewUpdateNotifier
@@ -724,6 +730,7 @@ final class AppModel {
         async let repositoryRestore: Void = restoreBookmarkedRepositories()
         await detectForges()
         await repositoryRestore
+        overviewReady = true
         sshExecutable = await sshLocation
         await restoreRemoteRepositories()
 
@@ -733,6 +740,7 @@ final class AppModel {
             await repository.refreshForgeMetadata()
         }
 
+        navigation.restore(in: self)
         startAutomaticAIReviewMonitoring()
 
         // CI 状态点（工作树行的绿红点）也在这个时候首次拉取；
@@ -892,13 +900,13 @@ final class AppModel {
                 loadForgeMetadata: false
             ), selection == nil {
                 // 不等剩下的仓库全部刷新，第一座仓库可用后立刻进入它。
-                selectDefaultWorktree(in: repository)
+                selectDefaultWorktree(in: repository, restoring: true)
             }
         }
         bookmarks.save(repositories.map(\.root.path))
 
         if selection == nil, let first = repositories.first {
-            selectDefaultWorktree(in: first)
+            selectDefaultWorktree(in: first, restoring: true)
         }
     }
 
@@ -950,9 +958,13 @@ final class AppModel {
         }
     }
 
-    private func selectDefaultWorktree(in repository: RepositoryModel) {
+    private func selectDefaultWorktree(in repository: RepositoryModel, restoring: Bool = false) {
         guard let worktree = repository.worktrees.first else { return }
-        selection = .worktree(repository: repository.id, worktree: worktree.path)
+        if restoring && !navigation.hasUserNavigated {
+            navigation.withRestoration { selection = .worktree(repository: repository.id, worktree: worktree.path) }
+        } else {
+            selection = .worktree(repository: repository.id, worktree: worktree.path)
+        }
     }
 
     // MARK: - 远程服务器
@@ -1124,7 +1136,7 @@ final class AppModel {
 
         // 本机和远程都有仓库时，默认进本机的第一个 —— 那是响应最快的一个。
         if selection == nil, repositories.isEmpty, let first = remoteRepositories.first {
-            selectDefaultWorktree(in: first)
+            selectDefaultWorktree(in: first, restoring: true)
         }
     }
 
@@ -1213,7 +1225,8 @@ final class AppModel {
     }
 
     var selectedRepository: RepositoryModel? {
-        switch selection {
+        guard navigation.page == .repositories else { return nil }
+        return switch selection {
         case .worktree(let repositoryID, _): repository(matching: repositoryID)
         case .repositoryHome(let repositoryID): repository(matching: repositoryID)
         case nil: nil

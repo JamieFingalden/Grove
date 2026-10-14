@@ -1,9 +1,11 @@
 import SwiftUI
 
 struct WorktreeDetailView: View {
+    @Environment(AppModel.self) private var app
     @Bindable var model: WorktreeModel
     @Binding var sheet: RootView.ActiveSheet?
     @State private var tab: Tab = .changes
+    @State private var visitedHistory = false
 
     enum Tab: String, CaseIterable, Identifiable {
         case changes, history
@@ -50,17 +52,29 @@ struct WorktreeDetailView: View {
                 .fill(Color(nsColor: .separatorColor).opacity(0.45))
                 .frame(height: 1)
 
-            switch tab {
-            case .changes:
-                ChangesView(model: model)
-            case .history:
-                HistoryView(model: model, sheet: $sheet)
+            ZStack {
+                ChangesView(model: model).retainedPage(tab == .changes)
+                if visitedHistory {
+                    HistoryView(model: model, sheet: $sheet).retainedPage(tab == .history)
+                }
             }
+            .onChange(of: tab) { _, tab in if tab == .history { visitedHistory = true } }
+
         }
         // 撑满详情区。VStack 默认只占内容需要的高度，然后被父容器垂直居中，
         // 结果就是上下各留一大片空白。
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(GroveStyle.content)
+        .task(id: app.navigation.route?.id) {
+            guard let route = app.navigation.route, route.repository == model.repository?.id,
+                  route.worktree == model.path, let hash = route.commit else { return }
+            visitedHistory = true
+            tab = .history
+            model.logQuery = LogQuery()
+            model.historyBranch = hash
+            await model.reloadHistory()
+            if model.commits.contains(where: { $0.oid == hash }) { model.selectedCommit = hash }
+        }
         .alert("需要安全强制推送", isPresented: showsSafeForcePushConfirmation) {
             Button("取消", role: .cancel) {
                 model.dismissSafeForcePushProposal()

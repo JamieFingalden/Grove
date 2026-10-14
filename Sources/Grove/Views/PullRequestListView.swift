@@ -17,6 +17,7 @@ struct PullRequestListView: View {
     @State private var mode: WorkspaceMode = .list
     @State private var selection: Int?
     @State private var searchText = ""
+    @State private var routedRequest: PullRequest?
     @State private var mergeTarget: PullRequest?
     @State private var isDetecting = false
     @FocusState private var searchFocused: Bool
@@ -65,7 +66,7 @@ struct PullRequestListView: View {
                     }
                     .disabled(isDetecting || repository.isRefreshingPullRequests)
                 }
-            } else if repository.listPullRequests.isEmpty {
+            } else if repository.listPullRequests.isEmpty && routedRequest == nil {
                 listHeader
                 Divider()
                 listStateView
@@ -74,7 +75,7 @@ struct PullRequestListView: View {
                 case .list:
                     listView
                 case .review:
-                    if let selection, let pullRequest = repository.listPullRequests.first(where: { $0.number == selection }) {
+                    if let selection, let pullRequest = repository.listPullRequests.first(where: { $0.number == selection }) ?? routedRequest.flatMap({ $0.number == selection ? $0 : nil }) {
                         PullRequestDetailView(
                             repository: repository,
                             pullRequest: pullRequest,
@@ -83,6 +84,7 @@ struct PullRequestListView: View {
                             onBackToList: {
                                 withAnimation(.easeInOut(duration: 0.15)) {
                                     mode = .list
+                                    routedRequest = nil
                                 }
                             },
                             canGoPrevious: canGoPreviousPR,
@@ -105,6 +107,12 @@ struct PullRequestListView: View {
                 mode = .review
             }
             await repository.refreshPullRequests()
+        }
+        .onChange(of: appModel.navigation.route?.id, initial: true) { _, _ in
+            guard let route = appModel.navigation.route, route.matches(repository), let pr = route.pullRequest else { return }
+            routedRequest = pr
+            selection = pr.number
+            mode = .review
         }
         .sheet(item: $mergeTarget) { pullRequest in
             MergePullRequestSheet(repository: repository, pullRequest: pullRequest)

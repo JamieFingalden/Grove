@@ -18,19 +18,29 @@ struct ProjectHomeView: View {
     let repository: RepositoryModel
     @Environment(AppModel.self) private var appModel
 
+    @Environment(\.repositoryPageActive) private var active
     @State private var tab: ProjectHomeTab = .pullRequests
+    @State private var visitedCI = false
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            Group {
-                switch tab {
-                case .pullRequests:
-                    PullRequestListView(repository: repository, projectTab: $tab)
-                case .ci:
+            ZStack {
+                PullRequestListView(repository: repository, projectTab: $tab)
+                    .environment(\.repositoryPageActive, active && tab == .pullRequests)
+                    .retainedPage(tab == .pullRequests)
+                if visitedCI {
                     CIView(repository: repository, projectTab: $tab)
+                        .environment(\.repositoryPageActive, active && tab == .ci)
+                        .retainedPage(tab == .ci)
                 }
+            }
+            .onChange(of: tab) { _, tab in if tab == .ci { visitedCI = true } }
+            .onChange(of: appModel.navigation.route?.id, initial: true) { _, _ in
+                guard let route = appModel.navigation.route, route.matches(repository) else { return }
+                if route.pipeline != nil { visitedCI = true; tab = .ci }
+                if route.pullRequest != nil { tab = .pullRequests }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
