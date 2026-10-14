@@ -28,6 +28,24 @@ final class LayoutRenderHarness: XCTestCase {
         ProcessInfo.processInfo.environment["GROVE_RENDER"] == "1"
     }
 
+    func testUnavailablePullRequestsKeepProjectNavigation() throws {
+        try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
+        let repository = RepositoryModel(root: URL(fileURLWithPath: "/tmp/Grove"),
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: nil)
+        var selectedTab = ProjectHomeTab.pullRequests
+        let hosting = try render(PullRequestListView(repository: repository,
+            projectTab: Binding(get: { selectedTab }, set: { selectedTab = $0 })).environment(AppModel()),
+            size: CGSize(width: 660, height: 460), to: "/tmp/grove-render-pr-unavailable-navigation.png")
+        func descendants(_ view: NSView) -> [NSView] {
+            view.subviews.flatMap { [$0] + descendants($0) }
+        }
+        let navigation = try XCTUnwrap(descendants(hosting).compactMap { $0 as? NSSegmentedControl }
+            .first { $0.segmentCount == 2 && $0.label(forSegment: 1) == "CI/CD" })
+        navigation.selectedSegment = 1
+        XCTAssertTrue(navigation.sendAction(try XCTUnwrap(navigation.action), to: navigation.target))
+        XCTAssertEqual(selectedTab, .ci, "PR 不可用时仍必须能切换到 CI")
+    }
+
     func testRenderSidebarPullRequestCount() throws {
         try XCTSkipUnless(shouldRun, "设置 GROVE_RENDER=1 才会渲染")
         let app = AppModel()

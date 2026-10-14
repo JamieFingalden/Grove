@@ -727,7 +727,9 @@ struct PullRequestBadge: View {
     let pullRequest: PullRequest
 
     var body: some View {
-        GroveSymbolView(.pullRequest(status: pullRequest.status), size: .medium, role: .custom(tint))
+        GroveSymbolView(.pullRequest(status: pullRequest.status), size: .medium, role: .custom(tint),
+                        isDecorative: false)
+            .accessibilityElement(children: .ignore)
             .accessibilityLabel(helpText)
             .help(helpText)
     }

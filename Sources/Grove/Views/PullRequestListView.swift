@@ -18,6 +18,7 @@ struct PullRequestListView: View {
     @State private var selection: Int?
     @State private var searchText = ""
     @State private var mergeTarget: PullRequest?
+    @State private var isDetecting = false
     @FocusState private var searchFocused: Bool
 
     var body: some View {
@@ -25,16 +26,7 @@ struct PullRequestListView: View {
         // 这时候列表和详情都没有内容可显示，留着两栏只是浪费地方。
         if let setup = repository.forgeSetup {
             VStack(spacing: 0) {
-                if let projectTab {
-                    HStack {
-                        ProjectHomeNavigation(repository: repository, selection: projectTab)
-                        Spacer()
-                    }
-                    .padding(.horizontal, GroveStyle.Space.lg)
-                    .frame(height: GroveStyle.toolbarHeight)
-                    .background(.bar)
-                    Divider()
-                }
+                projectNavigation
                 ForgeSetupView(repository: repository, setup: setup)
             }
         } else {
@@ -43,14 +35,35 @@ struct PullRequestListView: View {
     }
 
     @ViewBuilder
+    private var projectNavigation: some View {
+        if let projectTab {
+            HStack {
+                ProjectHomeNavigation(repository: repository, selection: projectTab)
+                Spacer()
+            }
+            .padding(.horizontal, GroveStyle.Space.lg)
+            .frame(height: GroveStyle.toolbarHeight)
+            .background(.bar)
+            Divider()
+        }
+    }
+
+    @ViewBuilder
     private var workspaceBody: some View {
         VStack(spacing: 0) {
             if let message = repository.pullRequestUnavailableReason {
+                projectNavigation
                 GroveEmptyState(title: "\(repository.reviewTerm)不可用",
                                 systemImage: "exclamationmark.triangle", description: message,
                                 isError: true) {
-                    Button("重新检测") { Task { await repository.refreshPullRequests() } }
-                        .disabled(repository.isRefreshingPullRequests)
+                    Button("重新检测") {
+                        Task {
+                            isDetecting = true
+                            await appModel.redetectForges()
+                            isDetecting = false
+                        }
+                    }
+                    .disabled(isDetecting || repository.isRefreshingPullRequests)
                 }
             } else if repository.listPullRequests.isEmpty {
                 listHeader

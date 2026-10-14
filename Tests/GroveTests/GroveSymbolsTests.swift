@@ -4,6 +4,39 @@ import XCTest
 @testable import Grove
 
 final class GroveSymbolsTests: XCTestCase {
+    @MainActor
+    func testPullRequestBadgeExposesStatusToAccessibility() throws {
+        let request = PullRequest(number: 42, title: "测试请求", state: "OPEN", isDraft: false,
+            headRefName: "feature", baseRefName: "main", url: "u", author: nil, updatedAt: Date(),
+            additions: 0, deletions: 0, changedFiles: 0, isCrossRepository: false, labels: [])
+        let hosting = NSHostingView(rootView: VStack {
+            GroveSymbolView(.pullRequest(status: .open)).accessibilityLabel("装饰图标")
+            PullRequestBadge(pullRequest: request)
+        }.padding(20).environment(\.accessibilityEnabled, true))
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 100, height: 100),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = hosting
+        defer { window.orderOut(nil); window.contentView = nil }
+        window.orderFront(nil)
+        window.layoutIfNeeded()
+        hosting.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        func labels(_ element: Any) -> [String] {
+            guard let accessible = element as? NSObject else { return [] }
+            let labelSelector = NSSelectorFromString("accessibilityLabel")
+            let childrenSelector = NSSelectorFromString("accessibilityChildren")
+            let label = accessible.responds(to: labelSelector)
+                ? accessible.perform(labelSelector)?.takeUnretainedValue() as? String : nil
+            let children = accessible.responds(to: childrenSelector)
+                ? accessible.perform(childrenSelector)?.takeUnretainedValue() as? [Any] : nil
+            return [label].compactMap { $0 } + (children ?? []).flatMap { labels($0) }
+        }
+        let accessibleLabels = labels(hosting)
+        XCTAssertFalse(accessibleLabels.contains("装饰图标"), "装饰图标不能重复朗读状态")
+        XCTAssertTrue(accessibleLabels.contains { $0.contains("PR #42") && $0.contains(request.status.label) },
+                      "屏幕阅读器必须能读取 PR 编号和状态，实际标签：\(accessibleLabels)")
+    }
+
     func testSymbolSizesAndStrokes() {
         XCTAssertEqual(GroveSymbolSize.xs.pointSize, 12)
         XCTAssertEqual(GroveSymbolSize.small.pointSize, 14)

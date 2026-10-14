@@ -185,11 +185,14 @@ struct GroveSymbolView: View {
     let symbol: GroveSymbol
     let size: GroveSymbolSize
     let role: GroveSymbolRole
+    let isDecorative: Bool
 
-    init(_ symbol: GroveSymbol, size: GroveSymbolSize = .medium, role: GroveSymbolRole = .monochrome) {
+    init(_ symbol: GroveSymbol, size: GroveSymbolSize = .medium, role: GroveSymbolRole = .monochrome,
+         isDecorative: Bool = true) {
         self.symbol = symbol
         self.size = size
         self.role = role
+        self.isDecorative = isDecorative
     }
 
     var body: some View {
@@ -229,7 +232,7 @@ struct GroveSymbolView: View {
                 }
             }
         }
-        .accessibilityHidden(true)
+        .accessibilityHidden(isDecorative)
     }
 
     private func systemSymbolName(for symbol: GroveSymbol) -> String? {
