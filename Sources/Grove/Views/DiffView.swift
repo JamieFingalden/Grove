@@ -360,7 +360,7 @@ struct DiffContentView: View {
                     }
                 }
             }
-            .frame(maxWidth: Self.readingColumnWidth, alignment: .leading)
+            .frame(maxWidth: isSplit ? .infinity : Self.readingColumnWidth, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.bottom, 12)
         }
