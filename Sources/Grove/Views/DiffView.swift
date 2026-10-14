@@ -12,7 +12,9 @@ struct DiffPane: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor).opacity(0.45))
+                .frame(height: 1)
             content
                 // 勾行操作条浮在 diff 上方而不是挤进布局：勾选瞬间你正盯着的
                 // 那行不该被顶走，取消勾选时内容也不该跳回来。
@@ -121,7 +123,7 @@ struct DiffPane: View {
                     .font(.system(size: 11))
                     .foregroundStyle(change.isConflicted ? AnyShapeStyle(Color.red) : AnyShapeStyle(.secondary))
                 Text(change.path)
-                    .font(.system(size: 11.5, design: .monospaced))
+                    .font(.system(size: 11.5, weight: .medium, design: .monospaced))
                     .lineLimit(1)
                     .truncationMode(.head)
                     .textSelection(.enabled)
@@ -136,15 +138,15 @@ struct DiffPane: View {
 
                 if let kind = change.conflict {
                     Text(kind.label)
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(GroveStyle.micro)
                         .foregroundStyle(.red)
                         .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.red.opacity(0.12), in: Capsule())
+                        .padding(.vertical, 1.5)
+                        .background(Color.red.opacity(0.10), in: Capsule())
                 }
             } else {
                 Text("未选择文件")
-                    .font(.system(size: 11))
+                    .font(GroveStyle.caption)
                     .foregroundStyle(.tertiary)
             }
 
@@ -181,6 +183,7 @@ struct DiffPane: View {
                 } label: {
                     Label("编辑", systemImage: "square.and.pencil")
                 }
+                .buttonStyle(.bordered)
                 .controlSize(.small)
                 .help("直接在 Grove 里编辑这个文件（⌘S 保存）；冲突文件改完可以标记为已解决")
             }
@@ -626,7 +629,7 @@ struct DiffFileRow: View {
     private var tint: Color {
         if file.isNewFile { return .green }
         if file.isDeletedFile { return .red }
-        if file.isRename { return .blue }
+        if file.isRename { return .purple }
         return .orange
     }
 }
@@ -652,6 +655,7 @@ private struct HunkView: View {
                     } label: {
                         Image(systemName: hunkIcon(model.hunkSelectionState(hunk)))
                             .font(.system(size: 11))
+                            .foregroundStyle(model.hunkSelectionState(hunk) == .none ? Color.secondary.opacity(0.6) : Color.accentColor)
                     }
                     .buttonStyle(.borderless)
                     .help("选中/取消这一整块")
@@ -664,9 +668,9 @@ private struct HunkView: View {
                     .truncationMode(.middle)
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 3)
+            .padding(.vertical, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.accentColor.opacity(0.07))
+            .background(GroveStyle.Diff.hunkHeaderBg)
             }
 
             ForEach(hunk.lines) { line in
@@ -737,7 +741,9 @@ private struct DiffLineView: View {
                 .padding(.top, 1)
 
             Text(marker)
-                .frame(width: 10, alignment: .leading)
+                .font(.system(size: fontSize, weight: .medium, design: .monospaced))
+                .foregroundStyle(markerColor)
+                .frame(width: 12, alignment: .center)
                 .padding(.top, 1)
 
             Text(CodeSyntax.attributed(
@@ -763,7 +769,7 @@ private struct DiffLineView: View {
         .overlay(alignment: .leading) {
             if line.kind == .addition || line.kind == .deletion {
                 Rectangle()
-                    .fill(line.kind == .addition ? Color.green.opacity(0.7) : Color.red.opacity(0.7))
+                    .fill(line.kind == .addition ? GroveStyle.Diff.addedBar : GroveStyle.Diff.deletedBar)
                     .frame(width: 2.5)
             }
         }
@@ -791,11 +797,13 @@ private struct DiffLineView: View {
                     if showsOldNumber {
                         Text(line.oldNumber.map(String.init) ?? "")
                             .frame(width: Self.gutterWidth, alignment: .trailing)
+                            .foregroundStyle(GroveStyle.Diff.gutterText)
                     }
                     if showsNewNumber {
                         Text(line.newNumber.map(String.init) ?? "")
                             .frame(width: Self.gutterWidth, alignment: .trailing)
                             .padding(.trailing, 6)
+                            .foregroundStyle(GroveStyle.Diff.gutterText)
                     }
                 }
                 .contentShape(Rectangle())
@@ -821,11 +829,13 @@ private struct DiffLineView: View {
                 if showsOldNumber {
                     Text(line.oldNumber.map(String.init) ?? "")
                         .frame(width: Self.gutterWidth, alignment: .trailing)
+                        .foregroundStyle(GroveStyle.Diff.gutterText)
                 }
                 if showsNewNumber {
                     Text(line.newNumber.map(String.init) ?? "")
                         .frame(width: Self.gutterWidth, alignment: .trailing)
                         .padding(.trailing, 6)
+                        .foregroundStyle(GroveStyle.Diff.gutterText)
                 }
             }
         }
@@ -840,6 +850,14 @@ private struct DiffLineView: View {
         }
     }
 
+    private var markerColor: Color {
+        switch line.kind {
+        case .addition: GroveStyle.Diff.addedFg
+        case .deletion: GroveStyle.Diff.deletedFg
+        case .context, .noNewline: .secondary.opacity(0.7)
+        }
+    }
+
     private var foreground: Color {
         switch line.kind {
         case .noNewline: .secondary
@@ -851,8 +869,8 @@ private struct DiffLineView: View {
     /// 的效果 —— 变化片段一眼可辨，又不会满屏刺眼。
     private var highlightTint: Color? {
         switch line.kind {
-        case .deletion: .red.opacity(0.22)
-        case .addition: .green.opacity(0.28)
+        case .deletion: GroveStyle.Diff.deletedHighlight
+        case .addition: GroveStyle.Diff.addedHighlight
         default: nil
         }
     }
@@ -861,8 +879,8 @@ private struct DiffLineView: View {
         switch line.kind {
         // 用低饱和度的底色而不是纯绿/纯红：整屏高饱和色块看久了眼睛受不了，
         // 而且深色模式下会盖住文字。
-        case .addition: .green.opacity(0.13)
-        case .deletion: .red.opacity(0.13)
+        case .addition: GroveStyle.Diff.addedBg
+        case .deletion: GroveStyle.Diff.deletedBg
         case .context, .noNewline: .clear
         }
     }

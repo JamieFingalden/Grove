@@ -8,6 +8,13 @@ struct SidebarView: View {
         @Bindable var model = model
 
         List {
+            Text("仓库")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .tracking(0.3)
+                .frame(height: 20, alignment: .bottomLeading)
+                .padding(.leading, 8)
+                .listRowBackground(Color.clear)
             // 以项目为单位：同一项目的本地副本和远程副本合并成一个条目，
             // 工作树行上用位置标记区分（本机 / 服务器名）。
             ForEach(model.projects) { project in
@@ -16,12 +23,20 @@ struct SidebarView: View {
 
             // 底部的服务器管理区：项目在上面按 origin 合并了，
             // 服务器的增删改和连接状态留在这里。
+            // 保持扁平列表，避免 NSOutlineView 的 Section 折叠断言。
+            Text("远程环境")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .tracking(0.3)
+                .padding(.top, GroveStyle.Space.md)
+                .padding(.leading, 8)
+                .listRowBackground(Color.clear)
             if model.remoteServers.isEmpty {
                 Button {
                     sheet = .addRemoteServer
                 } label: {
                     Label("连接远程服务器…", systemImage: "server.rack")
-                        .font(.system(size: 12.5))
+                        .font(GroveStyle.body)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         // 与工作树行同一缩进（18），不要自成一派。
@@ -41,35 +56,44 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        .overlay {
-            if model.allRepositories.isEmpty && model.toolsReady {
-                ContentUnavailableView {
-                    Label("还没有仓库", systemImage: "folder")
-                } description: {
-                    Text("按 ⌘O 打开一个，或连接远程服务器。")
-                }
-            }
-        }
-    }
-
-    /// Finder 侧栏式选中态：系统自适应的浅灰底，不用大块强调色淹没文字和角标。
-    private func selectionBackground(_ isSelected: Bool) -> some View {
-        sidebarSelectionBackground(isSelected)
+        .font(GroveStyle.body)
+        .environment(\.defaultMinListRowHeight, 22)
+        .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 6))
     }
 }
 
 /// Finder 侧栏式选中态的通用实现（供仓库区块里的各行共用）。
-func sidebarSelectionBackground(_ isSelected: Bool) -> some View {
-    RoundedRectangle(cornerRadius: 9, style: .continuous)
-        .fill(isSelected
-              ? Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
-              : .clear)
-        .padding(.horizontal, 8)
+func sidebarSelectionBackground(_ isSelected: Bool, rowHeight: CGFloat? = nil) -> some View {
+    SidebarSelectionBackground(isSelected: isSelected, rowHeight: rowHeight)
+}
+
+private struct SidebarSelectionBackground: View {
+    let isSelected: Bool
+    var rowHeight: CGFloat?
+    @Environment(\.controlActiveState) private var controlActiveState
+    @Environment(\.colorSchemeContrast) private var colorContrast
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: GroveStyle.smallRadius, style: .continuous)
+            .fill(
+                isSelected
+                    ? (colorContrast == .increased
+                        ? Color.accentColor.opacity(0.25)
+                        : (controlActiveState == .inactive ? GroveStyle.inactiveSelection : GroveStyle.selection))
+                    : Color.clear
+            )
+            .frame(height: rowHeight.map { $0 - 4 })
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            // 原生侧栏把仓库间距计入背景高度；居中对齐才能与行内容保持一致。
+            .frame(maxHeight: .infinity)
+    }
 }
 
 /// 侧边栏行的统一高度：仓库行、工作树行、折叠三角都用它，节奏才一致。
 enum SidebarMetrics {
-    static let rowHeight: CGFloat = 32
+    static let rowHeight: CGFloat = 30
+    static let repositoryHeight: CGFloat = 32
 }
 
 // MARK: - 项目区块
@@ -82,6 +106,7 @@ private struct ProjectSection: View {
     let project: AppModel.ProjectGroup
     @Binding var sheet: RootView.ActiveSheet?
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage private var worktreesExpanded: Bool
 
     init(project: AppModel.ProjectGroup, sheet: Binding<RootView.ActiveSheet?>) {
@@ -111,14 +136,14 @@ private struct ProjectSection: View {
                 Button {
                     // 动画安全的前提是拆平结构（无 Section 父节点）——已用无头脚本验证：
                     // 折叠/展开/快速连点都不再触发 NSOutlineView 断言。
-                    withAnimation(.snappy(duration: 0.2)) {
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
                         worktreesExpanded.toggle()
                     }
                 } label: {
                     Image(systemName: worktreesExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 12, height: 32)
+                        .frame(width: 12, height: SidebarMetrics.repositoryHeight)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -136,7 +161,8 @@ private struct ProjectSection: View {
                 }
                 .buttonStyle(.plain)
             }
-            .listRowBackground(sidebarSelectionBackground(homeIsSelected))
+            .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+            .listRowBackground(sidebarSelectionBackground(homeIsSelected, rowHeight: SidebarMetrics.repositoryHeight))
             .contextMenu {
                 newWorktreeMenu
                 if project.locals.count > 1 {
@@ -174,6 +200,7 @@ private struct ProjectSection: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
                     // 缩进到仓库行图标正下方：三角(12) + 间距(6)。
                     .padding(.leading, 18)
                     .listRowBackground(sidebarSelectionBackground(isSelected))
@@ -255,6 +282,7 @@ private struct ProjectSection: View {
 // MARK: - 工作树行
 
 private struct WorktreeRow: View {
+    @Environment(\.controlActiveState) private var controlActiveState
     let repository: RepositoryModel
     let worktree: Worktree
     let isSelected: Bool
@@ -272,18 +300,20 @@ private struct WorktreeRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: icon)
-                .font(.system(size: 13))
-                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-                .frame(width: 16)
-                .help(tooltip)
+            GroveSymbolView(
+                .worktree(isPrimary: worktree.isPrimary, isBare: worktree.isBare),
+                size: .medium,
+                role: isSelected && controlActiveState != .inactive ? .accent : .secondary
+            )
+            .frame(width: 16)
+            .help(tooltip)
 
             // 单行。显示分支名 —— 这是工作树的身份；目录名与完整路径进悬停提示。
             // 以前目录名+分支名两行叠着，目录名还常与分支名重复，行行都像双倍行距的墙。
             Text(displayLabel)
                 .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundStyle(isSelected ? Color.accentColor : .primary)
+                .truncationMode(.tail)
+                .foregroundStyle(.primary)
                 .help(tooltip)
 
             // 同名分支在哪台机器上，靠这个胶囊区分。
@@ -315,8 +345,7 @@ private struct WorktreeRow: View {
 
             trailingBadges
         }
-        .padding(.vertical, 2)
-        .frame(minHeight: SidebarMetrics.rowHeight, alignment: .center)
+        .frame(height: SidebarMetrics.rowHeight, alignment: .center)
         // plain Button 默认只命中文字和图标；撑满并声明命中形状，
         // 让整条侧栏行（包括中间空白）都能点击。
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -341,14 +370,6 @@ private struct WorktreeRow: View {
         return lines.joined(separator: "\n")
     }
 
-    private var icon: String {
-        if worktree.isBare { return "archivebox" }
-        // 主工作树不用 house：那是仓库行（主页）的图标，两栋房子换在一起
-        // 分不清谁是入口谁是检出。主检出用硬盘，别的用叶子。
-        if worktree.isPrimary { return "externaldrive" }
-        return "leaf"
-    }
-
     @ViewBuilder
     private var trailingBadges: some View {
         HStack(spacing: 4) {
@@ -371,7 +392,7 @@ private struct WorktreeRow: View {
                 }
 
                 if status.ahead > 0 {
-                    Badge(text: "\(status.ahead)", systemImage: "arrow.up", tint: .blue)
+                    Badge(text: "\(status.ahead)", systemImage: "arrow.up", tint: .secondary)
                         .help("领先上游 \(status.ahead) 个提交")
                 }
                 if status.behind > 0 {
@@ -397,19 +418,27 @@ private struct RepositoryHomeRow: View {
     let copies: [RepositoryModel]
     let isSelected: Bool
     @Binding var sheet: RootView.ActiveSheet?
+    @Environment(\.controlActiveState) private var controlActiveState
+    @Environment(\.colorSchemeContrast) private var colorContrast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovering = false
+    @FocusState private var menuFocused: Bool
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "house")
-                .font(.system(size: 13))
-                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-                .frame(width: 16)
+            GroveSymbolView(
+                .repository,
+                size: .medium,
+                role: isSelected && controlActiveState != .inactive ? .accent : .secondary
+            )
+            .frame(width: 16)
 
             Text(repository.name)
-                .font(.system(size: 13, weight: .medium))
+                .font(GroveStyle.body.weight(.medium))
                 .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundStyle(isSelected ? Color.accentColor : .primary)
+                .truncationMode(.tail)
+                .help(repository.name + "\n" + repository.root.path)
+                .foregroundStyle(.primary)
 
             if repository.isRefreshing {
                 ProgressView().controlSize(.mini)
@@ -431,20 +460,25 @@ private struct RepositoryHomeRow: View {
                     repositoryMenu(repository)
                 }
             } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 13))
-                    .frame(width: 24, height: 24)
+                Image(systemName: "ellipsis")
+                    .font(GroveStyle.toolIcon)
+                    .frame(width: GroveStyle.toolHitArea, height: GroveStyle.toolHitArea)
                     .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
+            .help("仓库操作")
+            .accessibilityLabel("仓库操作")
+            .focused($menuFocused)
+            .opacity(isHovering || isSelected || menuFocused || colorContrast == .increased ? 1 : 0)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isHovering)
         }
-        .padding(.vertical, 3)
-        // 行高与工作树行统一（同一个常数），不然一行高一行矮很潦草。
-        .frame(minHeight: SidebarMetrics.rowHeight, alignment: .center)
+        // 仓库行略高于检出行，建立父子层级。
+        .frame(height: SidebarMetrics.repositoryHeight, alignment: .center)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
     }
 
     @ViewBuilder
@@ -496,6 +530,10 @@ private struct RemoteServerRow: View {
     @Environment(AppModel.self) private var model
     let server: RemoteServer
     @Binding var sheet: RootView.ActiveSheet?
+    @Environment(\.colorSchemeContrast) private var colorContrast
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovering = false
+    @FocusState private var menuFocused: Bool
 
     enum ProbeState: Equatable {
         case unknown
@@ -512,16 +550,14 @@ private struct RemoteServerRow: View {
                 sheet = .addRemoteProject(server)
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: "server.rack")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
+                    GroveSymbolView(.remoteServer, size: .medium, role: .secondary)
                         .frame(width: 16)
 
                     Text(server.displayName)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(GroveStyle.body)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.primary)
 
                     statusDot
 
@@ -531,11 +567,12 @@ private struct RemoteServerRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("在这台服务器上添加项目")
+            .help("在「\(server.displayName)」上添加项目\n\(server.destination)")
 
             Menu {
                 Button("添加项目…") { sheet = .addRemoteProject(server) }
                 Divider()
+                Button("重新检测连接") { Task { await runProbe() } }
                 Button("编辑服务器…") { sheet = .editRemoteServer(server) }
                 Button(role: .destructive) {
                     model.removeRemoteServer(server)
@@ -543,42 +580,63 @@ private struct RemoteServerRow: View {
                     Text("移除服务器")
                 }
             } label: {
-                // 不设 secondary：灰色在菜单按钮上像禁用态。
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 13))
-                    .frame(width: 24, height: 24)
+                Image(systemName: "ellipsis")
+                    .font(GroveStyle.toolIcon)
+                    .frame(width: GroveStyle.toolHitArea, height: GroveStyle.toolHitArea)
                     .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
+            .help("远程服务器操作")
+            .accessibilityLabel("远程服务器操作")
+            .focused($menuFocused)
+            .opacity(isHovering || menuFocused || colorContrast == .increased ? 1 : 0)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isHovering)
         }
-        .padding(.vertical, 3)
-        .frame(minHeight: SidebarMetrics.rowHeight, alignment: .center)
+        .frame(height: SidebarMetrics.rowHeight, alignment: .center)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         // 配置变了（编辑过服务器）重新探一次；视图出现时探第一次。
+        .onHover { isHovering = $0 }
         .task(id: server) { await runProbe() }
     }
 
+    @ViewBuilder
     private var statusDot: some View {
-        let summary = probeSummary
-        return Circle()
-            .fill(summary.color)
-            .frame(width: 6, height: 6)
+        if probe == .checking {
+            ProgressView().controlSize(.mini).help("正在检测连接…")
+        } else {
+            let summary = probeSummary
+            HStack(spacing: GroveStyle.Space.xs) {
+                Circle().fill(summary.color).frame(width: 6, height: 6)
+                Text(probeLabel).font(GroveStyle.caption).foregroundStyle(.secondary)
+            }
             .help(summary.text)
+            .accessibilityLabel(summary.text)
+        }
+    }
+
+    private var probeLabel: String {
+        switch probe {
+        case .unknown: "未检测"
+        case .checking: "检测中"
+        case .ready: "可用"
+        case .failed: "连接失败"
+        }
     }
 
     private var probeSummary: (text: String, color: Color) {
         switch probe {
         case .unknown: ("尚未检测连接", .gray.opacity(0.45))
         case .checking: ("正在检测连接…", .gray.opacity(0.45))
-        case .ready(let version): (version, .green)
+        case .ready(let version): ("检测成功：\(version)", .green)
         case .failed(let reason): ("连接失败：\(reason)", .red)
         }
     }
 
     private func runProbe() async {
+        guard probe != .checking else { return }
         probe = .checking
         guard let transport = model.remoteTransport(for: server) else {
             probe = .failed("找不到 ssh")
@@ -613,21 +671,10 @@ struct LocationBadge: View {
     let marker: LocationMarker
 
     var body: some View {
-        HStack(spacing: 2.5) {
-            if let systemImage = marker.systemImage {
-                Image(systemName: systemImage)
-                    .font(.system(size: 7.5, weight: .semibold))
-            }
-            Text(marker.text)
-                .font(.system(size: 9.5, weight: .medium))
-                .lineLimit(1)
-        }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 5)
-        .padding(.vertical, 1.5)
-        .background(.quaternary.opacity(0.7), in: Capsule())
-        .fixedSize()
-        .help("这份工作树检出在：\(marker.text)")
+        Badge(text: marker.text, systemImage: marker.systemImage, tint: .secondary)
+            .lineLimit(1)
+            .frame(maxWidth: 88)
+            .help("这份工作树检出在：\(marker.text)")
     }
 }
 
@@ -643,19 +690,23 @@ struct Badge: View {
     }
 
     var body: some View {
-        HStack(spacing: 1.5) {
+        HStack(spacing: 3) {
             if let systemImage {
                 Image(systemName: systemImage)
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: 8.5, weight: .medium))
             }
             Text(text)
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .font(GroveStyle.micro)
                 .monospacedDigit()
         }
         .foregroundStyle(tint)
-        .padding(.horizontal, 4)
-        .padding(.vertical, 1.5)
-        .background(tint.opacity(0.14), in: Capsule())
+        .padding(.horizontal, 5)
+        .frame(minHeight: 16)
+        .background(tint.opacity(0.08), in: Capsule())
+        .overlay {
+            Capsule().stroke(tint.opacity(0.18), lineWidth: 0.5)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -663,16 +714,9 @@ struct PullRequestBadge: View {
     let pullRequest: PullRequest
 
     var body: some View {
-        if let icon = Self.iconImage(for: pullRequest.status) {
-            Image(nsImage: icon)
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .foregroundStyle(tint)
-                .frame(width: 16, height: 16)
-                .accessibilityLabel(helpText)
-                .help(helpText)
-        }
+        GroveSymbolView(.pullRequest(status: pullRequest.status), size: .medium, role: .custom(tint))
+            .accessibilityLabel(helpText)
+            .help(helpText)
     }
 
     static let iconBundle = Bundle.main.url(forResource: "Grove_Grove", withExtension: "bundle")

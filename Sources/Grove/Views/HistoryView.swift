@@ -23,7 +23,7 @@ struct HistoryView: View {
                 commitDetail
                     .frame(
                         minWidth: 380,
-                        idealWidth: geometry.size.width * 0.7,
+                        idealWidth: max(380, geometry.size.width * 0.7),
                         maxHeight: .infinity
                     )
                     .layoutPriority(1)
@@ -344,7 +344,7 @@ struct HistoryView: View {
                     DiffContentView(files: [file], showsFileHeaders: true)
                         .frame(
                             minWidth: 320,
-                            idealWidth: geometry.size.width * 0.7,
+                            idealWidth: max(320, geometry.size.width * 0.7),
                             maxHeight: .infinity
                         )
                         .layoutPriority(1)

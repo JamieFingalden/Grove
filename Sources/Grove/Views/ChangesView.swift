@@ -14,8 +14,11 @@ struct ChangesView: View {
             HSplitView {
                 VStack(spacing: 0) {
                     fileList
-                    Divider()
+                    Rectangle()
+                        .fill(Color(nsColor: .separatorColor).opacity(0.45))
+                        .frame(height: 1)
                     CommitBox(model: model)
+                        .background(GroveStyle.secondarySurface)
                 }
                 .frame(
                     minWidth: defaultListWidth,
@@ -27,7 +30,7 @@ struct ChangesView: View {
                 DiffPane(model: model)
                     .frame(
                         minWidth: 380,
-                        idealWidth: geometry.size.width * 0.7,
+                        idealWidth: max(380, geometry.size.width * 0.7),
                         maxHeight: .infinity
                     )
                     .layoutPriority(1)
@@ -41,14 +44,15 @@ struct ChangesView: View {
     private var fileList: some View {
         VStack(spacing: 0) {
             listHeader
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor).opacity(0.45))
+                .frame(height: 1)
 
-            if model.status.changes.isEmpty {
-                ContentUnavailableView {
-                    Label("工作区干净", systemImage: "checkmark.seal")
-                } description: {
-                    Text("没有未提交的改动。")
-                }
-                .frame(maxHeight: .infinity)
+            if model.status.changes.isEmpty && model.isLoading {
+                GroveLoadingState(title: "正在读取工作树…")
+            } else if model.status.changes.isEmpty {
+                GroveEmptyState(title: "工作区干净", systemImage: "checkmark.seal",
+                                description: "没有未提交的改动。")
             } else {
                 List(selection: selectedChange) {
                     if !conflictedChanges.isEmpty {
@@ -114,10 +118,28 @@ struct ChangesView: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
 
+            let totalChanges = model.status.changes.count
+            if totalChanges > 0 {
+                Text("\(totalChanges)")
+                    .font(GroveStyle.micro)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1.5)
+                    .background(Color.primary.opacity(0.06), in: Capsule())
+            }
+
             if model.status.hasConflicts {
-                Label("\(model.status.conflictCount) 个冲突", systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.red)
+                HStack(spacing: 3) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                    Text("\(model.status.conflictCount) 个冲突")
+                        .font(GroveStyle.micro)
+                }
+                .foregroundStyle(.red)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1.5)
+                .background(Color.red.opacity(0.12), in: Capsule())
             }
 
             Spacer()
@@ -139,10 +161,12 @@ struct ChangesView: View {
     private var conflictHeader: some View {
         HStack(spacing: 6) {
             Text("冲突")
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.red)
             Text("\(conflictedChanges.count)")
+                .font(GroveStyle.micro)
                 .monospacedDigit()
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.red.opacity(0.7))
             Spacer()
             Menu("全部采用…") {
                 Button("当前更改") { Task { await confirmResolveAll(taking: .ours) } }
@@ -228,13 +252,17 @@ private struct SectionHeader: View {
     var body: some View {
         HStack(spacing: 6) {
             Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
             Text("\(count)")
+                .font(GroveStyle.micro)
                 .monospacedDigit()
                 .foregroundStyle(.tertiary)
             Spacer()
             Button(actionLabel, action: action)
                 .buttonStyle(.borderless)
                 .font(.system(size: 10))
+                .foregroundStyle(.secondary)
         }
     }
 }
@@ -245,6 +273,7 @@ private struct ChangeRow: View {
     let change: FileChange
     let isStaged: Bool
     let model: WorktreeModel
+    @State private var isHovering = false
 
     private var kind: ChangeKind {
         (isStaged ? change.staged : change.unstaged) ?? change.primaryKind
@@ -253,12 +282,12 @@ private struct ChangeRow: View {
     var body: some View {
         HStack(spacing: 7) {
             Text(kind.badge)
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                 .foregroundStyle(tint)
-                .frame(width: 14, height: 14)
-                .background(tint.opacity(0.15), in: RoundedRectangle(cornerRadius: 3))
+                .frame(width: 16, height: 16)
+                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 3.5))
 
-            VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(change.displayName)
                     .font(.system(size: 12))
                     .lineLimit(1)
@@ -266,7 +295,7 @@ private struct ChangeRow: View {
 
                 if change.directory != "." {
                     Text(change.directory)
-                        .font(.system(size: 9.5))
+                        .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                         .truncationMode(.head)
@@ -288,12 +317,17 @@ private struct ChangeRow: View {
                 }
             } label: {
                 Image(systemName: isStaged ? "minus" : "plus")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .frame(width: 18, height: 18)
+                    .background(isHovering ? Color.primary.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 4))
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
+            .opacity(isHovering ? 1.0 : 0.4)
             .help(isStaged ? "取消暂存" : "暂存")
         }
-        .padding(.vertical, 1)
+        .padding(.vertical, 2.5)
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
         .contextMenu {
             Button(isStaged ? "取消暂存" : "暂存") {
                 Task {
@@ -322,7 +356,7 @@ private struct ChangeRow: View {
         case .added, .untracked: .green
         case .deleted: .red
         case .modified, .typeChanged: .orange
-        case .renamed, .copied: .blue
+        case .renamed, .copied: .purple
         case .unmerged: .red
         }
     }
@@ -346,16 +380,17 @@ private struct ChangeRow: View {
 private struct ConflictRow: View {
     let change: FileChange
     let model: WorktreeModel
+    @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 7) {
             Text(ChangeKind.unmerged.badge)
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                 .foregroundStyle(.red)
-                .frame(width: 14, height: 14)
-                .background(Color.red.opacity(0.15), in: RoundedRectangle(cornerRadius: 3))
+                .frame(width: 16, height: 16)
+                .background(Color.red.opacity(0.12), in: RoundedRectangle(cornerRadius: 3.5))
 
-            VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(change.displayName)
                     .font(.system(size: 12))
                     .lineLimit(1)
@@ -363,15 +398,17 @@ private struct ConflictRow: View {
 
                 HStack(spacing: 4) {
                     Text(change.conflict?.label ?? "冲突")
+                        .font(GroveStyle.micro)
                         .foregroundStyle(.red)
                     if change.directory != "." {
                         Text("·")
+                            .foregroundStyle(.tertiary)
                         Text(change.directory)
                             .lineLimit(1)
                             .truncationMode(.head)
                     }
                 }
-                .font(.system(size: 9.5))
+                .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
             }
 
@@ -381,12 +418,17 @@ private struct ConflictRow: View {
                 Task { await confirmMarkResolved() }
             } label: {
                 Image(systemName: "checkmark")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .frame(width: 18, height: 18)
+                    .background(isHovering ? Color.primary.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 4))
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
+            .opacity(isHovering ? 1.0 : 0.5)
             .help("标记为已解决：把工作区里现在的内容当作结果")
         }
-        .padding(.vertical, 1)
+        .padding(.vertical, 2.5)
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
         .contextMenu {
             Button("采用当前更改") { Task { await model.resolveConflict(change, taking: .ours) } }
             Button("采用传入的更改") { Task { await model.resolveConflict(change, taking: .theirs) } }
@@ -447,9 +489,9 @@ private struct CommitBox: View {
                 .disabled(model.isGeneratingCommitMessage)
                 .font(.system(size: 12, design: .default))
                 .scrollContentBackground(.hidden)
-                .frame(height: 74)
-                .padding(6)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+                .frame(height: 72)
+                .padding(8)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: GroveStyle.smallRadius))
                 .overlay(alignment: .topLeading) {
                     if model.commitMessage.isEmpty,
                        !isFocused,
@@ -458,16 +500,17 @@ private struct CommitBox: View {
                             .font(.system(size: 12))
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 11)
-                            .padding(.top, 4)
+                            .padding(.top, 7)
                             .allowsHitTesting(false)
                     }
                 }
                 .overlay(alignment: .topTrailing) {
                     aiCommitControl
-                        .padding(7)
+                        .padding(6)
                 }
                 .overlay {
-                    RoundedRectangle(cornerRadius: 7).stroke(.separator, lineWidth: 0.5)
+                    RoundedRectangle(cornerRadius: GroveStyle.smallRadius)
+                        .stroke(isFocused ? Color.accentColor.opacity(0.65) : GroveStyle.subtleBorder, lineWidth: isFocused ? 1 : 0.5)
                 }
                 .focused($isFocused)
 
@@ -478,25 +521,25 @@ private struct CommitBox: View {
                     SettingsLink { Text("打开设置…") }
                         .buttonStyle(.link)
                 }
-                .font(.system(size: 10.5))
+                .font(GroveStyle.caption)
             }
 
             if let note = model.generatedDiffNotice {
                 Label(note, systemImage: "exclamationmark.triangle")
-                    .font(.system(size: 10.5))
+                    .font(GroveStyle.caption)
                     .foregroundStyle(.orange)
             }
 
             if model.canRetryCommitMessageGeneration {
                 Button("重试") { confirmAndGenerate() }
                     .buttonStyle(.link)
-                    .font(.system(size: 10.5))
+                    .font(GroveStyle.caption)
             }
 
             HStack(spacing: 8) {
                 Toggle("修补上一个提交", isOn: $model.amendLastCommit)
                     .toggleStyle(.checkbox)
-                    .font(.system(size: 11))
+                    .font(GroveStyle.caption)
                     .help("git commit --amend：把这次改动并进上一个提交，而不是新建一个")
                     .disabled(model.commits.isEmpty)
 
@@ -511,23 +554,28 @@ private struct CommitBox: View {
                         Text("提交")
                     }
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
                 .disabled(!model.canCommit)
                 .keyboardShortcut(.return, modifiers: .command)
                 .help("⌘↩")
             }
 
             if model.status.hasConflicts {
-                Label("先把上面「冲突」区的文件都标记为已解决，才能提交", systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.orange)
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                    Text("请先解决所有冲突再提交")
+                        .font(GroveStyle.caption)
+                }
+                .foregroundStyle(.orange)
             } else if model.status.stagedCount == 0 && !model.amendLastCommit {
-                Text("暂存一些改动才能提交")
-                    .font(.system(size: 10.5))
+                Text("暂存改动后按 ⌘↩ 提交")
+                    .font(GroveStyle.caption)
                     .foregroundStyle(.tertiary)
             }
         }
-        .padding(12)
+        .padding(GroveStyle.Space.md)
     }
 
     @ViewBuilder

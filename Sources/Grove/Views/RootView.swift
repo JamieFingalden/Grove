@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var sheet: ActiveSheet?
     @State private var sidebarVisibility: NavigationSplitViewVisibility = .automatic
     @State private var showsHoverSidebar = false
@@ -40,7 +41,7 @@ struct RootView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: $sidebarVisibility) {
             SidebarView(sheet: $sheet)
-                .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 380)
+                .navigationSplitViewColumnWidth(min: 250, ideal: GroveStyle.sidebarWidth, max: 290)
         } detail: {
             detail
         }
@@ -64,12 +65,12 @@ struct RootView: View {
             Group {
                 if showsHoverSidebar {
                     SidebarView(sheet: $sheet)
-                        .frame(width: 272)
+                        .frame(width: GroveStyle.sidebarWidth)
                         .frame(maxHeight: .infinity)
                         .background(.regularMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: GroveStyle.largeRadius, style: .continuous))
                         .overlay {
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            RoundedRectangle(cornerRadius: GroveStyle.largeRadius, style: .continuous)
                                 .stroke(.separator.opacity(0.7), lineWidth: 0.5)
                         }
                         .shadow(color: .black.opacity(0.22), radius: 20, x: 6, y: 3)
@@ -104,7 +105,7 @@ struct RootView: View {
         sidebarDismissTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(100))
             guard !Task.isCancelled else { return }
-            withAnimation(.easeOut(duration: 0.14)) {
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
                 showsHoverSidebar = false
             }
         }
@@ -113,7 +114,7 @@ struct RootView: View {
     private func presentHoverSidebar() {
         sidebarDismissTask?.cancel()
         guard !showsHoverSidebar else { return }
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
             showsHoverSidebar = true
         }
     }
@@ -121,7 +122,7 @@ struct RootView: View {
     private func dismissHoverSidebar() {
         sidebarDismissTask?.cancel()
         guard showsHoverSidebar else { return }
-        withAnimation(.easeOut(duration: 0.14)) {
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
             showsHoverSidebar = false
         }
     }
@@ -160,11 +161,8 @@ struct RootView: View {
     }
 
     private var placeholder: some View {
-        ContentUnavailableView(
-            "选择一个工作树",
-            systemImage: "tree",
-            description: Text("从左侧挑一个工作树查看它的改动和 PR。")
-        )
+        GroveEmptyState(title: "选择一个工作树", systemImage: "tree",
+                        description: "从左侧挑一个工作树查看它的改动和 PR。")
     }
 
     // MARK: - 工具栏
@@ -184,17 +182,18 @@ struct RootView: View {
             Button {
                 sheet = .addRemoteServer
             } label: {
-                // 只留图标：中文长标签会把侧栏顶部的工具区挤得没有下脚处，
-                // 用途写进悬停提示。符号用 externaldrive.badge.plus —— 与
-                // 「打开仓库」的 folder.badge.plus 对仗，+ 号暗示「添加」。
+                // 工具栏项统一「图标 + 文字」，不单独留裸图标。符号用
+                // server.rack：与侧栏「远程环境」一致；externaldrive.badge.plus
+                // 留给「创建远程仓库」，两个按钮不同图标。
                 // 注意别用 server.rack.badge.plus：不存在这个符号，渲染成空白。
-                Label("连接远程服务器", systemImage: "externaldrive.badge.plus")
-                    .labelStyle(.iconOnly)
+                Label("连接远程服务器", systemImage: "server.rack")
             }
             .help("通过 SSH 管理远程服务器上的项目（添加 / 编辑服务器）")
         }
 
-        ToolbarItemGroup {
+        // .automatic 在 macOS 上会跟着导航项挤到左缘，右侧留一大片空白；
+        // 显式用 .primaryAction 把操作按钮推到工具栏右端。
+        ToolbarItemGroup(placement: .primaryAction) {
             if let repository = model.selectedRepository {
                 if !repository.hasOrigin {
                     Button {
@@ -215,7 +214,7 @@ struct RootView: View {
                 Button {
                     Task { await repository.fetch() }
                 } label: {
-                    Label("Fetch", systemImage: "arrow.down.circle")
+                    Label("抓取", systemImage: "arrow.down.circle")
                 }
                 .help("git fetch --all --prune（⇧⌘F）")
                 .disabled(!repository.hasRemote)
@@ -250,7 +249,7 @@ struct RootView: View {
             }
             .padding(16)
             .transition(.move(edge: .bottom).combined(with: .opacity))
-            .animation(.snappy, value: model.failures.count)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: model.failures.count)
         }
     }
 
@@ -319,48 +318,28 @@ struct EmptyRepositoryView: View {
     var connectServer: () -> Void = {}
 
     var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "tree")
-                .font(.system(size: 56, weight: .light))
-                .foregroundStyle(.tertiary)
-
-            VStack(spacing: 6) {
-                Text("Grove")
-                    .font(.system(size: 26, weight: .bold, design: .rounded))
-                Text("用工作树并行开发，顺手处理 PR")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-
-            Button {
-                Task { await FolderPicker.openRepository(into: model) }
-            } label: {
-                Label("打开仓库…", systemImage: "folder.badge.plus")
-                    .padding(.horizontal, 6)
-            }
-            .controlSize(.large)
-            .buttonStyle(.borderedProminent)
-
-            Button {
-                connectServer()
-            } label: {
-                Label("连接远程服务器…", systemImage: "server.rack")
-                    .padding(.horizontal, 6)
-            }
-            .controlSize(.large)
-            .buttonStyle(.bordered)
-
-            if let message = model.availability(of: .github).message {
-                Label(message, systemImage: "info.circle")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 8)
-                    .frame(maxWidth: 380)
-                    .multilineTextAlignment(.leading)
+        GroveEmptyState(title: "Grove", systemImage: "tree",
+                        description: "用工作树并行开发，顺手处理 PR") {
+            VStack(spacing: GroveStyle.Space.md) {
+                HStack(spacing: GroveStyle.Space.sm) {
+                    Button {
+                        Task { await FolderPicker.openRepository(into: model) }
+                    } label: {
+                        Label("打开仓库…", systemImage: "folder.badge.plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Button { connectServer() } label: {
+                        Label("连接远程服务器…", systemImage: "server.rack")
+                    }
+                }
+                if let message = model.availability(of: .github).message {
+                    Label(message, systemImage: "info.circle")
+                        .font(GroveStyle.metadata)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: 380)
+                }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(40)
     }
 }
 
