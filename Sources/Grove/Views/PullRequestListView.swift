@@ -608,8 +608,11 @@ private struct PullRequestDetailView: View {
             await loadDetail()
         }
         .onChange(of: appModel.aiReviewResultsRevision) { _, _ in
-            restoreCachedAIReview(for: diffFiles.isEmpty ? nil : diffFiles)
-            Task { await reloadThreads() }
+            // 审查任务会自行读取最新 diff，不能用详情页保留的旧 diff 判断新结果过期。
+            Task {
+                await reloadDiff()
+                await reloadThreads()
+            }
         }
         .alert("关闭 \(current.displayNumber)？", isPresented: $showsCloseConfirmation) {
             Button("取消", role: .cancel) {}
@@ -1101,9 +1104,11 @@ private struct PullRequestDetailView: View {
 
     private func reloadDiff() async {
         guard let forge = repository.forge else { return }
+        let expectedOrigin = repository.origin
         isLoadingDiff = true
         do {
             let loaded = try await loadReviewDiff(using: forge)
+            guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
             diffFiles = loaded.files
             diffHead = loaded.head
             didFailDiff = false
@@ -1111,6 +1116,7 @@ private struct PullRequestDetailView: View {
             selectFirstDiffFileIfNeeded()
             restoreCachedAIReview(for: diffFiles)
         } catch {
+            guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
             diffFiles = []
             didFailDiff = true
             diffLoadError = error.localizedDescription

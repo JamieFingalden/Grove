@@ -294,6 +294,38 @@ final class AIReviewAutomationTests: XCTestCase {
         XCTAssertFalse(restarted.hasPendingAIReview(for: fixture.directory, pullRequestNumber: 42))
     }
 
+    func testManualRereviewUsesLatestDiffInsteadOfDetailPageSnapshot() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        let inputs = Inputs()
+        let model = fixture.model { request in
+            await inputs.append(request)
+            return PullRequestAIReview(verdict: .ready, summary: "审查完成。",
+                                       assessments: [], wasTruncated: false)
+        }
+        let repository = try XCTUnwrap(model.repositories.first)
+        let forge = try XCTUnwrap(repository.forge)
+        let request = try await forge.pullRequest(number: 42, in: fixture.directory)
+        let oldFiles = try await forge.pullRequestDiff(number: 42, in: fixture.directory)
+
+        try fixture.write("head", "second")
+        try fixture.write("diff", "diff --git a/a.swift b/a.swift\n--- a/a.swift\n+++ b/a.swift\n@@ -1 +1 @@\n-old\n+updated\n")
+        model.startAIReview(.init(pullRequest: request, files: oldFiles, customInstructions: "",
+            selectedAreas: [.compilation], model: .sol, reasoningEffort: .high,
+            service: .codex(model: .sol, reasoningEffort: .high), repositoryRoot: fixture.directory))
+        try await waitForReview(model)
+
+        let cached = try XCTUnwrap(model.cachedAIReview(for: fixture.directory, pullRequestNumber: 42))
+        let latestFiles = try await forge.pullRequestDiff(number: 42, in: fixture.directory)
+        let generatedInputs = await inputs.values
+        XCTAssertEqual(generatedInputs.count, 1)
+        XCTAssertEqual(cached.head, "second")
+        XCTAssertEqual(cached.diffFingerprint, AIReviewCache.diffFingerprint(latestFiles))
+        XCTAssertEqual(AIReviewCache.diffFingerprint(try XCTUnwrap(generatedInputs.first).files), cached.diffFingerprint)
+        XCTAssertNotEqual(cached.diffFingerprint, AIReviewCache.diffFingerprint(oldFiles))
+        XCTAssertTrue(model.failures.isEmpty)
+    }
+
     func testChangedHeadOrClosedRequestDuringGenerationDoesNotPublishOldReview() async throws {
         for closesRequest in [false, true] {
             let fixture = try Fixture()
