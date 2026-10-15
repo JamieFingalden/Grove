@@ -39,6 +39,30 @@ final class OverviewTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(WorkspaceItem.self, from: encoded).id, item(mine).id)
     }
 
+    func testOpenRequestCountDoesNotConfuseHealthyRequestsWithPersonalInbox() {
+        var healthy = request(author: "me")
+        healthy.mergeable = "MERGEABLE"
+        healthy.statusCheckRollup = [.init(name: "检查", conclusion: "SUCCESS")]
+        var draft = request(author: "other")
+        draft.number = 9
+        draft.isDraft = true
+        var review = request(reviewers: ["me"])
+        review.number = 10
+        var closed = healthy
+        closed.number = 11
+        closed.state = "CLOSED"
+        let store = WorkspaceAggregationService(cacheName: "test-unused")
+        store.items = [item(healthy)]
+        XCTAssertEqual(store.openPullRequestCount, 1, "本人创建且检查正常的开放 PR 仍应显示在总览中")
+        XCTAssertEqual(store.inboxCount, 0, "开放 PR 不能直接当作个人待办")
+        store.items += [item(draft), item(review), item(closed)]
+        XCTAssertEqual(store.openPullRequestCount, 3)
+        XCTAssertEqual(store.inboxCount, 1)
+        XCTAssertTrue(item(healthy).matches(type: "pullRequest", status: "开放 / 草稿"))
+        XCTAssertTrue(item(draft).matches(type: "pullRequest", status: "开放 / 草稿"))
+        XCTAssertFalse(item(closed).matches(type: "pullRequest", status: "开放 / 草稿"))
+    }
+
     func testProjectIdentityPreservesDistinctHostsPortsAndPaths() throws {
         let first = try XCTUnwrap(GitRemote.parse("https://gitlab.example.com:8443/team/Grove.git"))
         let second = try XCTUnwrap(GitRemote.parse("https://gitlab.example.com:9443/team/Grove.git"))
@@ -253,6 +277,8 @@ final class OverviewTests: XCTestCase {
         await store.refresh(in: app)
         XCTAssertTrue(store.issues.isEmpty)
         XCTAssertEqual(store.items.count, 4, "同远端项目的本地副本不能重复展示")
+        XCTAssertEqual(store.openPullRequestCount, 2)
+        XCTAssertEqual(store.inboxCount, 1)
         XCTAssertEqual(store.items.filter { !$0.inboxReasons.isEmpty }.count, 1)
         XCTAssertEqual(store.items.first(where: { $0.provider == .gitlab && $0.pullRequest != nil })?.kind, .pullRequest, "审批阻塞不等于 Git 冲突")
         try Data().write(to: container.appendingPathComponent("failure-gitlab"))
@@ -290,17 +316,23 @@ final class OverviewTests: XCTestCase {
         var review = request(reviewers: ["me"])
         review.number = 12
         review.title = "调整文件状态列表的键盘导航"
-        app.workspace.items = [item(conflict), item(review)]
+        let pendingItems = [item(conflict), item(review)]
+        var healthy = request(author: "me")
+        healthy.mergeable = "MERGEABLE"
+        healthy.statusCheckRollup = [.init(name: "检查", conclusion: "SUCCESS")]
+        app.repositories = [RepositoryModel(root: URL(fileURLWithPath: "/tmp/Grove"),
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: nil)]
         app.daily.commits = [DailyCommit(repositoryIdentity: "repo", repositoryKey: "repo", repositoryName: "Grove",
             hash: "abcdef123456", authorEmail: "me@example.com", date: Date(), subject: "保留跨页面切换时的提交草稿", branch: "feature", knownOnRemote: false)]
         let output = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/overview-preview")
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         for scheme in [ColorScheme.light, .dark] {
-            for page in ["daily", "workspace", "settings"] {
+            for page in ["daily", "workspace", "workspace-no-inbox", "settings"] {
+                app.workspace.items = page == "workspace-no-inbox" ? [item(healthy)] : pendingItems
                 let content: AnyView
                 switch page {
                 case "daily": content = AnyView(DailyView().environment(app).environment(\.colorScheme, scheme))
-                case "workspace": content = AnyView(WorkspaceView().environment(app).environment(\.colorScheme, scheme))
+                case "workspace", "workspace-no-inbox": content = AnyView(WorkspaceView().environment(app).environment(\.colorScheme, scheme))
                 default: content = AnyView(PreferencesView().environment(app).environment(\.colorScheme, scheme))
                 }
                 let hosting = NSHostingView(rootView: content)

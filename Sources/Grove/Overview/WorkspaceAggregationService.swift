@@ -26,6 +26,8 @@ final class WorkspaceAggregationService {
         var viewer: String?
     }
     var items: [WorkspaceItem] = []
+    var openPullRequestCount: Int { items.filter { $0.pullRequest?.isActive == true }.count }
+    var inboxCount: Int { items.filter { !$0.inboxReasons.isEmpty }.count }
     var issues: [OverviewIssue] = []
     var isRefreshing = false
     var lastRefresh: Date?

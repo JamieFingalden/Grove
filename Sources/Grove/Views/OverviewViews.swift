@@ -26,14 +26,37 @@ struct WorkspaceView: View {
             app.repositories.map { "\($0.id.identityKey):\($0.origin?.hostWithPort ?? ""):\($0.origin?.path ?? ""):\($0.forge?.kind.rawValue ?? "")" }.joined(separator: "|")
     }
 
+    private var emptyDescription: String {
+        if app.repositories.isEmpty { return "打开本地仓库后，Grove 会复用现有 GitHub / GitLab 集成。" }
+        if inbox && store.openPullRequestCount > 0 {
+            return "全部项目共有 \(store.openPullRequestCount) 个开放 PR / MR；当前筛选下没有明确需要你处理的事项。可切换到 All Activity 查看开放请求。"
+        }
+        return "调整筛选或刷新数据。个人归属无法确认的动态只会出现在 All Activity。"
+    }
+
+    private func showOpenPullRequests() {
+        inbox = false
+        project = ""
+        type = WorkspaceItem.Kind.pullRequest.rawValue
+        state = "开放 / 草稿"
+        relatedOnly = false
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            OverviewHeader(title: "Workspace", subtitle: "\(store.items.filter { !$0.inboxReasons.isEmpty }.count) 个待处理事项",
+            OverviewHeader(title: "Workspace", subtitle: "\(store.openPullRequestCount) 个开放 PR / MR · \(store.inboxCount) 个需我处理的事项",
                            refreshing: store.isRefreshing, lastRefresh: store.lastRefresh, cached: store.isCached) {
                 Task { await store.refresh(in: app) }
             }
             HStack(spacing: GroveStyle.Space.section) {
-                OverviewMetric(title: "待处理 PR / MR", value: store.items.filter { $0.pullRequest != nil && !$0.inboxReasons.isEmpty }.count)
+                Button(action: showOpenPullRequests) {
+                    OverviewMetric(title: "开放 PR / MR", value: store.openPullRequestCount)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .modifier(GroveRowHover())
+                .help("查看全部开放 PR / MR，包含草稿")
+                OverviewMetric(title: "需我处理", value: store.inboxCount)
                 OverviewMetric(title: "CI 检查异常", value: store.items.filter { $0.inboxReasons.contains("CI 检查失败") }.count)
                 OverviewMetric(title: "我的合并冲突", value: store.items.filter { $0.inboxReasons.contains("Git 合并冲突") }.count)
                 Spacer()
@@ -61,7 +84,7 @@ struct WorkspaceView: View {
                 }.frame(width: 145)
                 Picker("状态", selection: $state) {
                     Text("全部状态").tag("")
-                    ForEach(["开放", "草稿", "已合并", "已关闭", "等待中", "运行中", "已通过", "已失败", "已取消", "待评审", "要求修改", "Git 冲突"], id: \.self) { Text($0).tag($0) }
+                    ForEach(["开放 / 草稿", "开放", "草稿", "已合并", "已关闭", "等待中", "运行中", "已通过", "已失败", "已取消", "待评审", "要求修改", "Git 冲突"], id: \.self) { Text($0).tag($0) }
                 }.frame(width: 145)
                 Spacer(minLength: 0)
             }.labelsHidden().padding(.horizontal, GroveStyle.Space.section).padding(.bottom, GroveStyle.Space.md)
@@ -75,7 +98,11 @@ struct WorkspaceView: View {
                     GroveLoadingState(title: "正在同步各项目…")
                 } else {
                     GroveEmptyState(title: inbox ? "没有符合条件的待办" : "没有符合条件的活动", systemImage: inbox ? "tray" : "clock",
-                                    description: app.repositories.isEmpty ? "打开本地仓库后，Grove 会复用现有 GitHub / GitLab 集成。" : "调整筛选或刷新数据。个人归属无法确认的动态只会出现在 All Activity。")
+                                    description: emptyDescription) {
+                        if inbox && store.openPullRequestCount > 0 {
+                            Button("查看全部开放 PR / MR", action: showOpenPullRequests)
+                        }
+                    }
                 }
             } else {
                 List(visible) { item in
@@ -103,45 +130,141 @@ struct WorkspaceView: View {
 
 private struct WorkspaceRow: View {
     let item: WorkspaceItem
-    private var tint: Color {
-        if item.kind == .conflict || item.inboxReasons.contains("CI 检查失败") { return .red }
+
+    private var statusTint: Color {
+        if let pr = item.pullRequest {
+            switch pr.status {
+            case .open: return .green
+            case .draft: return .secondary
+            case .merged: return .purple
+            case .closed: return .red
+            }
+        }
         if let pipeline = item.pipeline { return pipeline.status.tint }
-        if item.pullRequest?.status == .merged { return .purple }
+        if item.kind == .conflict { return .red }
         return .secondary
     }
+
+    private var statusSystemImage: String? {
+        if let pr = item.pullRequest { return pr.status.systemImage }
+        if let pipeline = item.pipeline { return pipeline.status.systemImage }
+        if item.kind == .conflict { return "exclamationmark.triangle.fill" }
+        return nil
+    }
+
+    private var leadingIcon: some View {
+        Group {
+            if item.kind == .conflict {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+            } else if let pipeline = item.pipeline {
+                if pipeline.status == .running {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: pipeline.status.systemImage)
+                        .foregroundStyle(pipeline.status.tint)
+                }
+            } else if let pr = item.pullRequest {
+                Image(systemName: pr.status.systemImage)
+                    .foregroundStyle(statusTint)
+            } else {
+                Image(systemName: "tray")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.system(size: 13, weight: .medium))
+        .frame(width: 18, height: 18)
+        .padding(.top, 2)
+    }
+
+    private func reviewTint(_ state: PullRequest.ReviewState) -> Color {
+        switch state {
+        case .approved: return .green
+        case .changesRequested: return .orange
+        case .pending: return .orange
+        case .none: return .secondary
+        }
+    }
+
+    @ViewBuilder
+    private var badgesView: some View {
+        if let pr = item.pullRequest {
+            let hasBadges = (pr.mergeable == "CONFLICTING" && pr.isActive)
+                || (pr.checks.label != nil)
+                || (pr.review.label != nil)
+                || item.inboxReasons.contains("请求我评审")
+
+            if hasBadges {
+                HStack(spacing: 5) {
+                    if pr.mergeable == "CONFLICTING" && pr.isActive {
+                        Badge(text: "存在冲突", systemImage: "exclamationmark.triangle.fill", tint: .red)
+                    }
+                    if let checks = pr.checks.label, let icon = pr.checks.systemImage {
+                        Badge(text: checks, systemImage: icon, tint: pr.checks.tint)
+                    }
+                    if let review = pr.review.label, let icon = pr.review.systemImage {
+                        Badge(text: review, systemImage: icon, tint: reviewTint(pr.review))
+                    }
+                    if item.inboxReasons.contains("请求我评审") {
+                        Badge(text: "请求我评审", systemImage: "person.crop.circle.badge.exclamationmark", tint: .orange)
+                    }
+                }
+                .padding(.top, 1)
+            }
+        }
+    }
+
+    private var trailingInfo: some View {
+        VStack(alignment: .trailing, spacing: GroveStyle.Space.xs) {
+            Badge(text: item.statusLabel, systemImage: statusSystemImage, tint: statusTint)
+
+            if let date = item.timestamp {
+                Text("\(item.pipeline != nil && item.pipeline?.updatedAt == nil ? "创建于" : "更新于") \(CIFormat.relative(date))")
+                    .font(GroveStyle.caption)
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .help("\(item.pipeline != nil && item.pipeline?.updatedAt == nil ? "创建时间" : "更新时间")：\(date.formatted())")
+            }
+        }
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: GroveStyle.Space.md) {
-            Image(systemName: item.kind == .conflict ? "exclamationmark.triangle" : item.pipeline?.status.systemImage ?? item.pullRequest?.status.systemImage ?? "tray")
-                .foregroundStyle(tint).frame(width: 18).padding(.top, 3)
+            leadingIcon
+
             VStack(alignment: .leading, spacing: GroveStyle.Space.xs) {
-                HStack {
+                HStack(alignment: .firstTextBaseline, spacing: GroveStyle.Space.xs) {
                     Text(item.repositoryName).font(GroveStyle.sectionTitle)
+                    Text("·").font(GroveStyle.caption).foregroundStyle(.tertiary)
                     Text("\(item.provider.displayName) · \(item.objectLabel)").font(GroveStyle.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Text(item.statusLabel).font(GroveStyle.caption).foregroundStyle(item.pipeline?.status.tint ?? .secondary)
                 }
-                Text(item.title).font(GroveStyle.body).lineLimit(2)
-                HStack {
+
+                Text(item.title).font(GroveStyle.body.weight(.medium)).lineLimit(2)
+
+                HStack(spacing: GroveStyle.Space.xs) {
                     Text(item.branch).lineLimit(1).truncationMode(.middle)
-                    if let author = item.pullRequest?.author { Text("· \(author.login)") }
-                    Spacer()
-                    if let date = item.timestamp {
-                        Text("\(item.pipeline != nil && item.pipeline?.updatedAt == nil ? "创建" : "更新") \(CIFormat.relative(date))")
-                    } else { Text("时间未知") }
-                }.font(GroveStyle.caption).foregroundStyle(.secondary)
+                    if let author = item.pullRequest?.author {
+                        Text("·")
+                        Text(author.login).lineLimit(1)
+                    }
+                }
+                .font(GroveStyle.caption).foregroundStyle(.secondary)
+
                 if item.isCached == true, let date = item.cacheTimestamp {
                     Text("缓存 · 同步于 \(CIFormat.relative(date))").font(GroveStyle.caption).foregroundStyle(.orange)
                 }
-                if let pr = item.pullRequest {
-                    HStack(spacing: GroveStyle.Space.md) {
-                        if pr.mergeable == "CONFLICTING" && pr.isActive { Text("Git 合并冲突").foregroundStyle(.red) }
-                        if let checks = pr.checks.label { Text(checks).foregroundStyle(pr.checks.tint) }
-                        if let review = pr.review.label { Text(review).foregroundStyle(.secondary) }
-                        if item.inboxReasons.contains("请求我评审") { Text("请求我评审").foregroundStyle(.orange) }
-                    }.font(GroveStyle.caption)
-                }
+
+                badgesView
             }
-        }.padding(.vertical, GroveStyle.Space.sm).contentShape(Rectangle())
+
+            Spacer(minLength: GroveStyle.Space.md)
+
+            trailingInfo
+        }
+        .padding(.vertical, GroveStyle.Space.sm)
+        .padding(.horizontal, GroveStyle.Space.md)
+        .contentShape(Rectangle())
     }
 }
 

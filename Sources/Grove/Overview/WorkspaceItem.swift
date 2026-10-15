@@ -42,6 +42,7 @@ struct WorkspaceItem: Identifiable, Hashable, Sendable, Codable {
         case .conflict: matchesType = kind == .conflict
         case nil: matchesType = true
         }
+        if status == "开放 / 草稿" { return matchesType && pullRequest?.isActive == true }
         var statuses = Set([statusLabel])
         if let pr = pullRequest {
             if let review = pr.review.label { statuses.insert(review) }
