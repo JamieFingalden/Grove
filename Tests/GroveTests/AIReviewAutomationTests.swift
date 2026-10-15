@@ -3,6 +3,67 @@ import XCTest
 
 @MainActor
 final class AIReviewAutomationTests: XCTestCase {
+    func testTemporaryNetworkFailureRetriesAndNotifiesOnlyAfterRepeatedFailure() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        try fixture.write("offline", "")
+        try fixture.write("attempts", "")
+        try fixture.write("gh", #"""
+        #!/bin/sh
+        case "$1:$2" in
+          pr:list) cat "$GROVE_TEST_ROOT/list" ;;
+          pr:view)
+            printf '检查\n' >> "$GROVE_TEST_ROOT/attempts"
+            if [ -f "$GROVE_TEST_ROOT/offline" ]; then
+              printf 'Post "https://api.github.com/graphql": net/http: TLS handshake timeout\n' >&2
+              exit 1
+            fi
+            cat "$GROVE_TEST_ROOT/head" ;;
+          *) exit 2 ;;
+        esac
+        """#)
+        let settings = AIGenerationSettings(defaults: try XCTUnwrap(UserDefaults(suiteName: fixture.suite)))
+        settings.setAutomaticReviewHead("first", for: "https://example.invalid/pr/42")
+        let model = fixture.model { _ in XCTFail("检查网络恢复不能重新执行已经完成的审查"); return Self.review }
+        let now = Date()
+        await model.pollAutomaticAIReviews(now: now)
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(30))
+        XCTAssertEqual(try String(contentsOf: fixture.directory.appendingPathComponent("attempts"), encoding: .utf8), "检查\n")
+        XCTAssertTrue(model.failures.isEmpty, "单次 TLS 超时应等待下一轮检查")
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(60))
+        XCTAssertTrue(model.failures.isEmpty)
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(120))
+        XCTAssertEqual(model.failures.count, 1)
+        XCTAssertTrue(model.failures.first?.context?.contains("PR #42 · 读取最新提交") == true)
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(180))
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(420))
+        XCTAssertEqual(model.failures.count, 1, "持续断网不能反复通知")
+        XCTAssertEqual(try String(contentsOf: fixture.directory.appendingPathComponent("attempts"), encoding: .utf8)
+            .split(separator: "\n").count, 4, "连续失败后应延长重试间隔")
+
+        try FileManager.default.removeItem(at: fixture.directory.appendingPathComponent("offline"))
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(720))
+        XCTAssertEqual(model.activeAIReviewCount, 0)
+        model.dismiss(try XCTUnwrap(model.failures.first))
+        try fixture.write("offline", "")
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(780))
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(840))
+        XCTAssertTrue(model.failures.isEmpty, "成功检查后应清零连续失败次数")
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(900))
+        XCTAssertEqual(model.failures.count, 1)
+        XCTAssertEqual(try fixture.publicationTargets(), [])
+    }
+
+    func testNetworkFailureClassificationDoesNotHideAuthenticationOrCertificateErrors() {
+        for output in ["HTTP 401: Bad credentials", "HTTP 403: access denied",
+                       "x509: certificate has expired", "无法读取提交版本"] {
+            XCTAssertFalse(AIReviewAutomation.isTransientNetworkFailure(CommandFailure(
+                executable: "gh", arguments: [], exitCode: 1, output: output)))
+        }
+        XCTAssertTrue(AIReviewAutomation.isTransientNetworkFailure(CommandTimeout(
+            executable: "glab", arguments: [], seconds: 180)))
+    }
+
     func testAutomaticCheckFailureIncludesRepositoryAndFailedStep() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }

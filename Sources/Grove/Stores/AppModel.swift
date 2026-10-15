@@ -221,6 +221,7 @@ final class AppModel {
 
     @ObservationIgnored private var automaticAIReviewTask: Task<Void, Never>?
     @ObservationIgnored private var automaticAIReviewRetryAfter: [String: Date] = [:]
+    @ObservationIgnored private var automaticAIReviewNetworkFailures: [String: Int] = [:]
     @ObservationIgnored private var cancelledAutomaticHeads: [String: String] = [:]
 
     init(
@@ -502,14 +503,14 @@ final class AppModel {
         }
     }
 
-    func pollAutomaticAIReviews() async {
+    func pollAutomaticAIReviews(now: Date = Date()) async {
         guard canUseAIGeneration, let service = aiReviewService else { return }
         for repository in repositories where !repository.isRemote && automaticAIReviewEnabled(for: repository.root) {
             guard !Task.isCancelled else { return }
             guard let forge = repository.forge else { continue }
             let expectedOrigin = repository.origin
             let retryKey = repository.root.path
-            guard (automaticAIReviewRetryAfter[retryKey] ?? .distantPast) <= Date() else { continue }
+            guard (automaticAIReviewRetryAfter[retryKey] ?? .distantPast) <= now else { continue }
             var step = "读取开放 PR 列表"
             do {
                 // ponytail: 每轮最多检查 1000 个开放请求；超大仓库可改为平台事件订阅。
@@ -557,7 +558,7 @@ final class AppModel {
                         continue
                     }
                     guard cancelledAutomaticHeads[request.url] != head,
-                          (automaticAIReviewRetryAfter["\(request.url):\(head)"] ?? .distantPast) <= Date(),
+                          (automaticAIReviewRetryAfter["\(request.url):\(head)"] ?? .distantPast) <= now,
                           activeAIReviewCount < 2 else { continue }
                     if initialHead == nil { aiGenerationSettings.setInitialReviewHead(head, for: request.url) }
                     startAIReview(.init(
@@ -568,10 +569,22 @@ final class AppModel {
                         repositoryRoot: repository.root
                     ), automatic: true, expectedHead: head)
                 }
+                automaticAIReviewNetworkFailures.removeValue(forKey: retryKey)
+                automaticAIReviewRetryAfter.removeValue(forKey: retryKey)
             } catch is CancellationError {
                 return
             } catch {
-                automaticAIReviewRetryAfter[retryKey] = Date().addingTimeInterval(300)
+                if AIReviewAutomation.isTransientNetworkFailure(error) {
+                    let previous = automaticAIReviewNetworkFailures[retryKey] ?? 0
+                    let failures = min(previous + 1, 3)
+                    automaticAIReviewNetworkFailures[retryKey] = failures
+                    automaticAIReviewRetryAfter[retryKey] = now.addingTimeInterval(failures < 3 ? 60 : 300)
+                    // 短暂断网先等下一轮；持续失败只通知一次，完整检查成功后重置。
+                    guard failures == 3, previous < 3 else { continue }
+                } else {
+                    automaticAIReviewNetworkFailures.removeValue(forKey: retryKey)
+                    automaticAIReviewRetryAfter[retryKey] = now.addingTimeInterval(300)
+                }
                 report(title: "自动 AI Review 检查失败", error: error, repository: repository, context: step)
             }
         }
