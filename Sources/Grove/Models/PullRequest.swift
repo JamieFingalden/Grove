@@ -8,7 +8,7 @@ import Foundation
 ///
 /// 字段名跟 `gh pr list --json` 的输出一一对应，所以 GitHub 那侧可以直接
 /// `Decodable`；GitLab 那侧由 `GitLabMergeRequest.asPullRequest()` 映射过来。
-struct PullRequest: Identifiable, Hashable, Sendable, Decodable {
+struct PullRequest: Identifiable, Hashable, Sendable, Codable {
     var number: Int
     var title: String
     var state: String            // OPEN / CLOSED / MERGED
@@ -41,6 +41,11 @@ struct PullRequest: Identifiable, Hashable, Sendable, Decodable {
 
     /// 来源平台。GitHub 的 JSON 里没有这个字段，解码后由客户端补上。
     var forge: ForgeKind = .github
+    var reviewRequests: [ReviewerRequest]? = nil
+
+    struct ReviewerRequest: Hashable, Sendable, Codable {
+        var login: String?
+    }
 
     var id: Int { number }
 
@@ -54,10 +59,10 @@ struct PullRequest: Identifiable, Hashable, Sendable, Decodable {
     enum CodingKeys: String, CodingKey {
         case number, title, state, isDraft, headRefName, baseRefName, url, author
         case updatedAt, createdAt, additions, deletions, changedFiles, reviewDecision, mergeable
-        case isCrossRepository, labels, statusCheckRollup, body, headRepositoryOwner
+        case isCrossRepository, labels, statusCheckRollup, body, headRepositoryOwner, reviewRequests
     }
 
-    struct Author: Hashable, Sendable, Decodable {
+    struct Author: Hashable, Sendable, Codable {
         var login: String
         var name: String?
         var isBot: Bool?
@@ -80,11 +85,11 @@ struct PullRequest: Identifiable, Hashable, Sendable, Decodable {
         }
     }
 
-    struct Owner: Hashable, Sendable, Decodable {
+    struct Owner: Hashable, Sendable, Codable {
         var login: String
     }
 
-    struct Label: Hashable, Sendable, Decodable, Identifiable {
+    struct Label: Hashable, Sendable, Codable, Identifiable {
         var name: String
         /// 六位十六进制，不带 `#`。
         var color: String
@@ -235,7 +240,7 @@ enum PullRequestNaming {
 /// （有 `name`/`status`/`conclusion`），而老式的第三方服务走 `StatusContext`
 /// （有 `context`/`state`）。两种形状字段名完全不同，所以全声明成可选，
 /// 再由 `outcome` 统一成一个结论。
-struct StatusCheck: Hashable, Sendable, Decodable, Identifiable {
+struct StatusCheck: Hashable, Sendable, Codable, Identifiable {
     var __typename: String?
     // CheckRun 形状
     var name: String?

@@ -17,6 +17,7 @@ struct PullRequestListView: View {
     @State private var mode: WorkspaceMode = .list
     @State private var selection: Int?
     @State private var searchText = ""
+    @State private var routedRequest: PullRequest?
     @State private var mergeTarget: PullRequest?
     @State private var isDetecting = false
     @FocusState private var searchFocused: Bool
@@ -65,7 +66,7 @@ struct PullRequestListView: View {
                     }
                     .disabled(isDetecting || repository.isRefreshingPullRequests)
                 }
-            } else if repository.listPullRequests.isEmpty {
+            } else if repository.listPullRequests.isEmpty && routedRequest == nil {
                 listHeader
                 Divider()
                 listStateView
@@ -74,7 +75,7 @@ struct PullRequestListView: View {
                 case .list:
                     listView
                 case .review:
-                    if let selection, let pullRequest = repository.listPullRequests.first(where: { $0.number == selection }) {
+                    if let selection, let pullRequest = repository.listPullRequests.first(where: { $0.number == selection }) ?? routedRequest.flatMap({ $0.number == selection ? $0 : nil }) {
                         PullRequestDetailView(
                             repository: repository,
                             pullRequest: pullRequest,
@@ -83,6 +84,7 @@ struct PullRequestListView: View {
                             onBackToList: {
                                 withAnimation(.easeInOut(duration: 0.15)) {
                                     mode = .list
+                                    routedRequest = nil
                                 }
                             },
                             canGoPrevious: canGoPreviousPR,
@@ -105,6 +107,12 @@ struct PullRequestListView: View {
                 mode = .review
             }
             await repository.refreshPullRequests()
+        }
+        .onChange(of: appModel.navigation.route?.id, initial: true) { _, _ in
+            guard let route = appModel.navigation.route, route.matches(repository), let pr = route.pullRequest else { return }
+            routedRequest = pr
+            selection = pr.number
+            mode = .review
         }
         .sheet(item: $mergeTarget) { pullRequest in
             MergePullRequestSheet(repository: repository, pullRequest: pullRequest)
@@ -506,8 +514,9 @@ struct MiniBadge: View {
 
 // MARK: - PR 详情
 
-private struct PullRequestDetailView: View {
+struct PullRequestDetailView: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.repositoryPageActive) private var pageActive
     let repository: RepositoryModel
     let pullRequest: PullRequest
     let existingWorktree: Worktree?
@@ -522,6 +531,7 @@ private struct PullRequestDetailView: View {
     @State private var detailed: PullRequest?
     @State private var detailLoadError: String?
     @State private var isLoadingDetail = false
+    @State private var hasLoadedDetail = false
     @State private var threads: [ReviewThread] = []
     @State private var diffFiles: [FileDiff] = []
     @State private var selectedDiffFileID: String?
@@ -593,15 +603,21 @@ private struct PullRequestDetailView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .task {
-            aiReviewInstructions = appModel.aiReviewInstructions(for: repository.root)
-            aiReviewAreas = appModel.aiReviewAreas(for: repository.root)
-            restoreCachedAIReview()
-            await loadDetail()
-        }
-        .onChange(of: appModel.aiReviewResultsRevision) { _, _ in
-            restoreCachedAIReview(for: diffFiles.isEmpty ? nil : diffFiles)
-            Task { await reloadThreads() }
+        .task(id: pageActive ? appModel.aiReviewResultsRevision : nil) {
+            guard pageActive else { return }
+            if !hasLoadedDetail {
+                aiReviewInstructions = appModel.aiReviewInstructions(for: repository.root)
+                aiReviewAreas = appModel.aiReviewAreas(for: repository.root)
+                restoreCachedAIReview()
+                await loadDetail()
+                guard !Task.isCancelled else { return }
+                hasLoadedDetail = true
+            } else {
+                // 隐藏时取消刷新；回到详情后再同步最新 diff 与审查结果。
+                await reloadDiff()
+                guard !Task.isCancelled else { return }
+                await reloadThreads()
+            }
         }
         .alert("关闭 \(current.displayNumber)？", isPresented: $showsCloseConfirmation) {
             Button("取消", role: .cancel) {}
@@ -1079,7 +1095,10 @@ private struct PullRequestDetailView: View {
             guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
             threads = loaded
             threadsError = nil
-        } catch { threadsError = "讨论加载失败，请重试。" }
+        } catch {
+            guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
+            threadsError = "讨论加载失败，请重试。"
+        }
     }
 
     private func loadReviewDiff(using forge: any ForgeClient) async throws -> (files: [FileDiff], head: String) {
@@ -1093,9 +1112,11 @@ private struct PullRequestDetailView: View {
 
     private func reloadDiff() async {
         guard let forge = repository.forge else { return }
+        let expectedOrigin = repository.origin
         isLoadingDiff = true
         do {
             let loaded = try await loadReviewDiff(using: forge)
+            guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
             diffFiles = loaded.files
             diffHead = loaded.head
             didFailDiff = false
@@ -1103,6 +1124,7 @@ private struct PullRequestDetailView: View {
             selectFirstDiffFileIfNeeded()
             restoreCachedAIReview(for: diffFiles)
         } catch {
+            guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
             diffFiles = []
             didFailDiff = true
             diffLoadError = error.localizedDescription

@@ -1,8 +1,126 @@
+import AppKit
+import SwiftUI
 import XCTest
 @testable import Grove
 
 @MainActor
 final class AIReviewAutomationTests: XCTestCase {
+    func testRetainedInactiveDetailDefersAIRefreshUntilVisibleAgain() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        try FileManager.default.moveItem(at: fixture.directory.appendingPathComponent("gh"),
+                                        to: fixture.directory.appendingPathComponent("gh-original"))
+        try fixture.write("calls", "")
+        try fixture.write("gh", #"""
+        #!/bin/sh
+        printf '%s %s\n' "$1" "$2" >> "$GROVE_TEST_ROOT/calls"
+        exec "$GROVE_TEST_ROOT/gh-original" "$@"
+        """#)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.directory.appendingPathComponent("gh").path)
+        let model = fixture.model { _ in XCTFail("页面同步不能触发 AI 生成"); return Self.review }
+        let repository = try XCTUnwrap(model.repositories.first)
+        let forge = try XCTUnwrap(repository.forge)
+        let request = try await forge.pullRequest(number: 42, in: fixture.directory)
+        func content(active: Bool) -> some View {
+            PullRequestDetailView(repository: repository, pullRequest: request, existingWorktree: nil, onMerge: {})
+                .environment(model).environment(\.repositoryPageActive, active)
+                .retainedPage(active).frame(width: 900, height: 700)
+        }
+        func calls() throws -> [Substring] {
+            try String(contentsOf: fixture.directory.appendingPathComponent("calls"), encoding: .utf8).split(separator: "\n")
+        }
+        let hosting = NSHostingView(rootView: content(active: true))
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 900, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = hosting
+        defer { window.orderOut(nil); window.contentView = nil }
+        window.makeKeyAndOrderFront(nil)
+        func waitForDiffCount(_ expected: Int) async throws {
+            for _ in 0..<100 {
+                hosting.layoutSubtreeIfNeeded()
+                if try calls().filter({ $0 == "pr diff" }).count >= expected { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            try await Task.sleep(for: .milliseconds(100))
+            XCTAssertEqual(try calls().filter { $0 == "pr diff" }.count, expected)
+        }
+        try await waitForDiffCount(1)
+        hosting.rootView = content(active: false)
+        try await Task.sleep(for: .milliseconds(100))
+        let initialCalls = try calls()
+        model.saveAIReview(Self.review, diffFingerprint: "latest", for: fixture.directory, pullRequestNumber: 42)
+        try await Task.sleep(for: .milliseconds(100))
+        model.removeCachedAIReview(for: fixture.directory, pullRequestNumber: 42)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(try calls(), initialCalls, "隐藏详情不能因全局审查修订发出平台请求")
+        hosting.rootView = content(active: true)
+        try await waitForDiffCount(2)
+        model.saveAIReview(Self.review, diffFingerprint: "latest", for: fixture.directory, pullRequestNumber: 42)
+        try await waitForDiffCount(3)
+        XCTAssertEqual(try fixture.publicationTargets(), [])
+    }
+
+    func testTemporaryNetworkFailureRetriesAndNotifiesOnlyAfterRepeatedFailure() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        try fixture.write("offline", "")
+        try fixture.write("attempts", "")
+        try fixture.write("gh", #"""
+        #!/bin/sh
+        case "$1:$2" in
+          pr:list) cat "$GROVE_TEST_ROOT/list" ;;
+          pr:view)
+            printf '检查\n' >> "$GROVE_TEST_ROOT/attempts"
+            if [ -f "$GROVE_TEST_ROOT/offline" ]; then
+              printf 'Post "https://api.github.com/graphql": net/http: TLS handshake timeout\n' >&2
+              exit 1
+            fi
+            cat "$GROVE_TEST_ROOT/head" ;;
+          *) exit 2 ;;
+        esac
+        """#)
+        let settings = AIGenerationSettings(defaults: try XCTUnwrap(UserDefaults(suiteName: fixture.suite)))
+        settings.setAutomaticReviewHead("first", for: "https://example.invalid/pr/42")
+        let model = fixture.model { _ in XCTFail("检查网络恢复不能重新执行已经完成的审查"); return Self.review }
+        let now = Date()
+        await model.pollAutomaticAIReviews(now: now)
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(30))
+        XCTAssertEqual(try String(contentsOf: fixture.directory.appendingPathComponent("attempts"), encoding: .utf8), "检查\n")
+        XCTAssertTrue(model.failures.isEmpty, "单次 TLS 超时应等待下一轮检查")
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(60))
+        XCTAssertTrue(model.failures.isEmpty)
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(120))
+        XCTAssertEqual(model.failures.count, 1)
+        XCTAssertTrue(model.failures.first?.context?.contains("PR #42 · 读取最新提交") == true)
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(180))
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(420))
+        XCTAssertEqual(model.failures.count, 1, "持续断网不能反复通知")
+        XCTAssertEqual(try String(contentsOf: fixture.directory.appendingPathComponent("attempts"), encoding: .utf8)
+            .split(separator: "\n").count, 4, "连续失败后应延长重试间隔")
+
+        try FileManager.default.removeItem(at: fixture.directory.appendingPathComponent("offline"))
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(720))
+        XCTAssertEqual(model.activeAIReviewCount, 0)
+        model.dismiss(try XCTUnwrap(model.failures.first))
+        try fixture.write("offline", "")
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(780))
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(840))
+        XCTAssertTrue(model.failures.isEmpty, "成功检查后应清零连续失败次数")
+        await model.pollAutomaticAIReviews(now: now.addingTimeInterval(900))
+        XCTAssertEqual(model.failures.count, 1)
+        XCTAssertEqual(try fixture.publicationTargets(), [])
+    }
+
+    func testNetworkFailureClassificationDoesNotHideAuthenticationOrCertificateErrors() {
+        for output in ["HTTP 401: Bad credentials", "HTTP 403: access denied",
+                       "x509: certificate has expired", "无法读取提交版本"] {
+            XCTAssertFalse(AIReviewAutomation.isTransientNetworkFailure(CommandFailure(
+                executable: "gh", arguments: [], exitCode: 1, output: output)))
+        }
+        XCTAssertTrue(AIReviewAutomation.isTransientNetworkFailure(CommandTimeout(
+            executable: "glab", arguments: [], seconds: 180)))
+    }
+
     func testAutomaticCheckFailureIncludesRepositoryAndFailedStep() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
@@ -292,6 +410,38 @@ final class AIReviewAutomationTests: XCTestCase {
         try fixture.write("list", "[]")
         await restarted.pollAutomaticAIReviews()
         XCTAssertFalse(restarted.hasPendingAIReview(for: fixture.directory, pullRequestNumber: 42))
+    }
+
+    func testManualRereviewUsesLatestDiffInsteadOfDetailPageSnapshot() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        let inputs = Inputs()
+        let model = fixture.model { request in
+            await inputs.append(request)
+            return PullRequestAIReview(verdict: .ready, summary: "审查完成。",
+                                       assessments: [], wasTruncated: false)
+        }
+        let repository = try XCTUnwrap(model.repositories.first)
+        let forge = try XCTUnwrap(repository.forge)
+        let request = try await forge.pullRequest(number: 42, in: fixture.directory)
+        let oldFiles = try await forge.pullRequestDiff(number: 42, in: fixture.directory)
+
+        try fixture.write("head", "second")
+        try fixture.write("diff", "diff --git a/a.swift b/a.swift\n--- a/a.swift\n+++ b/a.swift\n@@ -1 +1 @@\n-old\n+updated\n")
+        model.startAIReview(.init(pullRequest: request, files: oldFiles, customInstructions: "",
+            selectedAreas: [.compilation], model: .sol, reasoningEffort: .high,
+            service: .codex(model: .sol, reasoningEffort: .high), repositoryRoot: fixture.directory))
+        try await waitForReview(model)
+
+        let cached = try XCTUnwrap(model.cachedAIReview(for: fixture.directory, pullRequestNumber: 42))
+        let latestFiles = try await forge.pullRequestDiff(number: 42, in: fixture.directory)
+        let generatedInputs = await inputs.values
+        XCTAssertEqual(generatedInputs.count, 1)
+        XCTAssertEqual(cached.head, "second")
+        XCTAssertEqual(cached.diffFingerprint, AIReviewCache.diffFingerprint(latestFiles))
+        XCTAssertEqual(AIReviewCache.diffFingerprint(try XCTUnwrap(generatedInputs.first).files), cached.diffFingerprint)
+        XCTAssertNotEqual(cached.diffFingerprint, AIReviewCache.diffFingerprint(oldFiles))
+        XCTAssertTrue(model.failures.isEmpty)
     }
 
     func testChangedHeadOrClosedRequestDuringGenerationDoesNotPublishOldReview() async throws {

@@ -889,6 +889,7 @@ struct PreferencesView: View {
 
     var body: some View {
         Form {
+            OverviewPreferences()
             Section("AI 生成") {
                 Toggle("启用提交信息、PR 描述和 AI Review", isOn: aiEnabled)
 

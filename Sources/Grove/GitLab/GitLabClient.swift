@@ -271,6 +271,11 @@ struct GitLabClient: ForgeClient {
 
     // MARK: - 查询
 
+    func currentUser(in directory: URL) async throws -> String? {
+        let data = try await api("user", in: directory)
+        return try Self.decoder.decode(GitLabUser.self, from: data).username
+    }
+
     func pullRequests(in directory: URL, limit: Int, state: PullRequestListState) async throws -> [PullRequest] {
         guard limit > 0 else { return [] }
         let pageSize = min(limit, 100)
@@ -521,6 +526,7 @@ struct GitLabClient: ForgeClient {
         let ref: String?
         let sha: String?
         let createdAt: Date?
+        let updatedAt: Date?
         let duration: Double?
         let webUrl: String?
     }
@@ -549,7 +555,8 @@ struct GitLabClient: ForgeClient {
                 trigger: nil,
                 createdAt: dto.createdAt,
                 duration: dto.duration,
-                webURL: dto.webUrl
+                webURL: dto.webUrl,
+                updatedAt: dto.updatedAt
             )
         }
     }

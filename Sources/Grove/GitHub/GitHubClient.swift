@@ -22,7 +22,7 @@ struct GitHubClient: ForgeClient {
         "number", "title", "state", "isDraft", "headRefName", "baseRefName",
         "url", "author", "createdAt", "updatedAt", "additions", "deletions", "changedFiles",
         "reviewDecision", "mergeable", "isCrossRepository", "labels",
-        "statusCheckRollup", "headRepositoryOwner"
+        "statusCheckRollup", "headRepositoryOwner", "reviewRequests"
     ].joined(separator: ",")
 
     private static let detailFields = listFields + ",body"
@@ -130,6 +130,16 @@ struct GitHubClient: ForgeClient {
     }
 
     // MARK: - 查询
+
+    func currentUser(in directory: URL) async throws -> String? {
+        guard let git = await ToolLocator.shared.locate("git") else { return nil }
+        let origin = try await ProcessRunner.runChecked(executable: git,
+            arguments: ["remote", "get-url", "origin"], workingDirectory: directory, environment: environment)
+        guard let remote = GitRemote.parse(origin.trimmedStdout) else { return nil }
+        let result = try await ghChecked(["api", "user", "--hostname", remote.hostWithPort, "--jq", ".login"], in: directory)
+        let login = result.trimmedStdout
+        return login.isEmpty ? nil : login
+    }
 
     func pullRequests(in directory: URL, limit: Int = 50, state: PullRequestListState = .open) async throws -> [PullRequest] {
         var arguments = ["pr", "list", "--limit", String(limit), "--json", Self.listFields]
@@ -302,7 +312,8 @@ struct GitHubClient: ForgeClient {
                 trigger: dto.event,
                 createdAt: dto.createdAt,
                 duration: duration(from: dto.createdAt, to: dto.updatedAt),
-                webURL: dto.url
+                webURL: dto.url,
+                updatedAt: dto.updatedAt
             )
         }
     }

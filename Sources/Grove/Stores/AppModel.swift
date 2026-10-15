@@ -164,13 +164,17 @@ final class AppModel {
     private(set) var githubHosts: Set<String> = []
     private(set) var gitlabHosts: Set<String> = []
     private(set) var toolsReady = false
+    private(set) var overviewReady = false
 
     var repositories: [RepositoryModel] = []
     /// 远程服务器上的仓库。跟本机的分开存：持久化键不同（路径 → 服务器+路径），
     /// 侧边栏分组也不同，但选中和详情视图共用同一套 `RepositoryModel`。
     var remoteRepositories: [RepositoryModel] = []
     private(set) var remoteServers: [RemoteServer] = []
-    var selection: Selection?
+    let navigation: AppNavigationState
+    let daily = DailyViewModel()
+    let workspace = WorkspaceAggregationService()
+    var selection: Selection? { didSet { navigation.selected(selection) } }
     var failures: [GroveFailure] = []
     var presentedFailure: GroveFailure?
     var notificationFallbackFailure: GroveFailure?
@@ -217,10 +221,12 @@ final class AppModel {
 
     @ObservationIgnored private var automaticAIReviewTask: Task<Void, Never>?
     @ObservationIgnored private var automaticAIReviewRetryAfter: [String: Date] = [:]
+    @ObservationIgnored private var automaticAIReviewNetworkFailures: [String: Int] = [:]
     @ObservationIgnored private var cancelledAutomaticHeads: [String: String] = [:]
 
     init(
         aiGenerationSettings: AIGenerationSettings = AIGenerationSettings(),
+        navigation: AppNavigationState = AppNavigationState(),
         aiReviewCache: AIReviewCache = AIReviewCache(),
         remoteServerStore: RemoteServerStore = RemoteServerStore(),
         remoteProjectStore: RemoteProjectStore = RemoteProjectStore(),
@@ -243,6 +249,7 @@ final class AppModel {
             )
         }
     ) {
+        self.navigation = navigation
         self.aiGenerationSettings = aiGenerationSettings
         self.failureNotifier = failureNotifier
         self.aiReviewUpdateNotifier = aiReviewUpdateNotifier
@@ -496,14 +503,14 @@ final class AppModel {
         }
     }
 
-    func pollAutomaticAIReviews() async {
+    func pollAutomaticAIReviews(now: Date = Date()) async {
         guard canUseAIGeneration, let service = aiReviewService else { return }
         for repository in repositories where !repository.isRemote && automaticAIReviewEnabled(for: repository.root) {
             guard !Task.isCancelled else { return }
             guard let forge = repository.forge else { continue }
             let expectedOrigin = repository.origin
             let retryKey = repository.root.path
-            guard (automaticAIReviewRetryAfter[retryKey] ?? .distantPast) <= Date() else { continue }
+            guard (automaticAIReviewRetryAfter[retryKey] ?? .distantPast) <= now else { continue }
             var step = "读取开放 PR 列表"
             do {
                 // ponytail: 每轮最多检查 1000 个开放请求；超大仓库可改为平台事件订阅。
@@ -551,7 +558,7 @@ final class AppModel {
                         continue
                     }
                     guard cancelledAutomaticHeads[request.url] != head,
-                          (automaticAIReviewRetryAfter["\(request.url):\(head)"] ?? .distantPast) <= Date(),
+                          (automaticAIReviewRetryAfter["\(request.url):\(head)"] ?? .distantPast) <= now,
                           activeAIReviewCount < 2 else { continue }
                     if initialHead == nil { aiGenerationSettings.setInitialReviewHead(head, for: request.url) }
                     startAIReview(.init(
@@ -562,10 +569,22 @@ final class AppModel {
                         repositoryRoot: repository.root
                     ), automatic: true, expectedHead: head)
                 }
+                automaticAIReviewNetworkFailures.removeValue(forKey: retryKey)
+                automaticAIReviewRetryAfter.removeValue(forKey: retryKey)
             } catch is CancellationError {
                 return
             } catch {
-                automaticAIReviewRetryAfter[retryKey] = Date().addingTimeInterval(300)
+                if AIReviewAutomation.isTransientNetworkFailure(error) {
+                    let previous = automaticAIReviewNetworkFailures[retryKey] ?? 0
+                    let failures = min(previous + 1, 3)
+                    automaticAIReviewNetworkFailures[retryKey] = failures
+                    automaticAIReviewRetryAfter[retryKey] = now.addingTimeInterval(failures < 3 ? 60 : 300)
+                    // 短暂断网先等下一轮；持续失败只通知一次，完整检查成功后重置。
+                    guard failures == 3, previous < 3 else { continue }
+                } else {
+                    automaticAIReviewNetworkFailures.removeValue(forKey: retryKey)
+                    automaticAIReviewRetryAfter[retryKey] = now.addingTimeInterval(300)
+                }
                 report(title: "自动 AI Review 检查失败", error: error, repository: repository, context: step)
             }
         }
@@ -724,15 +743,14 @@ final class AppModel {
         async let repositoryRestore: Void = restoreBookmarkedRepositories()
         await detectForges()
         await repositoryRestore
+        overviewReady = true
         sshExecutable = await sshLocation
+        // 本地评审入口不等 SSH 环境恢复，也不等其他项目的网络请求。
+        navigation.restore(in: self)
+        async let forgeRefresh: Void = refreshLocalForgeMetadata()
         await restoreRemoteRepositories()
-
-        // 启动恢复刻意只读本地 Git 状态；托管商探测完成后再补仓库标识。
-        // 这一步即使网络慢，仓库和工作树也早已可以使用。
-        for repository in repositories {
-            await repository.refreshForgeMetadata()
-        }
-
+        navigation.restore(in: self)
+        await forgeRefresh
         startAutomaticAIReviewMonitoring()
 
         // CI 状态点（工作树行的绿红点）也在这个时候首次拉取；
@@ -873,9 +891,22 @@ final class AppModel {
     func redetectForges() async {
         await detectForges()
 
-        // 每个仓库都要重新判一次归属，否则刚登录的那台还是灰的。
-        for repository in repositories {
-            await repository.refreshForgeMetadata()
+        await refreshLocalForgeMetadata()
+    }
+
+    /// 所有本地入口先更新，再限制并发加载列表，单个项目不会挡住其他项目。
+    private func refreshLocalForgeMetadata() async {
+        let locals = repositories
+        for repository in locals { repository.resolveForgeMetadata() }
+        await withTaskGroup(of: Void.self) { group in
+            var iterator = locals.filter { $0.forge != nil && $0.slug != nil }.makeIterator()
+            for _ in 0..<3 {
+                if let repository = iterator.next() { group.addTask { await repository.refreshPullRequests() } }
+            }
+            while await group.next() != nil {
+                guard !Task.isCancelled else { group.cancelAll(); return }
+                if let repository = iterator.next() { group.addTask { await repository.refreshPullRequests() } }
+            }
         }
     }
 
@@ -892,13 +923,13 @@ final class AppModel {
                 loadForgeMetadata: false
             ), selection == nil {
                 // 不等剩下的仓库全部刷新，第一座仓库可用后立刻进入它。
-                selectDefaultWorktree(in: repository)
+                selectDefaultWorktree(in: repository, restoring: true)
             }
         }
         bookmarks.save(repositories.map(\.root.path))
 
         if selection == nil, let first = repositories.first {
-            selectDefaultWorktree(in: first)
+            selectDefaultWorktree(in: first, restoring: true)
         }
     }
 
@@ -950,9 +981,14 @@ final class AppModel {
         }
     }
 
-    private func selectDefaultWorktree(in repository: RepositoryModel) {
+    func selectDefaultWorktree(in repository: RepositoryModel, restoring: Bool = false) {
+        guard !restoring || !navigation.hasUserNavigated else { return }
         guard let worktree = repository.worktrees.first else { return }
-        selection = .worktree(repository: repository.id, worktree: worktree.path)
+        if restoring {
+            navigation.withRestoration { selection = .worktree(repository: repository.id, worktree: worktree.path) }
+        } else {
+            selection = .worktree(repository: repository.id, worktree: worktree.path)
+        }
     }
 
     // MARK: - 远程服务器
@@ -1124,7 +1160,7 @@ final class AppModel {
 
         // 本机和远程都有仓库时，默认进本机的第一个 —— 那是响应最快的一个。
         if selection == nil, repositories.isEmpty, let first = remoteRepositories.first {
-            selectDefaultWorktree(in: first)
+            selectDefaultWorktree(in: first, restoring: true)
         }
     }
 
@@ -1213,7 +1249,8 @@ final class AppModel {
     }
 
     var selectedRepository: RepositoryModel? {
-        switch selection {
+        guard navigation.page == .repositories else { return nil }
+        return switch selection {
         case .worktree(let repositoryID, _): repository(matching: repositoryID)
         case .repositoryHome(let repositoryID): repository(matching: repositoryID)
         case nil: nil

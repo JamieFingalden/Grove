@@ -43,6 +43,7 @@ struct GroveApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
+                .preferredColorScheme(model.navigation.colorScheme)
                 .task { await model.bootstrap() }
                 .frame(minWidth: 980, minHeight: 620)
         }
@@ -52,6 +53,7 @@ struct GroveApp: App {
         Settings {
             PreferencesView()
                 .environment(model)
+                .preferredColorScheme(model.navigation.colorScheme)
         }
     }
 }
@@ -90,12 +92,17 @@ struct GroveCommands: Commands {
         CommandGroup(after: .toolbar) {
             Button("刷新") {
                 Task {
-                    await model.selectedRepository?.refresh()
-                    await model.selectedWorktreeModel?.refresh()
+                    switch model.navigation.page {
+                    case .daily: await model.daily.refresh(in: model)
+                    case .workspace: await model.workspace.refresh(in: model)
+                    case .repositories:
+                        await model.selectedRepository?.refresh()
+                        await model.selectedWorktreeModel?.refresh()
+                    }
                 }
             }
             .keyboardShortcut("r", modifiers: .command)
-            .disabled(model.selectedRepository == nil)
+            .disabled(model.navigation.page == .repositories && model.selectedRepository == nil)
 
             Button("抓取远端") {
                 Task { await model.selectedRepository?.fetch() }

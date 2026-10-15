@@ -2,6 +2,17 @@ import Foundation
 import CryptoKit
 
 enum AIReviewAutomation {
+    static func isTransientNetworkFailure(_ error: Error) -> Bool {
+        if error is CommandTimeout { return true }
+        guard let failure = error as? CommandFailure else { return false }
+        // ponytail: CLI 没有结构化网络错误码，暂只匹配明确的传输层提示；以后可改用平台错误码。
+        let output = failure.output.lowercased()
+        return ["tls handshake timeout", "i/o timeout", "connection reset by peer",
+                "network is unreachable", "no such host", "temporary failure in name resolution",
+                "net/http: request canceled", "client.timeout exceeded"]
+            .contains { output.contains($0) }
+    }
+
     static func marker(head: String, area: String) -> String {
         "<!-- grove-ai-review:\(head):\(area) -->"
     }

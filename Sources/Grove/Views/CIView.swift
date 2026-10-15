@@ -5,6 +5,8 @@ import SwiftUI
 /// 定位：看状态、看日志、按按钮（重试 / 取消 / 触发）。跑构建的永远是
 /// 平台自己的 Runner —— Grove 不解析配置、不执行步骤、不变成 CI。
 struct CIView: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.repositoryPageActive) private var active
     let repository: RepositoryModel
     var projectTab: Binding<ProjectHomeTab>? = nil
 
@@ -57,18 +59,24 @@ struct CIView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(GroveStyle.content)
-        .task {
-            guard !didLoadOnce else { return }
+        .task(id: active) {
+            guard active && !didLoadOnce else { return }
             await reload()
         }
         // 控制台手感：页面开着就定期刷新，不用手点。视图消失自动停。
         .task(id: pollKey) {
-            guard didLoadOnce else { return }
+            guard didLoadOnce && active else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(hasRunning ? 10 : 30))
                 guard !Task.isCancelled else { return }
                 await reload(silent: true)
             }
+        }
+        .onChange(of: app.navigation.route?.id, initial: true) { _, _ in
+            guard let route = app.navigation.route, route.matches(repository), let pipeline = route.pipeline else { return }
+            if !pipelines.contains(where: { $0.id == pipeline.id }) { pipelines.insert(pipeline, at: 0) }
+            selectedPipelineID = pipeline.id
+            showsCompactDetail = true
         }
         .sheet(isPresented: $showsRunSheet) {
             RunPipelineSheet(
@@ -90,7 +98,7 @@ struct CIView: View {
     /// 轮询节奏跟着状态走：有在跑的刷得勤。key 变了（选中变化/有无 running）
     /// 任务会重启，循环从新的节奏开始。
     private var pollKey: String {
-        "\(selectedPipelineID ?? -1)-\(hasRunning)"
+        "\(selectedPipelineID ?? -1)-\(hasRunning)-\(active)-\(didLoadOnce)"
     }
 
     /// 手动跑流水线时建议的 ref：最近流水线里出现过的分支，新到旧去重。
@@ -391,7 +399,9 @@ struct CIView: View {
             let loaded = try await forge.pipelines(in: repository.root, limit: 50)
             try Task.checkCancellation()
             guard repository.origin == expectedOrigin else { return }
+            let routed = app.navigation.route.flatMap { $0.matches(repository) ? $0.pipeline : nil }
             pipelines = loaded
+            if let routed, !pipelines.contains(where: { $0.id == routed.id }) { pipelines.append(routed) }
             didLoadOnce = true
             // 分支 → 状态的索引顺手刷新：侧边栏工作树行的 CI 小点靠它。
             repository.updatePipelineStatuses(from: pipelines, fromOrigin: expectedOrigin)

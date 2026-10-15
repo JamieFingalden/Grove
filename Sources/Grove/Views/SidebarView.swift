@@ -8,6 +8,11 @@ struct SidebarView: View {
         @Bindable var model = model
 
         List {
+            Text("OVERVIEW").font(GroveStyle.caption).foregroundStyle(.tertiary)
+                .padding(.leading, 8).listRowBackground(Color.clear)
+            overviewRow("Daily", symbol: "book.closed", page: .daily)
+            overviewRow("Workspace", symbol: "tray", page: .workspace)
+
             Text("仓库")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.tertiary)
@@ -59,6 +64,17 @@ struct SidebarView: View {
         .font(GroveStyle.body)
         .environment(\.defaultMinListRowHeight, 22)
         .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 6))
+    }
+
+    private func overviewRow(_ title: String, symbol: String, page: AppNavigationState.Page) -> some View {
+        Button { model.navigation.show(page) } label: {
+            Label(title, systemImage: symbol)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 8).frame(height: SidebarMetrics.rowHeight)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(sidebarSelectionBackground(model.navigation.page == page))
     }
 }
 
@@ -129,7 +145,7 @@ private struct ProjectSection: View {
             // 仓库行 = 主页入口 + 工作树的折叠开关（三角长在仓库行上，
             // Finder/Xcode 的形态）。主页入口指向本地副本（PR / CI 只在本地可用）。
             let homeSelection = AppModel.Selection.repositoryHome(repository: home.id)
-            let homeIsSelected = model.selection == homeSelection
+            let homeIsSelected = model.navigation.page == .repositories && model.selection == homeSelection
             let worktreeCount = project.mergedWorktrees.count
 
             HStack(spacing: 6) {
@@ -187,7 +203,7 @@ private struct ProjectSection: View {
                         repository: repository.id,
                         worktree: worktree.path
                     )
-                    let isSelected = model.selection == selection
+                    let isSelected = model.navigation.page == .repositories && model.selection == selection
 
                     Button {
                         model.selection = selection

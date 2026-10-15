@@ -182,7 +182,7 @@ extension GitLabMergeRequest {
             deletions: 0,
             changedFiles: changesCount?.value ?? 0,
             reviewDecision: Self.reviewDecision(approvals: approvals, detailedStatus: detailedMergeStatus),
-            mergeable: Self.mergeable(status: mergeStatus, hasConflicts: hasConflicts),
+            mergeable: Self.mergeable(status: mergeStatus, hasConflicts: hasConflicts, detailedStatus: detailedMergeStatus),
             isCrossRepository: isCrossProject,
             labels: (labels ?? []).map {
                 PullRequest.Label(name: $0.name, color: $0.color ?? "")
@@ -192,7 +192,8 @@ extension GitLabMergeRequest {
             headRepositoryOwner: nil,
             viewerHasApproved: approvals?.userHasApproved ?? false,
             createdAt: createdAt,
-            forge: .gitlab
+            forge: .gitlab,
+            reviewRequests: reviewers?.map { PullRequest.ReviewerRequest(login: $0.username) }
         )
     }
 
@@ -205,11 +206,12 @@ extension GitLabMergeRequest {
         }
     }
 
-    static func mergeable(status: String?, hasConflicts: Bool?) -> String? {
-        if hasConflicts == true { return "CONFLICTING" }
+    static func mergeable(status: String?, hasConflicts: Bool?, detailedStatus: String? = nil) -> String? {
+        if hasConflicts == true || detailedStatus?.lowercased() == "conflict" { return "CONFLICTING" }
         switch status?.lowercased() {
         case "can_be_merged": return "MERGEABLE"
-        case "cannot_be_merged": return "CONFLICTING"
+        // 不可合并还可能是审批或 CI 阻塞，不能当作 Git 冲突。
+        case "cannot_be_merged": return "UNKNOWN"
         case "checking", "unchecked": return "UNKNOWN"
         default: return nil
         }

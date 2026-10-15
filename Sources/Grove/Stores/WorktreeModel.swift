@@ -1356,6 +1356,7 @@ final class WorktreeModel: Identifiable {
     /// 所以这里连原因一起给出来，视图把按钮留在原位、禁用掉、把原因放进提示。
     var pullRequestAction: PullRequestAction {
         if let linkedPullRequest { return .view(linkedPullRequest) }
+        if let request = repository?.sidebarPullRequest(forBranch: worktree.branch), request.isActive { return .view(request) }
 
         guard let repository else { return .unavailable("仓库信息还没加载完。") }
         let term = repository.reviewTerm

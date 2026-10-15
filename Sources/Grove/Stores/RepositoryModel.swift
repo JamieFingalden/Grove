@@ -29,7 +29,7 @@ final class RepositoryModel: Identifiable {
     /// 不随列表视图的状态筛选变化 —— 否则翻历史时角标会突然消失。
     var pullRequests: [PullRequest] = []
     // ponytail: 每次最多读取 1000 个开放请求；达到上限显示「1000+」，更大规模可改查平台总数。
-    static let openPullRequestLimit = 1000
+    nonisolated static let openPullRequestLimit = 1000
     private(set) var hasLoadedOpenPullRequests = false
     var openPullRequestCountLabel: String? {
         guard hasLoadedOpenPullRequests else { return nil }
@@ -80,7 +80,7 @@ final class RepositoryModel: Identifiable {
     }
     /// PR 列表视图选中的状态筛选。
     var listState: PullRequestListState = .open
-    /// `owner/repo`。nil 表示不是 GitHub 仓库（或者 `gh` 不可用）。
+    /// origin 中的项目路径；GitLab 保留完整的嵌套群组路径。
     var slug: String?
     /// 解析过的 `origin` 地址。判断托管商只看它，不看别的 remote。
     var origin: GitRemote?
@@ -233,24 +233,24 @@ final class RepositoryModel: Identifiable {
         }
     }
 
-    /// 只补托管商归属和仓库标识，不重复扫描工作树、分支和未提交文件。
-    /// 启动和「重新检测」都走这里，网络慢时不会连本地 Git 一起重跑。
-    func refreshForgeMetadata() async {
+    /// 本地即可确定托管商和项目路径，不把网络查询作为评审入口的前置条件。
+    func resolveForgeMetadata() {
         let previousKind = forge?.kind
-        // 远程仓库不接 forge（CLI 的项目上下文要在本机仓库目录里跑 git 解析），
-        // 这里不设的话 PR 列表的守卫会误放行，跑出一片连接错误。
-        forge = isRemote ? nil : app?.forge(for: origin)
-        if previousKind != forge?.kind {
-            clearForgeState()
+        if isRemote {
+            forge = nil
+        } else if let app {
+            forge = app.forge(for: origin)
         }
-        guard let forge else { return }
-        if slug == nil {
-            let expectedOrigin = origin
-            let resolvedSlug = await forge.repositorySlug(in: root)
-            guard origin == expectedOrigin, self.forge?.kind == forge.kind else { return }
-            slug = resolvedSlug
-        }
-        if slug != nil { await refreshPullRequests() }
+        if previousKind != forge?.kind { clearForgeState() }
+        guard let forge, let origin, slug == nil, origin.path.split(separator: "/").count >= 2 else { return }
+        slug = forge.kind == .gitlab ? origin.path : origin.slug
+    }
+
+    /// 本地元数据先就绪，PR 列表再异步加载；网络失败由列表状态独立表达。
+    func refreshForgeMetadata() async {
+        resolveForgeMetadata()
+        guard forge != nil, slug != nil else { return }
+        await refreshPullRequests()
     }
 
     private func clearForgeState() {
@@ -813,7 +813,7 @@ final class RepositoryModel: Identifiable {
         }
         guard hasRemote else { return "这个仓库没有配置远端。" }
         guard origin != nil else { return "无法识别 origin 的地址。" }
-        guard forge != nil else { return app?.forgeSetup(for: origin)?.summary }
+        guard forge != nil else { return app?.forgeSetup(for: origin)?.summary ?? "代码托管平台还未就绪，请检查 GitHub / GitLab CLI。" }
         if let forge, let message = app?.availability(of: forge.kind).message { return message }
         if slug == nil, let forge { return "\(forge.kind.termLong)：无法识别这个仓库。" }
         return nil
