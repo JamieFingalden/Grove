@@ -216,6 +216,69 @@ final class OverviewTests: XCTestCase {
         XCTAssertEqual(AppNavigationState(defaults: defaults).page, .repositories)
     }
 
+    func testRestorationDoesNotOverrideExplicitNavigationOrRepositorySelection() throws {
+        let suite = "grove.restore.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let navigation = AppNavigationState(defaults: defaults)
+        let app = AppModel(aiGenerationSettings: AIGenerationSettings(defaults: defaults), navigation: navigation)
+        let root = URL(fileURLWithPath: "/tmp/grove-restore")
+        let repository = RepositoryModel(root: root,
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: nil)
+        repository.worktrees = [.init(path: root, head: nil, branch: "main", isBare: false,
+                                     isDetached: false, lockReason: nil, prunableReason: nil)]
+        app.repositories = [repository]
+        app.selectDefaultWorktree(in: repository, restoring: true)
+        XCTAssertEqual(app.selection, .worktree(repository: repository.id, worktree: root))
+        XCTAssertFalse(navigation.hasUserNavigated, "自动恢复不能算作用户导航")
+        for page in [AppNavigationState.Page.daily, .workspace] {
+            app.selection = nil
+            navigation.show(page)
+            app.selectDefaultWorktree(in: repository, restoring: true)
+            XCTAssertEqual(navigation.page, page)
+            XCTAssertNil(app.selection, "用户已导航后，延迟恢复不能再设置默认工作树")
+        }
+        app.selection = .repositoryHome(repository: repository.id)
+        app.selectDefaultWorktree(in: repository, restoring: true)
+        XCTAssertEqual(app.selection, .repositoryHome(repository: repository.id))
+        navigation.show(.daily)
+        app.selectDefaultWorktree(in: repository)
+        XCTAssertEqual(navigation.page, .repositories, "主动打开仓库仍应正常导航")
+        XCTAssertEqual(app.selection, .worktree(repository: repository.id, worktree: root))
+    }
+
+    func testWorkspaceRoutesHistoricalRequestsWithoutChangingFilteredLists() async throws {
+        let suite = "grove.routing.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let app = AppModel(aiGenerationSettings: AIGenerationSettings(defaults: defaults),
+                           navigation: AppNavigationState(defaults: defaults))
+        let repository = RepositoryModel(root: URL(fileURLWithPath: "/tmp/grove-routing"),
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: nil,
+            forge: GitHubClient(executable: URL(fileURLWithPath: "/unused/gh"), environment: [:]))
+        let origin = try XCTUnwrap(GitRemote.parse("https://github.com/team/Grove.git"))
+        repository.origin = origin
+        app.repositories = [repository]
+        let open = request()
+        repository.listPullRequests = [open]
+        repository.pullRequests = [open]
+        for state in ["CLOSED", "MERGED"] {
+            var historical = open
+            historical.number = 42
+            historical.state = state
+            let target = WorkspaceItem.request(historical, viewer: "me",
+                project: WorkspaceItem.projectIdentity(provider: .github, origin: origin),
+                repository: repository.id.identityKey, name: repository.name)
+            await app.openWorkspaceItem(target)
+            XCTAssertEqual(app.navigation.route?.pullRequest, historical)
+            XCTAssertTrue(app.navigation.route?.matches(repository) == true)
+            XCTAssertEqual(app.selection, .repositoryHome(repository: repository.id))
+            XCTAssertEqual(repository.listState, .open)
+            XCTAssertEqual(repository.listPullRequests, [open], "历史请求只能通过路由进入详情")
+            XCTAssertEqual(repository.pullRequests, [open], "侧栏开放请求缓存也不能被污染")
+        }
+    }
+
     func testMixedProvidersDeduplicateAndIsolateFailuresWithCache() async throws {
         let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)

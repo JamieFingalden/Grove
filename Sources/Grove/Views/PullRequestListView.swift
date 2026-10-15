@@ -514,8 +514,9 @@ struct MiniBadge: View {
 
 // MARK: - PR 详情
 
-private struct PullRequestDetailView: View {
+struct PullRequestDetailView: View {
     @Environment(AppModel.self) private var appModel
+    @Environment(\.repositoryPageActive) private var pageActive
     let repository: RepositoryModel
     let pullRequest: PullRequest
     let existingWorktree: Worktree?
@@ -530,6 +531,7 @@ private struct PullRequestDetailView: View {
     @State private var detailed: PullRequest?
     @State private var detailLoadError: String?
     @State private var isLoadingDetail = false
+    @State private var hasLoadedDetail = false
     @State private var threads: [ReviewThread] = []
     @State private var diffFiles: [FileDiff] = []
     @State private var selectedDiffFileID: String?
@@ -601,16 +603,19 @@ private struct PullRequestDetailView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .task {
-            aiReviewInstructions = appModel.aiReviewInstructions(for: repository.root)
-            aiReviewAreas = appModel.aiReviewAreas(for: repository.root)
-            restoreCachedAIReview()
-            await loadDetail()
-        }
-        .onChange(of: appModel.aiReviewResultsRevision) { _, _ in
-            // 审查任务会自行读取最新 diff，不能用详情页保留的旧 diff 判断新结果过期。
-            Task {
+        .task(id: pageActive ? appModel.aiReviewResultsRevision : nil) {
+            guard pageActive else { return }
+            if !hasLoadedDetail {
+                aiReviewInstructions = appModel.aiReviewInstructions(for: repository.root)
+                aiReviewAreas = appModel.aiReviewAreas(for: repository.root)
+                restoreCachedAIReview()
+                await loadDetail()
+                guard !Task.isCancelled else { return }
+                hasLoadedDetail = true
+            } else {
+                // 隐藏时取消刷新；回到详情后再同步最新 diff 与审查结果。
                 await reloadDiff()
+                guard !Task.isCancelled else { return }
                 await reloadThreads()
             }
         }
@@ -1090,7 +1095,10 @@ private struct PullRequestDetailView: View {
             guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
             threads = loaded
             threadsError = nil
-        } catch { threadsError = "讨论加载失败，请重试。" }
+        } catch {
+            guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
+            threadsError = "讨论加载失败，请重试。"
+        }
     }
 
     private func loadReviewDiff(using forge: any ForgeClient) async throws -> (files: [FileDiff], head: String) {

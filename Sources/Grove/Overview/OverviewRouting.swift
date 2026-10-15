@@ -31,12 +31,6 @@ extension AppModel {
                 return
             }
         }
-        if let pr = item.pullRequest {
-            // 历史请求也能进入现有详情；不更改已有列表的筛选偏好。
-            if !repository.listPullRequests.contains(where: { $0.number == pr.number }) {
-                repository.listPullRequests.append(pr)
-            }
-        }
         navigation.route = .init(repository: repository.id, projectKey: item.projectKey, pullRequest: item.pullRequest, pipeline: item.pipeline)
         selection = .repositoryHome(repository: repository.id)
     }

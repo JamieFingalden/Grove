@@ -981,9 +981,10 @@ final class AppModel {
         }
     }
 
-    private func selectDefaultWorktree(in repository: RepositoryModel, restoring: Bool = false) {
+    func selectDefaultWorktree(in repository: RepositoryModel, restoring: Bool = false) {
+        guard !restoring || !navigation.hasUserNavigated else { return }
         guard let worktree = repository.worktrees.first else { return }
-        if restoring && !navigation.hasUserNavigated {
+        if restoring {
             navigation.withRestoration { selection = .worktree(repository: repository.id, worktree: worktree.path) }
         } else {
             selection = .worktree(repository: repository.id, worktree: worktree.path)

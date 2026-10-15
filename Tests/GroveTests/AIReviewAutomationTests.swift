@@ -1,8 +1,65 @@
+import AppKit
+import SwiftUI
 import XCTest
 @testable import Grove
 
 @MainActor
 final class AIReviewAutomationTests: XCTestCase {
+    func testRetainedInactiveDetailDefersAIRefreshUntilVisibleAgain() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        try FileManager.default.moveItem(at: fixture.directory.appendingPathComponent("gh"),
+                                        to: fixture.directory.appendingPathComponent("gh-original"))
+        try fixture.write("calls", "")
+        try fixture.write("gh", #"""
+        #!/bin/sh
+        printf '%s %s\n' "$1" "$2" >> "$GROVE_TEST_ROOT/calls"
+        exec "$GROVE_TEST_ROOT/gh-original" "$@"
+        """#)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.directory.appendingPathComponent("gh").path)
+        let model = fixture.model { _ in XCTFail("页面同步不能触发 AI 生成"); return Self.review }
+        let repository = try XCTUnwrap(model.repositories.first)
+        let forge = try XCTUnwrap(repository.forge)
+        let request = try await forge.pullRequest(number: 42, in: fixture.directory)
+        func content(active: Bool) -> some View {
+            PullRequestDetailView(repository: repository, pullRequest: request, existingWorktree: nil, onMerge: {})
+                .environment(model).environment(\.repositoryPageActive, active)
+                .retainedPage(active).frame(width: 900, height: 700)
+        }
+        func calls() throws -> [Substring] {
+            try String(contentsOf: fixture.directory.appendingPathComponent("calls"), encoding: .utf8).split(separator: "\n")
+        }
+        let hosting = NSHostingView(rootView: content(active: true))
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 900, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = hosting
+        defer { window.orderOut(nil); window.contentView = nil }
+        window.makeKeyAndOrderFront(nil)
+        func waitForDiffCount(_ expected: Int) async throws {
+            for _ in 0..<100 {
+                hosting.layoutSubtreeIfNeeded()
+                if try calls().filter({ $0 == "pr diff" }).count >= expected { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            try await Task.sleep(for: .milliseconds(100))
+            XCTAssertEqual(try calls().filter { $0 == "pr diff" }.count, expected)
+        }
+        try await waitForDiffCount(1)
+        hosting.rootView = content(active: false)
+        try await Task.sleep(for: .milliseconds(100))
+        let initialCalls = try calls()
+        model.saveAIReview(Self.review, diffFingerprint: "latest", for: fixture.directory, pullRequestNumber: 42)
+        try await Task.sleep(for: .milliseconds(100))
+        model.removeCachedAIReview(for: fixture.directory, pullRequestNumber: 42)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(try calls(), initialCalls, "隐藏详情不能因全局审查修订发出平台请求")
+        hosting.rootView = content(active: true)
+        try await waitForDiffCount(2)
+        model.saveAIReview(Self.review, diffFingerprint: "latest", for: fixture.directory, pullRequestNumber: 42)
+        try await waitForDiffCount(3)
+        XCTAssertEqual(try fixture.publicationTargets(), [])
+    }
+
     func testTemporaryNetworkFailureRetriesAndNotifiesOnlyAfterRepeatedFailure() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
