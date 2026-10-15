@@ -453,6 +453,27 @@ struct FailureBanner: View {
 /// 保持视图身份与布局，切页时保留局部状态和滚动位置。
 extension View {
     func retainedPage(_ active: Bool) -> some View {
-        opacity(active ? 1 : 0).allowsHitTesting(active).accessibilityHidden(!active).zIndex(active ? 1 : 0)
+        modifier(RetainedPageModifier(active: active))
+    }
+}
+
+private struct RetainedPageModifier: ViewModifier {
+    let active: Bool
+    @Namespace private var focusScope
+    @Environment(\.resetFocus) private var resetFocus
+    @Environment(\.isEnabled) private var parentEnabled
+
+    func body(content: Content) -> some View {
+        // 隐藏页面仍会注册快捷键；必须禁用操作，并仅释放本页的输入焦点。
+        content
+            .focusScope(focusScope)
+            .opacity(active ? 1 : 0)
+            .allowsHitTesting(active)
+            .disabled(!active)
+            .accessibilityHidden(!active)
+            .zIndex(active ? 1 : 0)
+            .onChange(of: active) { _, active in
+                if !active && parentEnabled { resetFocus(in: focusScope) }
+            }
     }
 }
