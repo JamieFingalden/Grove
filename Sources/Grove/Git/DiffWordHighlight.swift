@@ -10,6 +10,19 @@ import Foundation
 /// 前缀天然落在两行第一个不同的字符上，所以切分点自动是合理的词边界。
 /// 没配上对的行（纯删或纯增）整行都是变化。
 enum DiffWordHighlight {
+    /// 非隔离异步计算离开主线程，取消时按 hunk 停止，不影响逐行暂存使用的原始 diff。
+    nonisolated static func ranges(for files: [FileDiff]) async throws -> [Int: [Range<String.Index>]] {
+        var result: [Int: [Range<String.Index>]] = [:]
+        for file in files {
+            for hunk in file.hunks {
+                try Task.checkCancellation()
+                result.merge(ranges(for: hunk.lines)) { current, _ in current }
+            }
+        }
+        try Task.checkCancellation()
+        return result
+    }
+
     /// 返回按行 id 索引的变化区间列表。上下文行和元信息行不会出现。
     static func ranges(for lines: [DiffLine]) -> [Int: [Range<String.Index>]] {
         var result: [Int: [Range<String.Index>]] = [:]
@@ -61,8 +74,8 @@ enum DiffWordHighlight {
         if old == new { return (nil, nil) }
 
         var prefix = 0
-        var oldChars = Array(old)
-        var newChars = Array(new)
+        let oldChars = Array(old)
+        let newChars = Array(new)
         while prefix < oldChars.count, prefix < newChars.count,
               oldChars[prefix] == newChars[prefix] {
             prefix += 1

@@ -220,6 +220,7 @@ final class AppModel {
     @ObservationIgnored private var aiReviewTasks: [AIReviewJobKey: Task<Void, Never>] = [:]
 
     @ObservationIgnored private var automaticAIReviewTask: Task<Void, Never>?
+    @ObservationIgnored private var isPollingAutomaticAIReviews = false
     @ObservationIgnored private var automaticAIReviewRetryAfter: [String: Date] = [:]
     @ObservationIgnored private var automaticAIReviewNetworkFailures: [String: Int] = [:]
     @ObservationIgnored private var cancelledAutomaticHeads: [String: String] = [:]
@@ -504,7 +505,9 @@ final class AppModel {
     }
 
     func pollAutomaticAIReviews(now: Date = Date()) async {
-        guard canUseAIGeneration, let service = aiReviewService else { return }
+        guard !isPollingAutomaticAIReviews, canUseAIGeneration, let service = aiReviewService else { return }
+        isPollingAutomaticAIReviews = true
+        defer { isPollingAutomaticAIReviews = false }
         for repository in repositories where !repository.isRemote && automaticAIReviewEnabled(for: repository.root) {
             guard !Task.isCancelled else { return }
             guard let forge = repository.forge else { continue }
@@ -531,7 +534,12 @@ final class AppModel {
                     guard !Task.isCancelled, canUseAIGeneration, automaticAIReviewEnabled(for: repository.root),
                           repository.origin == expectedOrigin else { break }
                     step = "PR #\(request.number) · 读取最新提交 · \(request.url)"
-                    let head = try await forge.reviewHead(number: request.number, in: repository.root)
+                    let head: String
+                    if let listedHead = request.headRefOid, !listedHead.isEmpty {
+                        head = listedHead
+                    } else {
+                        head = try await forge.reviewHead(number: request.number, in: repository.root)
+                    }
                     guard !Task.isCancelled, repository.origin == expectedOrigin else { break }
                     guard !head.isEmpty else { continue }
                     let key = AIReviewJobKey(repository: repository.root, pullRequestNumber: request.number)
@@ -901,11 +909,11 @@ final class AppModel {
         await withTaskGroup(of: Void.self) { group in
             var iterator = locals.filter { $0.forge != nil && $0.slug != nil }.makeIterator()
             for _ in 0..<3 {
-                if let repository = iterator.next() { group.addTask { await repository.refreshPullRequests() } }
+                if let repository = iterator.next() { group.addTask { await repository.refreshPullRequests(ifNeeded: true) } }
             }
             while await group.next() != nil {
                 guard !Task.isCancelled else { group.cancelAll(); return }
-                if let repository = iterator.next() { group.addTask { await repository.refreshPullRequests() } }
+                if let repository = iterator.next() { group.addTask { await repository.refreshPullRequests(ifNeeded: true) } }
             }
         }
     }
@@ -994,9 +1002,13 @@ final class AppModel {
     // MARK: - 远程服务器
 
     /// 远程仓库的 git 客户端。ssh 还没定位好（理论上不会）返回 nil。
-    func remoteGitClient(for server: RemoteServer) -> GitClient? {
+    /// 构造时以 `root` 为探查目录，把远端缺失的 user.name/user.email 用本机的
+    /// 补上 —— 服务器常常没配身份，直接提交会报 "Committer identity unknown"。
+    func remoteGitClient(for server: RemoteServer, probingRepoAt root: URL) async -> GitClient? {
         guard let sshExecutable else { return nil }
-        return GitClient.remote(server, sshExecutable: sshExecutable)
+        return await GitClient.remote(
+            server, sshExecutable: sshExecutable, identityFallbackFrom: git, probingRepoAt: root
+        )
     }
 
     /// 侧边栏「测试连接」用：不经过 AppModel 状态，直接起一个通道探测。
@@ -1048,7 +1060,7 @@ final class AppModel {
     /// 添加远程项目。路径先用远端 git 归一化成仓库根目录，失败返回 nil 并报错。
     @discardableResult
     func addRemoteProject(_ path: String, on server: RemoteServer) async -> RepositoryModel? {
-        guard let git = remoteGitClient(for: server), let transport = remoteTransport(for: server) else {
+        guard let transport = remoteTransport(for: server) else {
             report(title: "连接 \(server.displayName) 失败", error: GroveError.sshNotFound,
                    context: "\(server.displayName) · \(server.destination) · \(path)")
             return nil
@@ -1061,6 +1073,9 @@ final class AppModel {
                    context: "\(server.displayName) · \(server.destination) · \(entered)")
             return nil
         }
+        // 连接确认可用之后再补身份 —— 那本身是一次 SSH 往返，不该让连不上的
+        // 服务器先多等一轮超时。
+        guard let git = await remoteGitClient(for: server, probingRepoAt: root) else { return nil }
         guard remoteServers.contains(server) else { return nil }
 
         var paths = registeredRemoteProjects[server.id.uuidString] ?? []
@@ -1115,16 +1130,18 @@ final class AppModel {
         remoteRepositories.removeAll()
 
         for server in remoteServers {
-            guard let git = remoteGitClient(for: server) else { continue }
             // 先探一次连接：服务器不在线时一次探测就完事，
-            // 不用每个项目都各等一次连接超时。
-            guard let transport = git.transport as? SSHTransport,
+            // 不用每个项目都各等一次连接超时。身份补齐也放在连接确认之后 ——
+            // 它本身是一次 SSH 往返。
+            guard let transport = remoteTransport(for: server),
                   (try? await transport.probe()) != nil,
                   remoteServers.contains(server) else {
                 continue
             }
             // 同一服务器下同路径只留第一份 —— 存储可能已经被写坏过；
             // 用户也可能在恢复的 SSH 往返间隙已经把同一个项目加进来了。
+            // 身份补齐跟着仓库走（探查以仓库根目录为工作目录，仓库级配置才
+            // 看得见），所以放在拿到 root 之后逐仓库构造。
             var seenPaths = Set<String>()
             for path in stored[server.id.uuidString] ?? [] {
                 guard seenPaths.insert(path).inserted else { continue }
@@ -1138,6 +1155,7 @@ final class AppModel {
                 guard !remoteRepositories.contains(where: {
                     $0.server?.id == server.id && $0.root.path == root.path
                 }) else { continue }
+                guard let git = await remoteGitClient(for: server, probingRepoAt: root) else { continue }
                 let repository = RepositoryModel(root: root, git: git, app: self, server: server)
                 remoteRepositories.append(repository)
             }

@@ -8,7 +8,7 @@ private actor HistoryDiffTransport: CommandTransport {
 
     func runGit(_ arguments: [String], worktreePath: String, timeout: Double,
                 standardInput: Data?) async throws -> CommandResult {
-        let oid = arguments.last!
+        let oid = arguments.first(where: { $0.hasPrefix("--grep=") }).map { String($0.dropFirst(7)) } ?? arguments.last!
         return await withCheckedContinuation { pending[oid] = $0 }
     }
 
@@ -31,6 +31,14 @@ private actor HistoryDiffTransport: CommandTransport {
         ))
     }
 
+    func finishHistory(_ oid: String) {
+        let text = [oid, "", "测试", "test@example.com", "2026-10-15T00:00:00Z", "提交 \(oid)", "", ""]
+            .joined(separator: "\u{1F}") + "\u{1E}"
+        pending.removeValue(forKey: oid)!.resume(returning: CommandResult(
+            exitCode: 0, standardOutput: Data(text.utf8), standardError: Data()
+        ))
+    }
+
     func fileExists(atPath path: String) async -> Bool { false }
     func directoryExists(atPath path: String) async -> Bool { false }
     func readData(atPath path: String) async -> Data? { nil }
@@ -41,6 +49,35 @@ private actor HistoryDiffTransport: CommandTransport {
 
 @MainActor
 final class HistorySelectionTests: XCTestCase {
+    func testOlderHistoryAndCancelledRefreshKeepLatestFilterAndGraph() async throws {
+        let transport = HistoryDiffTransport()
+        let model = model(transport)
+        model.logQuery.text = "A"
+        let first = Task { await model.reloadHistory() }
+        try await waitUntil { await transport.hasRequest("A") }
+        model.logQuery.text = "B"
+        let second = Task { await model.reloadHistory() }
+        try await waitUntil { await transport.hasRequest("B") }
+        await transport.finishHistory("B")
+        await second.value
+        model.graphFocus = "B"
+        await transport.finishHistory("A")
+        await first.value
+        XCTAssertEqual(model.commits.map(\.oid), ["B"], "旧筛选结果不能覆盖新筛选")
+        XCTAssertEqual(model.graphFocus, "B")
+        XCTAssertFalse(model.isLoadingHistory)
+
+        model.logQuery.text = "C"
+        let cancelled = Task { await model.reloadHistory() }
+        try await waitUntil { await transport.hasRequest("C") }
+        cancelled.cancel()
+        await transport.finishHistory("C")
+        await cancelled.value
+        XCTAssertEqual(model.commits.map(\.oid), ["B"], "取消时必须保留已有历史")
+        XCTAssertEqual(model.graphFocus, "B")
+        XCTAssertFalse(model.isLoadingHistory)
+    }
+
     private func model(_ transport: HistoryDiffTransport) -> WorktreeModel {
         WorktreeModel(
             worktree: Worktree(path: URL(fileURLWithPath: "/tmp/grove-history"), head: "B",

@@ -61,7 +61,7 @@ final class RepositoryModel: Identifiable {
     private func applyDetailState() {
         guard !detailKnownState.isEmpty else { return }
         for index in listPullRequests.indices {
-            guard let detail = detailKnownState[listPullRequests[index].number] else { continue }
+            guard let detail = knownDetail(for: listPullRequests[index]) else { continue }
             listPullRequests[index].reviewDecision = detail.reviewDecision
             listPullRequests[index].viewerHasApproved = detail.viewerHasApproved
             if let mergeable = detail.mergeable {
@@ -70,13 +70,20 @@ final class RepositoryModel: Identifiable {
         }
         // 开放列表是列表行之外的另一份缓存（角标、工作树关联用），同步一份。
         for index in pullRequests.indices {
-            guard let detail = detailKnownState[pullRequests[index].number] else { continue }
+            guard let detail = knownDetail(for: pullRequests[index]) else { continue }
             pullRequests[index].reviewDecision = detail.reviewDecision
             pullRequests[index].viewerHasApproved = detail.viewerHasApproved
             if let mergeable = detail.mergeable {
                 pullRequests[index].mergeable = mergeable
             }
         }
+    }
+    private func knownDetail(for request: PullRequest) -> PullRequest? {
+        guard let detail = detailKnownState[request.number], detail.updatedAt >= request.updatedAt,
+              detail.state == request.state else { return nil }
+        // 新推送可能撤销审批，旧提交的详情不能覆盖新列表的审批和冲突状态。
+        if let head = request.headRefOid, let detailHead = detail.headRefOid, head != detailHead { return nil }
+        return detail
     }
     /// PR 列表视图选中的状态筛选。
     var listState: PullRequestListState = .open
@@ -95,6 +102,12 @@ final class RepositoryModel: Identifiable {
     private(set) var hasLoadedPullRequests = false
     private(set) var pullRequestLoadError: String?
     @ObservationIgnored private var pullRequestRefreshID = UUID()
+    @ObservationIgnored private var pullRequestLoad: (
+        origin: GitRemote?, state: PullRequestListState, task: Task<Void, Never>
+    )?
+    @ObservationIgnored private var lastPullRequestLoad: (
+        origin: GitRemote?, state: PullRequestListState, date: Date
+    )?
     /// 正在进行的长操作描述（"正在拉取…"）。nil 表示空闲。
     var activity: String?
     var aiCommitEnabled: Bool { app?.isAIGenerationEnabled == true }
@@ -143,21 +156,27 @@ final class RepositoryModel: Identifiable {
     /// 远程仓库连续读取失败的标记：网络一抖动，侧边栏的周期刷新会连环失败，
     /// 每次都弹横幅等于轰炸。失败只报一次，恢复成功后重置。
     @ObservationIgnored private var didReportReadFailure = false
+    @ObservationIgnored private var repositoryRefreshID = UUID()
 
     func refresh(loadForgeMetadata: Bool = true) async {
+        guard !Task.isCancelled else { return }
+        let requestID = UUID()
+        repositoryRefreshID = requestID
         isRefreshing = true
-        defer { isRefreshing = false }
+        defer { if repositoryRefreshID == requestID { isRefreshing = false } }
 
         do {
             async let loadedWorktrees = git.worktrees(in: root)
             async let loadedBranches = git.branches(in: root)
             async let loadedRemoteBranches = git.remoteBranches(in: root)
             let loaded = try await (loadedWorktrees, loadedBranches, loadedRemoteBranches)
+            guard !Task.isCancelled, repositoryRefreshID == requestID else { return }
             worktrees = loaded.0
             branches = loaded.1
             remoteBranches = loaded.2
             didReportReadFailure = false
         } catch {
+            guard !Task.isCancelled, repositoryRefreshID == requestID else { return }
             if isRemote {
                 // 远程仓库连不上不算异常事件（笔记本合盖、切换网络），
                 // 报一次就够；恢复后还能再报。
@@ -177,6 +196,7 @@ final class RepositoryModel: Identifiable {
         let (resolvedRemotes, originURL, resolvedDefaultBranch) = await (
             loadedRemotes, loadedOriginURL, loadedDefaultBranch
         )
+        guard !Task.isCancelled, repositoryRefreshID == requestID else { return }
         remotes = resolvedRemotes ?? []
         hasOrigin = originURL != nil
         hasRemote = !remotes.isEmpty
@@ -210,27 +230,30 @@ final class RepositoryModel: Identifiable {
             }
         }
 
-        // 只有 origin 确实指向 GitHub 才去问 gh 要仓库名。
-        //
-        // 不能直接信 `gh repo view`：它会扫一遍所有 remote 挑任意一个 GitHub 的用。
-        // 一个 origin 在内网 GitLab、另外挂了个 GitHub remote 做备份的仓库，
-        // 会被它认成那个备份仓库，于是界面上显示的是**另一个仓库**的 PR ——
-        // 而且「检出 PR」会拿着 GitHub 的分支名去 GitLab 上 fetch。
-        if loadForgeMetadata { await refreshForgeMetadata() }
+        // 托管商仍只按 origin 解析；网络加载与本地状态并行，避免远端慢拖住本地页面。
+        resolveForgeMetadata()
+        async let forgeRefresh: Void = loadForgeMetadata ? refreshForgeMetadata() : ()
 
         // 并发刷新所有工作树的状态。侧边栏上「哪个工作树有未提交的改动、
         // 领先/落后远端多少」是挑工作树时最主要的依据，不能等点进去才显示。
         // 只刷状态，不刷历史和 PR —— 那两样只有当前正在看的那个才需要。
+        let selected = app?.selectedWorktreeModel
         await withTaskGroup(of: Void.self) { group in
-            for model in worktreeModels.values {
-                group.addTask { await model.refreshStatus() }
+            // ponytail: 最多同时刷新四个工作树；更大规模可按位置配置并发数。
+            var iterator = worktreeModels.values.sorted { $0 === selected && $1 !== selected }.makeIterator()
+            func add(_ model: WorktreeModel) {
+                group.addTask {
+                    if model === selected { await model.refresh() }
+                    else { await model.refreshStatus() }
+                }
+            }
+            for _ in 0..<4 { if let model = iterator.next() { add(model) } }
+            while await group.next() != nil {
+                guard !Task.isCancelled, repositoryRefreshID == requestID else { group.cancelAll(); return }
+                if let model = iterator.next() { add(model) }
             }
         }
-
-        // 当前正在看的那个再做一次完整刷新（历史 + 关联的 PR）。
-        if let selected = app?.selectedWorktreeModel, selected.repository === self {
-            await selected.refresh()
-        }
+        await forgeRefresh
     }
 
     /// 本地即可确定托管商和项目路径，不把网络查询作为评审入口的前置条件。
@@ -254,6 +277,9 @@ final class RepositoryModel: Identifiable {
     }
 
     private func clearForgeState() {
+        pullRequestLoad?.task.cancel()
+        pullRequestLoad = nil
+        lastPullRequestLoad = nil
         pullRequestRefreshID = UUID()
         isRefreshingPullRequests = false
         hasLoadedPullRequests = false
@@ -271,51 +297,88 @@ final class RepositoryModel: Identifiable {
         pipelineWatchTask?.cancel()
     }
 
-    func refreshPullRequests() async {
+    func refreshPullRequests(ifNeeded: Bool = false) async {
+        guard !Task.isCancelled else { return }
         // 启动恢复是并发的：PR 列表可能出现时，托管商归属和 slug 还没解析完。
         // 这里自己补一次解析，保证打开 app 就能加载列表，不用手动点刷新。
-        if forge == nil || slug == nil {
-            await refreshForgeMetadata()
-            return
-        }
+        if forge == nil || slug == nil { resolveForgeMetadata() }
         guard let forge, slug != nil else { return }
+        if ifNeeded {
+            // 页面进入与启动恢复共享正在进行的请求，切走一个页面不取消其他调用方的加载。
+            if let load = pullRequestLoad, load.origin == origin, load.state == listState {
+                await load.task.value
+                return
+            }
+            if let last = lastPullRequestLoad, last.origin == origin, last.state == listState,
+               hasLoadedPullRequests, pullRequestLoadError == nil,
+               Date().timeIntervalSince(last.date) < 30 { return }
+        }
+        // 手动刷新和写操作后的刷新必须获取新数据，旧请求不能覆盖新结果。
+        pullRequestLoad?.task.cancel()
         let requestID = UUID()
         pullRequestRefreshID = requestID
         let requestedOrigin = origin
         let requestedState = listState
+        let task = Task {
+            await loadPullRequests(using: forge, origin: requestedOrigin, state: requestedState, requestID: requestID)
+        }
+        pullRequestLoad = (requestedOrigin, requestedState, task)
+        await task.value
+        if pullRequestRefreshID == requestID { pullRequestLoad = nil }
+    }
+
+    private func loadPullRequests(
+        using forge: any ForgeClient, origin requestedOrigin: GitRemote?,
+        state requestedState: PullRequestListState, requestID: UUID
+    ) async {
+        guard !Task.isCancelled else { return }
         isRefreshingPullRequests = true
         pullRequestLoadError = nil
         defer {
             if pullRequestRefreshID == requestID { isRefreshingPullRequests = false }
         }
-        do {
-            // 筛选到非开放状态时，开放列表（角标、工作树关联）和历史列表各取各的，
-            // 两个请求并发；留在「开放」时共享同一份数据，不多发请求。
-            let loadedOpen: [PullRequest]
-            let loadedList: [PullRequest]
-            if requestedState == .open {
-                loadedOpen = try await forge.pullRequests(in: root, limit: Self.openPullRequestLimit, state: .open)
-                loadedList = loadedOpen
-            } else {
-                async let open = try await forge.pullRequests(in: root, limit: Self.openPullRequestLimit, state: .open)
-                async let filtered = try await forge.pullRequests(in: root, limit: 50, state: requestedState)
-                (loadedOpen, loadedList) = try await (open, filtered)
+        var refreshedOpen = false
+        let states: [PullRequestListState] = requestedState == .open ? [.open] : [requestedState, .open]
+        let directory = root
+        await withTaskGroup(of: (PullRequestListState, Result<[PullRequest], Error>).self) { group in
+            for state in states {
+                group.addTask {
+                    do {
+                        return (state, .success(try await forge.pullRequests(
+                            in: directory, limit: state == .open ? Self.openPullRequestLimit : 50, state: state
+                        )))
+                    } catch { return (state, .failure(error)) }
+                }
             }
-            guard !Task.isCancelled, pullRequestRefreshID == requestID,
-                  origin == requestedOrigin, listState == requestedState else { return }
-            listPullRequests = loadedList
-            hasLoadedPullRequests = true
-            updateOpenPullRequests(loadedOpen, fromOrigin: requestedOrigin)
-        } catch is CancellationError {
-            // 切换页面取消加载时保留原数据，不把取消当作网络失败。
-            return
-        } catch {
-            guard !Task.isCancelled, pullRequestRefreshID == requestID,
-                  origin == requestedOrigin, listState == requestedState else { return }
-            pullRequestLoadError = error.localizedDescription
-            app?.report(title: "读取 PR 列表失败", error: error, repository: self)
+            // 历史列表与侧栏开放数量分别发布，任何一边慢或失败都不挡住另一边。
+            for await (state, result) in group {
+                guard !Task.isCancelled, pullRequestRefreshID == requestID,
+                      origin == requestedOrigin, listState == requestedState else { group.cancelAll(); return }
+                switch result {
+                case .success(let requests):
+                    if state == .open {
+                        updateOpenPullRequests(requests, fromOrigin: requestedOrigin)
+                        refreshedOpen = true
+                    }
+                    if state == requestedState {
+                        listPullRequests = requests
+                        hasLoadedPullRequests = true
+                        applyDetailState()
+                        lastPullRequestLoad = (requestedOrigin, requestedState, Date())
+                    }
+                case .failure(let error):
+                    if error is CancellationError { continue }
+                    if state == requestedState { pullRequestLoadError = error.localizedDescription }
+                    app?.report(title: "读取 PR 列表失败", error: error, repository: self)
+                }
+                if state == requestedState { isRefreshingPullRequests = false }
+            }
         }
-        await refreshWorktreePullRequests()
+        guard !Task.isCancelled, pullRequestRefreshID == requestID,
+              origin == requestedOrigin, listState == requestedState else { return }
+        // 列表已经成功或失败，侧栏历史关联的补查不再占用列表的加载状态。
+        isRefreshingPullRequests = false
+        await refreshWorktreePullRequests(reusingOpenRequests: refreshedOpen)
     }
 
     /// 后台监测与手动刷新共用列表状态，更新时仍保留详情接口的审批结果。
@@ -352,7 +415,7 @@ final class RepositoryModel: Identifiable {
         return pullRequest(forBranch: branch) ?? worktreePullRequests[branch]
     }
 
-    func refreshWorktreePullRequests() async {
+    func refreshWorktreePullRequests(reusingOpenRequests: Bool = false) async {
         guard let forge, slug != nil else { return }
         let requestID = UUID()
         worktreePullRequestRefreshID = requestID
@@ -362,7 +425,15 @@ final class RepositoryModel: Identifiable {
         let directory = root
         let requests = await withTaskGroup(of: (String, PullRequest?).self) { group in
             for branch in expectedBranches where branch != expectedDefaultBranch {
+                // 本轮刚取到的开放列表已包含关联，不再为这些工作树逐个联网查询。
+                let known: PullRequest?
+                if let number = PullRequestNaming.number(fromBranch: branch) {
+                    known = pullRequests.first { $0.number == number && $0.isActive }
+                } else {
+                    known = GitHubClient.mostRelevant(of: pullRequests.filter { $0.headRefName == branch && $0.isActive })
+                }
                 group.addTask {
+                    if reusingOpenRequests, let known { return (branch, known) }
                     let request = await forge.linkedPullRequest(
                         branch: branch, defaultBranch: expectedDefaultBranch,
                         in: directory, includeInactive: true
@@ -396,7 +467,6 @@ final class RepositoryModel: Identifiable {
             try await self.git.fetch(in: self.root)
         }
         await refresh()
-        await refreshPullRequests()
         await refreshPipelineStatuses()
     }
 

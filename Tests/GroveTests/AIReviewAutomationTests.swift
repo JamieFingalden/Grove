@@ -5,6 +5,31 @@ import XCTest
 
 @MainActor
 final class AIReviewAutomationTests: XCTestCase {
+    func testAutomaticPollingUsesListHeadWithoutPerRequestHeadQueries() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        let request = Fixture.request.replacingOccurrences(of: "\"number\":42", with: "\"headRefOid\":\"first\",\"number\":42")
+        try fixture.write("list", "[\(request)]")
+        // 已审查过的请求无需启动生成；任何额外平台请求都必须使检查失败。
+        try fixture.write("gh", #"""
+        #!/bin/sh
+        case "$1:$2" in
+          pr:list) cat "$GROVE_TEST_ROOT/list" ;;
+          *) printf '不应逐个查询提交\n' >&2; exit 1 ;;
+        esac
+        """#)
+        let settings = AIGenerationSettings(defaults: try XCTUnwrap(UserDefaults(suiteName: fixture.suite)))
+        settings.setAutomaticReviewHead("first", for: "https://example.invalid/pr/42")
+        let model = fixture.model { _ in XCTFail("已完成的审查不能重复生成"); return Self.review }
+        // 连续检查三轮，额外请求若失败会触发原有的连续失败通知。
+        let now = Date()
+        for offset in [0.0, 60.0, 120.0] {
+            await model.pollAutomaticAIReviews(now: now.addingTimeInterval(offset))
+        }
+        XCTAssertTrue(model.failures.isEmpty)
+        XCTAssertEqual(model.repositories.first?.pullRequests.first?.headRefOid, "first")
+    }
+
     func testRetainedInactiveDetailDefersAIRefreshUntilVisibleAgain() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
@@ -701,8 +726,8 @@ final class AIReviewAutomationTests: XCTestCase {
             case "$1:$2" in
               pr:list) cat "$GROVE_TEST_ROOT/list" ;;
               pr:view)
-                case "$*" in
-                  *headRefOid*) cat "$GROVE_TEST_ROOT/head" ;;
+                case "$5" in
+                  headRefOid) cat "$GROVE_TEST_ROOT/head" ;;
                   *) cat "$GROVE_TEST_ROOT/detail" ;;
                 esac ;;
               pr:diff) cat "$GROVE_TEST_ROOT/diff" ;;

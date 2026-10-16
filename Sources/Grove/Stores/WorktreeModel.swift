@@ -39,6 +39,10 @@ final class WorktreeModel: Identifiable {
     /// 这个仓库出现过的提交身份，填筛选下拉框用。
     var knownAuthors: [CommitAuthor] = []
     var isLoadingHistory = false
+    @ObservationIgnored private var historyRequestID = UUID()
+    @ObservationIgnored private var statusRequestID = UUID()
+    @ObservationIgnored private var changesRequestID = UUID()
+    @ObservationIgnored private var linkedRequestID = UUID()
     var linkedPullRequest: PullRequest?
 
     var isLoading = false
@@ -200,13 +204,19 @@ final class WorktreeModel: Identifiable {
     /// 而完整的 `refresh()` 还要拉历史、查 PR —— 一个仓库挂十几个工作树的话
     /// 那就是几十次 git 调用外加十几次网络请求。
     func refreshStatus() async {
+        guard !Task.isCancelled else { return }
+        let requestID = UUID()
+        statusRequestID = requestID
         do {
-            status = try await git.status(in: path)
+            let loaded = try await git.status(in: path)
+            guard !Task.isCancelled, statusRequestID == requestID else { return }
+            status = loaded
         } catch is CancellationError {
             // 刷新任务被取消（比如用户切走了）：留着上一次的状态，
             // 不能把一份好好的状态清成「干净」。
             return
         } catch {
+            guard !Task.isCancelled, statusRequestID == requestID else { return }
             // 侧边栏的角标读不出来不值得打断用户 —— 大概率是这个工作树的目录
             // 被手工删了，它本来就会被标成「可清理」。
             status = .empty
@@ -214,17 +224,29 @@ final class WorktreeModel: Identifiable {
     }
 
     func refresh() async {
+        guard !Task.isCancelled else { return }
+        // 本地变更、历史和远端关联互不依赖，分别完成后立即发布。
+        async let history: Void = reloadHistory()
+        async let linked: Void = refreshLinkedPullRequest()
+        async let authors = knownAuthors.isEmpty ? git.authors(in: path) : knownAuthors
+        await refreshChanges()
+        let loadedAuthors = await authors
+        if !Task.isCancelled { knownAuthors = loadedAuthors }
+        _ = await (history, linked)
+    }
+
+    /// 暂存、丢弃和解决冲突只改变工作区与索引，不需要重新拉取历史或 PR。
+    func refreshChanges() async {
+        guard !Task.isCancelled else { return }
+        let requestID = UUID()
+        changesRequestID = requestID
         isLoading = true
-        defer { isLoading = false }
+        defer { if changesRequestID == requestID { isLoading = false } }
 
         await refreshStatus()
+        guard !Task.isCancelled, changesRequestID == requestID else { return }
         await refreshConflictContext()
-
-        await reloadHistory()
-
-        if knownAuthors.isEmpty {
-            knownAuthors = await git.authors(in: path)
-        }
+        guard !Task.isCancelled, changesRequestID == requestID else { return }
 
         // 选中的文件可能已经不在变更列表里了（被暂存/丢弃/提交掉）。
         // 不清掉的话 diff 面板会一直显示一份过时内容。
@@ -247,21 +269,27 @@ final class WorktreeModel: Identifiable {
         } else {
             self.selectedPath = nil
         }
-
-        await refreshLinkedPullRequest()
     }
 
     /// 按当前筛选条件重新拉历史。
     func reloadHistory() async {
+        guard !Task.isCancelled else { return }
+        let requestID = UUID()
+        historyRequestID = requestID
+        let requestedBranch = historyBranch
+        let requestedQuery = logQuery
         isLoadingHistory = true
-        defer { isLoadingHistory = false }
+        defer { if historyRequestID == requestID { isLoadingHistory = false } }
         do {
-            commits = try await git.log(
+            let loaded = try await git.log(
                 in: path,
-                revision: historyBranch,
-                query: logQuery,
+                revision: requestedBranch,
+                query: requestedQuery,
                 remotes: repository?.remotes.map(\.name) ?? []
             )
+            guard !Task.isCancelled, historyRequestID == requestID,
+                  historyBranch == requestedBranch, logQuery == requestedQuery else { return }
+            commits = loaded
             graph = CommitGraphLayout.build(
                 commits,
                 context: .init(
@@ -270,10 +298,8 @@ final class WorktreeModel: Identifiable {
                 )
             )
         } catch {
-            graph = .empty
-            // 筛选条件本身不会让 git 报错（空结果就是空结果），
-            // 走到这儿基本是仓库还没有任何提交。
-            commits = []
+            // 取消或临时读失败不能把已有记录、选中提交和提交图清空。
+            return
         }
         // 筛完之后原来选中的提交可能已经不在列表里了。
         if let selectedCommit, !commits.contains(where: { $0.oid == selectedCommit }) {
@@ -340,6 +366,8 @@ final class WorktreeModel: Identifiable {
     }
 
     func refreshLinkedPullRequest() async {
+        let requestID = UUID()
+        linkedRequestID = requestID
         guard let forge = repository?.forge, let branch = worktree.branch, repository?.slug != nil else {
             linkedPullRequest = nil
             return
@@ -355,7 +383,7 @@ final class WorktreeModel: Identifiable {
             defaultBranch: repository?.defaultBranch,
             in: path
         )
-        guard !Task.isCancelled, repository?.origin == expectedOrigin,
+        guard !Task.isCancelled, linkedRequestID == requestID, repository?.origin == expectedOrigin,
               worktree.branch == branch else { return }
         linkedPullRequest = loaded
     }
@@ -710,7 +738,7 @@ final class WorktreeModel: Identifiable {
         } catch {
             app?.report(title: "\(label)失败", error: error, repository: repository, context: failureContext)
         }
-        await refresh()
+        await refreshChanges()
     }
 
     // MARK: - 变基
@@ -810,6 +838,9 @@ final class WorktreeModel: Identifiable {
             conflictContext = nil
             return
         }
+        let requestID = changesRequestID
+        let operation = status.operation
+        let branch = status.branch
         let context = await git.conflictContext(
             operation: status.operation,
             branch: status.branch,
@@ -817,7 +848,8 @@ final class WorktreeModel: Identifiable {
         )
         // 被取消的刷新里 git 调用全部失败，算出来的是「MERGE_HEAD」这种兜底标签；
         // 别让它盖掉之前查到的真实分支名。
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, changesRequestID == requestID,
+              status.operation == operation, status.branch == branch else { return }
         conflictContext = context
     }
 
@@ -1267,7 +1299,7 @@ final class WorktreeModel: Identifiable {
         }
     }
 
-    private func mutate(_ label: String, _ work: @escaping () async throws -> Void) async {
+    private func mutate(_ label: String, refreshHistory: Bool = false, _ work: @escaping () async throws -> Void) async {
         activity = "正在\(label)…"
         defer { activity = nil }
         do {
@@ -1275,7 +1307,8 @@ final class WorktreeModel: Identifiable {
         } catch {
             app?.report(title: "\(label)失败", error: error, repository: repository, context: failureContext)
         }
-        await refresh()
+        if refreshHistory { await refresh() }
+        else { await refreshChanges() }
     }
 
     // MARK: - 标签
@@ -1341,7 +1374,7 @@ final class WorktreeModel: Identifiable {
 
     /// 删除本地标签。远端的同名标签不动。
     func deleteTag(_ name: String) async {
-        await mutate("删除标签 \(name)") {
+        await mutate("删除标签 \(name)", refreshHistory: true) {
             try await self.git.deleteTag(name, in: self.path)
         }
     }

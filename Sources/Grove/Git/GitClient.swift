@@ -12,6 +12,12 @@ import Foundation
 struct GitClient: Sendable {
     let transport: any CommandTransport
 
+    /// 每条命令额外带上的 `-c` 配置（形如 `user.name=Jamie`，构造时展开成参数对）。
+    /// 唯一的来源是 `withIdentityFallback`：远程服务器没配 user.name/user.email
+    /// 时注入本机身份，提交、变基这类要写提交人的操作才不会在服务器上直接报
+    /// "Committer identity unknown"。
+    private let configurationArguments: [String]
+
     /// 每条命令都带上的全局参数。
     private static let globalArguments = [
         // 非 ASCII 路径不做八进制转义。不加这个，中文文件名在状态和 diff 里
@@ -29,8 +35,9 @@ struct GitClient: Sendable {
         "-c", "gc.auto=0"
     ]
 
-    init(transport: any CommandTransport) {
+    init(transport: any CommandTransport, configuration: [String] = []) {
         self.transport = transport
+        self.configurationArguments = configuration.flatMap { ["-c", $0] }
     }
 
     /// 本地执行的旧入口，保留成员式初始化的形状（测试和既有调用方在用）。
@@ -50,8 +57,70 @@ struct GitClient: Sendable {
 
     /// 绑定到一台远程服务器的客户端。git 命令在服务器上执行，
     /// 传入的目录路径按远端绝对路径解释。
-    static func remote(_ server: RemoteServer, sshExecutable: URL) -> GitClient {
-        GitClient(transport: SSHTransport(sshExecutable: sshExecutable, server: server))
+    ///
+    /// 服务器常常没配 user.name/user.email —— 它只是台开发机，用户从没在上面
+    /// 直接提交过，`git commit` 一跑就报 "Committer identity unknown"。这里把
+    /// 缺口用本机身份补上：用户在 Grove 里点的提交，署名理应是用户自己。
+    /// 探查以 `repoRoot` 为工作目录，仓库级的身份配置（有人给单个项目配独立
+    /// 身份）也在视野里，不会被误当缺失而覆盖。
+    static func remote(
+        _ server: RemoteServer,
+        sshExecutable: URL,
+        identityFallbackFrom local: GitClient?,
+        probingRepoAt repoRoot: URL
+    ) async -> GitClient {
+        let client = GitClient(transport: SSHTransport(sshExecutable: sshExecutable, server: server))
+        guard let local else { return client }
+        return await client.withIdentityFallback(from: local, probingRepoAt: repoRoot)
+    }
+
+    /// 用 `local`（本机客户端）的 user.name/user.email 补齐这个客户端在
+    /// `repoRoot` 里缺的身份，返回补齐后的新客户端。只补缺失的键 —— 远端
+    /// 自己配过的不覆盖，那台机器可能有意用另一个身份。注入走命令行 `-c`，
+    /// 只在单条命令里生效，不往远端写任何配置文件。
+    func withIdentityFallback(from local: GitClient, probingRepoAt repoRoot: URL) async -> GitClient {
+        // 探查没跑成（连接断了之类）时拿不到远端事实，宁可不动：把远端特意
+        // 配的身份顶掉，比让 git 报它原本的错误更糟。本机侧固定读家目录 ——
+        // 「本机身份」指的就是用户的全局配置。
+        guard let remoteIdentity = await Self.identityConfig(of: self, in: repoRoot.path),
+              let localIdentity = await Self.identityConfig(
+                  of: local, in: FileManager.default.homeDirectoryForCurrentUser.path
+              ) else {
+            return self
+        }
+        var configuration: [String] = []
+        for key in ["user.name", "user.email"] where remoteIdentity[key] == nil {
+            if let value = localIdentity[key] { configuration.append("\(key)=\(value)") }
+        }
+        return configuration.isEmpty
+            ? self
+            : GitClient(transport: transport, configuration: configuration)
+    }
+
+    /// 这个客户端在 `path` 下生效的 user.name/user.email（跟着工作目录走：
+    /// 仓库级配置只有在仓库里才看得见）。确定没配置返回空字典；命令没跑
+    /// 起来、探不出结论时返回 nil。
+    private static func identityConfig(of client: GitClient, in path: String) async -> [String: String]? {
+        // `--get-regexp` 找不到匹配时退出码是 1，跟「跑失败」要区分开。
+        let arguments = Self.globalArguments + client.configurationArguments
+            + ["config", "--get-regexp", #"^user\.(name|email)$"#]
+        guard let result = try? await client.transport.runGit(
+            arguments,
+            worktreePath: path,
+            timeout: ProcessRunner.localTimeout,
+            standardInput: nil
+        ), result.exitCode == 0 || result.exitCode == 1 else { return nil }
+        var values: [String: String] = [:]
+        for line in result.stdout.components(separatedBy: "\n") {
+            // 行形如 `user.name Jamie Yang`。名字里可以有任意空格，只在第一个
+            // 空格处切。
+            guard let space = line.firstIndex(of: " ") else { continue }
+            let key = String(line[line.startIndex..<space]).trimmingCharacters(in: .whitespaces)
+            let value = String(line[line.index(after: space)...]).trimmingCharacters(in: .whitespaces)
+            guard key == "user.name" || key == "user.email", !value.isEmpty else { continue }
+            values[key] = value
+        }
+        return values
     }
 
     // MARK: - 底层调用
@@ -73,7 +142,7 @@ struct GitClient: Sendable {
         timeout: Double = ProcessRunner.localTimeout
     ) async throws -> CommandResult {
         try await transport.runGit(
-            Self.globalArguments + arguments,
+            Self.globalArguments + configurationArguments + arguments,
             worktreePath: directory.path,
             timeout: timeout,
             standardInput: nil
@@ -166,7 +235,8 @@ struct GitClient: Sendable {
     }
 
     func status(in directory: URL) async throws -> WorktreeStatus {
-        let arguments = Self.globalArguments + [
+        async let operation = currentOperation(in: directory)
+        let arguments = Self.globalArguments + configurationArguments + [
             // `--untracked-files=all` 让 git 列出未跟踪**目录里的每个文件**。
             // 默认的 `normal` 会把整个未跟踪目录折叠成一行（`try/`），
             // 那种条目既没法单独暂存，点开也没有 diff 可看 —— 界面上就是一片空白。
@@ -182,18 +252,18 @@ struct GitClient: Sendable {
         )
         try ensureSuccess(result, arguments: arguments)
         var status = StatusParser.parse(result.standardOutput)
-        status.operation = await currentOperation(in: directory)
+        status.operation = await operation
         return status
     }
 
     func branches(in directory: URL) async throws -> [Branch] {
-        let output = try await run(
+        async let output = run(
             ["for-each-ref", "--format=\(RefParser.branchFormat)", "refs/heads"],
             in: directory
         )
-        let current = try? await run(["branch", "--show-current"], in: directory)
+        async let current = try? run(["branch", "--show-current"], in: directory)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return RefParser.parseBranches(output, currentBranch: current)
+        return try await RefParser.parseBranches(output, currentBranch: current)
             .sorted { ($0.lastCommitDate ?? .distantPast) > ($1.lastCommitDate ?? .distantPast) }
     }
 
@@ -423,13 +493,19 @@ struct GitClient: Sendable {
         // 顺序有讲究：rebase 期间也可能存在 MERGE_HEAD（交互式 rebase 里的合并冲突），
         // 这时候该报「变基中」而不是「合并中」，否则用户会去点 `git merge --abort`，
         // 那条命令在 rebase 中间是无效的。
-        let hasRebaseMerge = await exists("rebase-merge")
-        let hasRebaseApply = await exists("rebase-apply")
-        if hasRebaseMerge || hasRebaseApply { return .rebase }
-        if await exists("CHERRY_PICK_HEAD") { return .cherryPick }
-        if await exists("REVERT_HEAD") { return .revert }
-        if await exists("MERGE_HEAD") { return .merge }
-        if await exists("BISECT_LOG") { return .bisect }
+        // SSH 上每次存在性查询都是一次往返，独立读取并发执行，判定优先级保持不变。
+        async let rebaseMerge = exists("rebase-merge")
+        async let rebaseApply = exists("rebase-apply")
+        async let cherryPick = exists("CHERRY_PICK_HEAD")
+        async let revert = exists("REVERT_HEAD")
+        async let merge = exists("MERGE_HEAD")
+        async let bisect = exists("BISECT_LOG")
+        let flags = await (rebaseMerge, rebaseApply, cherryPick, revert, merge, bisect)
+        if flags.0 || flags.1 { return .rebase }
+        if flags.2 { return .cherryPick }
+        if flags.3 { return .revert }
+        if flags.4 { return .merge }
+        if flags.5 { return .bisect }
         return nil
     }
 
@@ -521,7 +597,7 @@ struct GitClient: Sendable {
         // 原样是什么就是什么，跑出一堆 warning 只会淹没真正的错误。
         arguments.append("--whitespace=nowarn")
 
-        let full = Self.globalArguments + arguments
+        let full = Self.globalArguments + configurationArguments + arguments
         let result = try await transport.runGit(
             full,
             worktreePath: directory.path,

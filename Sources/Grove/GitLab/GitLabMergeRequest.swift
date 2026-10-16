@@ -34,6 +34,7 @@ struct GitLabMergeRequest: Decodable, Sendable {
     var headPipeline: GitLabPipeline?
     var userNotesCount: Int?
     var reviewers: [GitLabUser]?
+    var sha: String?
 
     /// 从 fork 提过来的：源项目和目标项目不是同一个。
     var isCrossProject: Bool {
@@ -193,7 +194,8 @@ extension GitLabMergeRequest {
             viewerHasApproved: approvals?.userHasApproved ?? false,
             createdAt: createdAt,
             forge: .gitlab,
-            reviewRequests: reviewers?.map { PullRequest.ReviewerRequest(login: $0.username) }
+            reviewRequests: reviewers?.map { PullRequest.ReviewerRequest(login: $0.username) },
+            headRefOid: sha
         )
     }
 

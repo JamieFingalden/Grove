@@ -37,11 +37,12 @@ final class WorkspaceAggregationService {
     private var cachedProjects = Set<String>()
     private var loadedCache = false
     private let cacheName: String
+    @ObservationIgnored private var lastSourceKeys: [String]?
 
     init(cacheName: String = "workspace-v1") { self.cacheName = cacheName }
 
-    func refresh(in app: AppModel) async {
-        guard !isRefreshing else { return }
+    func refresh(in app: AppModel, ifNeeded: Bool = false) async {
+        guard !Task.isCancelled, !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
         if !loadedCache {
@@ -57,6 +58,9 @@ final class WorkspaceAggregationService {
             return Source(key: key, repositoryKey: repository.id.identityKey, name: repository.name, root: repository.root, forge: forge, git: app.git)
         }
         let sourceKeys = Set(sources.map(\.key))
+        let currentSourceKeys = sources.map { $0.key + ":" + $0.repositoryKey }
+        if ifNeeded, lastSourceKeys == currentSourceKeys, issues.isEmpty, !isCached,
+           let lastRefresh, Date().timeIntervalSince(lastRefresh) < 30 { return }
         cachedProjects = sourceKeys
         if lastRefresh == nil { lastRefresh = snapshots.values.map(\.syncedAt).min() }
         snapshots = snapshots.filter { sourceKeys.contains($0.key) }
@@ -100,6 +104,7 @@ final class WorkspaceAggregationService {
         }
         guard !Task.isCancelled else { return }
         lastRefresh = Date()
+        lastSourceKeys = currentSourceKeys
         isCached = !issues.isEmpty
         if let error = await OverviewCache.write(snapshots, name: cacheName) {
             issues.append(OverviewIssue(source: "Workspace", message: error))
@@ -134,45 +139,60 @@ final class WorkspaceAggregationService {
                 return result
             }
         }
+        // 身份、开放列表、历史和流水线互不依赖，避免按网络往返逐项累加等待。
+        async let loadedViewer = source.forge.currentUser(in: source.root)
+        async let loadedOpen = source.forge.pullRequests(in: source.root, limit: RepositoryModel.openPullRequestLimit, state: .open)
+        async let loadedRecent = source.forge.pullRequests(in: source.root, limit: 50, state: .all)
+        async let loadedPipelines = source.forge.pipelines(in: source.root, limit: 50)
         var viewer: String?
-        do { viewer = try await source.forge.currentUser(in: source.root) }
+        do { viewer = try await loadedViewer }
         catch { result.issues.append(.init(source: source.name, message: "个人身份不可用，Inbox 不推断归属：\(error.localizedDescription)")) }
         result.viewer = viewer
         do {
-            let open = try await source.forge.pullRequests(in: source.root, limit: RepositoryModel.openPullRequestLimit, state: .open)
+            let open = try await loadedOpen
             var recent: [PullRequest] = []
-            do { recent = try await source.forge.pullRequests(in: source.root, limit: 50, state: .all) }
+            do { recent = try await loadedRecent }
             catch {
                 result.failedHistory = true
                 result.issues.append(.init(source: source.name, message: "历史快照同步失败：\(error.localizedDescription)"))
             }
             var requests: [Int: PullRequest] = [:]
             for request in recent + open { requests[request.number] = request }
-            var normalized: [WorkspaceItem] = []
-            var detailsLoaded = 0
-            for var request in requests.values.sorted(by: { $0.updatedAt > $1.updatedAt }) {
-                // GitLab 列表没有逐项检查；只补本人或指定给本人的开放请求，避免对全部 MR 发详情请求。
-                if source.forge.kind == .gitlab && request.isActive && viewer != nil &&
-                    (request.author?.login.lowercased() == viewer?.lowercased() || request.reviewRequests?.contains { $0.login?.lowercased() == viewer?.lowercased() } == true) {
-                    // ponytail: 每项目最多补充 50 条相关 MR 详情；更大收件箱可改为按需加载。
-                    if detailsLoaded < 50 {
-                        detailsLoaded += 1
-                        do { request = try await source.forge.pullRequest(number: request.number, in: source.root) }
-                        catch { result.issues.append(.init(source: source.name, message: "MR !\(request.number) 详情不可用：\(error.localizedDescription)")) }
-                    } else if detailsLoaded == 50 {
-                        detailsLoaded += 1
-                        result.issues.append(.init(source: source.name, message: "本次最多补充 50 条相关 MR 详情，其余仅显示列表可确认的状态。"))
+            var ordered = requests.values.sorted { $0.updatedAt > $1.updatedAt }
+            // GitLab 只补本人相关的开放请求，保持原有覆盖范围，并限制同时最多三个详情请求。
+            let detailIndices = ordered.indices.filter { index in
+                let request = ordered[index]
+                return source.forge.kind == .gitlab && request.isActive && viewer != nil &&
+                    (request.author?.login.lowercased() == viewer?.lowercased() || request.reviewRequests?.contains { $0.login?.lowercased() == viewer?.lowercased() } == true)
+            }
+            // ponytail: 每项目最多补充 50 条相关 MR 详情；更大收件箱可改为按需加载。
+            await withTaskGroup(of: (Int, PullRequest?, String?).self) { group in
+                var iterator = detailIndices.prefix(50).makeIterator()
+                func add(_ index: Int) {
+                    let request = ordered[index]
+                    group.addTask {
+                        do { return (index, try await source.forge.pullRequest(number: request.number, in: source.root), nil) }
+                        catch { return (index, nil, "MR !\(request.number) 详情不可用：\(error.localizedDescription)") }
                     }
                 }
-                normalized.append(.request(request, viewer: viewer, project: source.key, repository: source.repositoryKey, name: source.name))
+                for _ in 0..<3 { if let index = iterator.next() { add(index) } }
+                while let (index, detail, error) = await group.next() {
+                    guard !Task.isCancelled else { group.cancelAll(); break }
+                    if let detail { ordered[index] = detail }
+                    if let error { result.issues.append(.init(source: source.name, message: error)) }
+                    if let next = iterator.next() { add(next) }
+                }
             }
-            result.requests = normalized
+            if detailIndices.count > 50 {
+                result.issues.append(.init(source: source.name, message: "本次最多补充 50 条相关 MR 详情，其余仅显示列表可确认的状态。"))
+            }
+            result.requests = ordered.map { .request($0, viewer: viewer, project: source.key, repository: source.repositoryKey, name: source.name) }
             if open.count >= RepositoryModel.openPullRequestLimit {
                 result.issues.append(.init(source: source.name, message: "开放请求达到 1000 条上限；历史快照最多包含最近 50 条。"))
             }
         } catch { result.issues.append(.init(source: source.name, message: "PR/MR 同步失败：\(error.localizedDescription)")) }
         do {
-            let pipelines = try await source.forge.pipelines(in: source.root, limit: 50)
+            let pipelines = try await loadedPipelines
             var seen = Set<Int>()
             result.pipelines = pipelines.filter { seen.insert($0.id).inserted }.map {
                 WorkspaceItem(projectKey: source.key, repositoryKey: source.repositoryKey, repositoryName: source.name,

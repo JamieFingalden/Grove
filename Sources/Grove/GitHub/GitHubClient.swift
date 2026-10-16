@@ -22,7 +22,7 @@ struct GitHubClient: ForgeClient {
         "number", "title", "state", "isDraft", "headRefName", "baseRefName",
         "url", "author", "createdAt", "updatedAt", "additions", "deletions", "changedFiles",
         "reviewDecision", "mergeable", "isCrossRepository", "labels",
-        "statusCheckRollup", "headRepositoryOwner", "reviewRequests"
+        "statusCheckRollup", "headRepositoryOwner", "reviewRequests", "headRefOid"
     ].joined(separator: ",")
 
     private static let detailFields = listFields + ",body"

@@ -280,11 +280,12 @@ struct DiffContentView: View {
     /// 展开过的未更改区域（原始文本行）。key = "文件#hunk"。
     @State private var expandedGapKeys: Set<String> = []
     @State private var expandedGapLines: [String: [String]] = [:]
+    @State private var gapRevision = UUID()
     @AppStorage(DiffLayout.storageKey) private var layoutRaw = DiffLayout.unified.rawValue
 
-    /// 词级差异区间（line.id 索引）。init 里一次算完，
-    /// 滚动时行视图只做查表，不在 body 里反复扫字符串。
-    private let wordHighlights: [Int: [Range<String.Index>]]
+    /// 高亮随实际 diff 内容更新，避免父视图每次重绘都在主线程重新计算。
+    @State private var wordHighlights: [Int: [Range<String.Index>]] = [:]
+    @State private var highlightedFiles: [FileDiff] = []
 
     private var isSplit: Bool { allowSplit && layoutRaw == DiffLayout.split.rawValue }
 
@@ -304,18 +305,11 @@ struct DiffContentView: View {
         self.gapLoader = gapLoader
         self.onDiscussLine = onDiscussLine
         self.focusedLineID = focusedLineID
-
-        var highlights: [Int: [Range<String.Index>]] = [:]
-        for file in files {
-            // line id 是解析器里的全局计数器，跨文件不重复，直接合并。
-            for (lineID, ranges) in DiffWordHighlight.ranges(for: file) {
-                highlights[lineID, default: []].append(contentsOf: ranges)
-            }
-        }
-        self.wordHighlights = highlights
     }
 
     var body: some View {
+        // 同路径的新内容也不能沿用旧字符串的索引区间。
+        let highlights = highlightedFiles == files ? wordHighlights : [:]
         // 流式文档：长行自动折行、没有横向滚动（旧行为是按最长行定宽的固定画布，
         // 一行 500 字符就把整个文件撑成横向滚动）。
         //
@@ -349,7 +343,7 @@ struct DiffContentView: View {
                         } else {
                             ForEach(file.hunks) { hunk in
                                 gapBefore(file: file, hunk: hunk)
-                                hunkBody(file: file, hunk: hunk)
+                                hunkBody(file: file, hunk: hunk, highlights: highlights)
                                     .id(hunk.id)
                             }
                         }
@@ -366,10 +360,18 @@ struct DiffContentView: View {
         }
         .scrollIndicators(.visible, axes: .vertical)
         .defaultScrollAnchor(.top)
-        .onChange(of: files.map(\.id)) { _, _ in
-            // 文件集合变了，展开区域对应的行号已失效，全部收起。
+        .onChange(of: files) { _, _ in
+            // 同路径内容更新时行号也会失效，旧展开区域必须清除。
             expandedGapKeys.removeAll()
             expandedGapLines.removeAll()
+            gapRevision = UUID()
+        }
+        .task(id: files) {
+            guard highlightedFiles != files,
+                  let highlights = try? await DiffWordHighlight.ranges(for: files),
+                  !Task.isCancelled else { return }
+            wordHighlights = highlights
+            highlightedFiles = files
         }
         // 文件列表或布局变化后必须创建新的滚动容器，否则 SwiftUI 会沿用
         // 上一个文件的纵向偏移。只哈希文件路径而不是整个 diff 内容：
@@ -389,18 +391,18 @@ struct DiffContentView: View {
     // MARK: - hunk 与折叠区渲染
 
     @ViewBuilder
-    private func hunkBody(file: FileDiff, hunk: DiffHunk) -> some View {
+    private func hunkBody(file: FileDiff, hunk: DiffHunk, highlights: [Int: [Range<String.Index>]]) -> some View {
         let path = file.newPath ?? file.oldPath
         if isSplit {
             SplitHunkView(
                 hunk: hunk,
                 model: model,
                 filePath: path,
-                highlights: wordHighlights,
+                highlights: highlights,
                 onDiscussLine: onDiscussLine.map { action in { line, oldSide in action(file, line, oldSide) } }
             )
         } else {
-            HunkView(hunk: hunk, model: model, filePath: path, highlights: wordHighlights,
+            HunkView(hunk: hunk, model: model, filePath: path, highlights: highlights,
                      onDiscussLine: onDiscussLine.map { action in { line, oldSide in action(file, line, oldSide) } })
         }
     }
@@ -425,9 +427,14 @@ struct DiffContentView: View {
         } else {
             DiffGapSeparator(count: info.count, isLoading: false) {
                 Task {
+                    let expectedRevision = gapRevision
                     expandedGapKeys.insert(key)
                     guard let path = file.newPath ?? file.oldPath,
-                          let texts = await gapLoader?(path, info.startLine, info.count) else { return }
+                          let texts = await gapLoader?(path, info.startLine, info.count) else {
+                        if gapRevision == expectedRevision { expandedGapKeys.remove(key) }
+                        return
+                    }
+                    guard !Task.isCancelled, gapRevision == expectedRevision, expandedGapKeys.contains(key) else { return }
                     expandedGapLines[key] = texts
                 }
             }

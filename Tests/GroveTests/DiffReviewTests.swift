@@ -86,6 +86,23 @@ final class DiffReviewTests: XCTestCase {
 
     // MARK: - 词级差异
 
+    func testBackgroundHighlightsMatchExistingRangesAndRespectCancellation() async throws {
+        let files = DiffParser.parse(clusterSample.replacingOccurrences(of: "old1", with: "旧代码👩🏽‍💻")
+            .replacingOccurrences(of: "new1", with: "新代码👩🏽‍💻"))
+        let ranges = try await DiffWordHighlight.ranges(for: files)
+        XCTAssertEqual(ranges, DiffWordHighlight.ranges(for: files[0]))
+        let cancelled = Task { () throws -> [Int: [Range<String.Index>]] in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await DiffWordHighlight.ranges(for: files)
+        }
+        do {
+            _ = try await cancelled.value
+            XCTFail("取消后不能继续计算并发布高亮")
+        } catch is CancellationError {
+            // 预期：不发布旧内容的字符串索引。
+        }
+    }
+
     func testWordHighlightOnlyCoversChangedFragment() {
         let sample = """
             diff --git a/a.py b/a.py

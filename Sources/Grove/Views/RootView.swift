@@ -307,7 +307,7 @@ struct RootView: View {
         case .repositoryHome:
             // 主页里的分栏自己带加载和轮询（CI 每 10–30 秒自刷）；
             // 这里补拉一次 PR 列表，供概览卡片和拉取请求分栏用。
-            await model.selectedRepository?.refreshPullRequests()
+            await model.selectedRepository?.refreshPullRequests(ifNeeded: true)
         case nil:
             break
         }

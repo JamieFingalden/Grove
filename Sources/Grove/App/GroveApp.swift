@@ -97,7 +97,6 @@ struct GroveCommands: Commands {
                     case .workspace: await model.workspace.refresh(in: model)
                     case .repositories:
                         await model.selectedRepository?.refresh()
-                        await model.selectedWorktreeModel?.refresh()
                     }
                 }
             }

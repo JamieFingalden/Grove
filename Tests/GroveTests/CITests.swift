@@ -1,7 +1,78 @@
+import AppKit
+import SwiftUI
 import XCTest
 @testable import Grove
 
 final class CITests: XCTestCase {
+    @MainActor
+    func testVisibleCIRefreshLoadsJobsOnceAndReusesListOnQuickReturn() async throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = directory.appendingPathComponent("calls")
+        let completed = directory.appendingPathComponent("completed")
+        let executable = directory.appendingPathComponent("gh")
+        try """
+        #!/bin/sh
+        echo "$1 $2" >> "\(log.path)"
+        case "$1 $2" in
+          'run list') printf '[{"databaseId":7,"status":"completed","conclusion":"success","headBranch":"main"}]' ;;
+          'run view')
+            /bin/sleep 0.1
+            echo '任务已完成' >> "\(completed.path)"
+            printf '{"jobs":[]}' ;;
+          *) exit 1 ;;
+        esac
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let suite = "grove.ci-refresh.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let app = AppModel(aiGenerationSettings: AIGenerationSettings(defaults: defaults), navigation: AppNavigationState(defaults: defaults))
+        let repository = RepositoryModel(root: directory,
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: nil,
+            forge: GitHubClient(executable: executable, environment: [:]))
+        repository.origin = GitRemote.parse("https://github.com/group/project.git")
+        func content(active: Bool) -> some View {
+            CIView(repository: repository).environment(app).environment(\.repositoryPageActive, active)
+                .retainedPage(active).frame(width: 900, height: 700)
+        }
+        // 先完成原生窗口挂载，再激活分栏，避免首次挂载的临时任务影响请求计数。
+        let hosting = NSHostingView(rootView: content(active: false))
+        hosting.frame = CGRect(x: 0, y: 0, width: 900, height: 700)
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 900, height: 700),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = hosting
+        defer { window.orderOut(nil); window.contentView = nil }
+        window.makeKeyAndOrderFront(nil)
+        try await Task.sleep(for: .milliseconds(100))
+        hosting.rootView = content(active: true)
+        func calls(_ file: URL) -> [Substring] {
+            ((try? String(contentsOf: file, encoding: .utf8)) ?? "").split(separator: "\n")
+        }
+        func waitForJobs(_ count: Int) async throws {
+            for _ in 0..<100 {
+                hosting.layoutSubtreeIfNeeded()
+                if calls(completed).count >= count { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertEqual(calls(completed).count, count, "列表状态更新不能取消任务加载")
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        try await waitForJobs(1)
+        XCTAssertEqual(calls(log).filter { $0 == "run list" }.count, 1)
+        XCTAssertEqual(calls(log).filter { $0 == "run view" }.count, 1, "首次选择不能重复请求任务")
+        hosting.rootView = content(active: false)
+        try await Task.sleep(for: .milliseconds(150))
+        let hiddenCalls = calls(log)
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(calls(log), hiddenCalls, "隐藏页面不能继续发请求")
+        hosting.rootView = content(active: true)
+        try await waitForJobs(2)
+        XCTAssertEqual(calls(log).filter { $0 == "run list" }.count, 1, "短时间返回应复用流水线列表")
+    }
+
     func testPushWatchMatchesCommitAndWaitsForAllKnownPipelines() {
         let old = CIPipeline(id: 1, status: .success, ref: "main", sha: "old")
         let done = CIPipeline(id: 2, status: .success, ref: "main", sha: "new")

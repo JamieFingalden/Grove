@@ -3,6 +3,28 @@ import XCTest
 
 @MainActor
 final class ForgeSafetyTests: XCTestCase {
+    func testNewerListDoesNotInheritApprovalFromAnOlderCommit() {
+        let repository = RepositoryModel(root: URL(fileURLWithPath: "/tmp/Grove"),
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: nil)
+        let request = PullRequest(number: 1, title: "测试请求", state: "OPEN", isDraft: false,
+            headRefName: "feature", baseRefName: "main", url: "u", author: nil, updatedAt: Date(),
+            additions: 0, deletions: 0, changedFiles: 0, isCrossRepository: false, labels: [], headRefOid: "old")
+        var approved = request
+        approved.reviewDecision = "APPROVED"
+        approved.viewerHasApproved = true
+        repository.updateOpenPullRequests([request], fromOrigin: nil)
+        repository.mergeDetailIntoList(approved, fromOrigin: nil)
+        XCTAssertTrue(repository.listPullRequests[0].viewerHasApproved)
+        var pushed = request
+        pushed.headRefOid = "new"
+        repository.updateOpenPullRequests([pushed], fromOrigin: nil)
+        XCTAssertFalse(repository.listPullRequests[0].viewerHasApproved, "同一秒内的新提交也必须使旧审批失效")
+        pushed.headRefOid = "old"
+        pushed.updatedAt = request.updatedAt.addingTimeInterval(1)
+        repository.updateOpenPullRequests([pushed], fromOrigin: nil)
+        XCTAssertNil(repository.listPullRequests[0].reviewDecision, "远端更新的状态不能被旧详情覆盖")
+    }
+
     func testOpenPullRequestCountIncludesDraftsAndIgnoresHistoryFilter() {
         let repository = RepositoryModel(root: URL(fileURLWithPath: "/tmp/Grove"),
             git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: nil)

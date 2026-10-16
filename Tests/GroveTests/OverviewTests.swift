@@ -5,6 +5,60 @@ import XCTest
 
 @MainActor
 final class OverviewTests: XCTestCase {
+    func testWorkspaceStartsIndependentReadsTogetherAndCachesOnlySameSources() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = directory.appendingPathComponent("gh")
+        try #"""
+        #!/bin/sh
+        case "$1 $2" in
+          'api user') part=user ;;
+          'run list') part=ci ;;
+          'pr list') case "$*" in *'--state open'*) part=open ;; *) part=recent ;; esac ;;
+          *) exit 1 ;;
+        esac
+        echo "$part" >> "$GROVE_TEST_ROOT/calls"
+        : > "$GROVE_TEST_ROOT/$part"
+        count=0
+        while [ ! -f "$GROVE_TEST_ROOT/user" ] || [ ! -f "$GROVE_TEST_ROOT/ci" ] || [ ! -f "$GROVE_TEST_ROOT/open" ] || [ ! -f "$GROVE_TEST_ROOT/recent" ]; do
+          count=$((count + 1)); [ "$count" -lt 100 ] || exit 1
+          /bin/sleep 0.01
+        done
+        if [ "$part" = user ]; then printf 'me'; else printf '[]'; fi
+        """#.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        let suite = "grove.workspace-refresh.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let app = AppModel(aiGenerationSettings: AIGenerationSettings(defaults: defaults), navigation: AppNavigationState(defaults: defaults))
+        let git = try await GitClient.resolve()
+        try await git.run(["init", "-q"], in: directory)
+        try await git.run(["remote", "add", "origin", "https://github.com/team/project.git"], in: directory)
+        let repository = RepositoryModel(root: directory,
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:]), app: nil,
+            forge: GitHubClient(executable: script, environment: ["GROVE_TEST_ROOT": directory.path]))
+        repository.origin = GitRemote.parse("https://github.com/team/project.git")
+        app.repositories = [repository]
+        let cache = "test-parallel-workspace-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(at: OverviewCache.url(cache)) }
+        let store = WorkspaceAggregationService(cacheName: cache)
+        func count() throws -> Int {
+            try String(contentsOf: directory.appendingPathComponent("calls"), encoding: .utf8).split(separator: "\n").count
+        }
+        await store.refresh(in: app)
+        XCTAssertTrue(store.issues.isEmpty, "四个独立查询必须同时启动，不能彼此等待")
+        XCTAssertEqual(try count(), 4)
+        await store.refresh(in: app, ifNeeded: true)
+        XCTAssertEqual(try count(), 4, "自动进入应复用刚取得的快照")
+        await store.refresh(in: app)
+        XCTAssertEqual(try count(), 8, "手动刷新不能被缓存吞掉")
+        repository.origin = GitRemote.parse("https://github.com/team/other.git")
+        try await git.run(["remote", "set-url", "origin", "https://github.com/team/other.git"], in: directory)
+        await store.refresh(in: app, ifNeeded: true)
+        XCTAssertEqual(try count(), 12, "项目身份改变必须重新读取")
+    }
+
     private func request(author: String = "other", reviewers: [String] = []) -> PullRequest {
         PullRequest(number: 8, title: "统一设计系统", state: "OPEN", isDraft: false,
                     headRefName: "feature", baseRefName: "main", url: "https://github.com/team/Grove/pull/8",

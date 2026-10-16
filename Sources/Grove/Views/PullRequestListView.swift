@@ -4,6 +4,7 @@ import SwiftUI
 struct PullRequestListView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.controlActiveState) private var controlActiveState
+    @Environment(\.repositoryPageActive) private var pageActive
     @Bindable var repository: RepositoryModel
     /// 进入时默认选中的编号。深链接（从别处跳到某个具体请求）和离屏渲染都要用它 ——
     /// 选中状态是视图内部的 @State，外面没有别的办法预置。
@@ -101,12 +102,13 @@ struct PullRequestListView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(GroveStyle.content)
-        .task {
+        .task(id: pageActive) {
+            guard pageActive else { return }
             if selection == nil, let initialSelection {
                 selection = initialSelection
                 mode = .review
             }
-            await repository.refreshPullRequests()
+            await repository.refreshPullRequests(ifNeeded: true)
         }
         .onChange(of: appModel.navigation.route?.id, initial: true) { _, _ in
             guard let route = appModel.navigation.route, route.matches(repository), let pr = route.pullRequest else { return }
@@ -1011,77 +1013,30 @@ struct PullRequestDetailView: View {
     /// 详情页补齐列表没有的正文、代码 diff 和评论线程。三项并发加载，
     /// 不让体积最大的 diff 把标题和讨论也一起卡住。
     private func loadDetail() async {
+        async let detail: Void = reloadDetail()
+        async let discussions: Void = reloadThreads()
+        async let diff: Void = reloadDiff()
+        _ = await (detail, discussions, diff)
+    }
+
+    private func reloadDetail() async {
         guard let forge = repository.forge else { return }
         let expectedOrigin = repository.origin
-        isLoadingThreads = true
-        isLoadingDiff = true
-
         isLoadingDetail = true
         detailLoadError = nil
         defer { isLoadingDetail = false }
-        async let loadedDetail = fetchDetail(using: forge)
-        async let loadedThreads = try? await forge.reviewThreads(
-            number: pullRequest.number,
-            in: repository.root
-        )
-        async let loadedDiff = fetchDiff(using: forge)
 
         // 完整详情不只补正文，还包含当前用户的审批状态。即使列表接口已经
         // 带了正文也必须加载，否则批准过的 MR 仍会错误显示「批准」。
-        let detail = await loadedDetail
-        guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
-        let resolvedDetail: PullRequest?
-        switch detail {
-        case .success(let value):
-            resolvedDetail = value
+        do {
+            let value = try await forge.pullRequest(number: pullRequest.number, in: repository.root)
+            guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
             detailed = value
-        case .failure(let error):
-            resolvedDetail = nil
+            // 详情里的审批/冲突状态并回列表行 —— 列表接口拿不到这些。
+            repository.mergeDetailIntoList(value, fromOrigin: expectedOrigin)
+        } catch {
+            guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
             detailLoadError = error.localizedDescription
-        }
-        isLoadingDetail = false
-        // 详情里的审批/冲突状态并回列表行 —— 列表接口拿不到这些。
-        if let resolvedDetail {
-            repository.mergeDetailIntoList(resolvedDetail, fromOrigin: expectedOrigin)
-        }
-
-        let loadedReviewThreads = await loadedThreads
-        guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
-        if let loadedReviewThreads { threads = loadedReviewThreads; threadsError = nil }
-        else { threadsError = "讨论加载失败，请重试。" }
-        isLoadingThreads = false
-
-        let files = await loadedDiff
-        guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
-        switch files {
-        case .success(let files):
-            diffFiles = files.files
-            diffHead = files.head
-            didFailDiff = false
-            diffLoadError = nil
-            selectFirstDiffFileIfNeeded()
-            restoreCachedAIReview(for: files.files)
-        case .failure(let error):
-            diffFiles = []
-            didFailDiff = true
-            diffLoadError = error.localizedDescription
-        }
-        isLoadingDiff = false
-    }
-
-    private func fetchDetail(using forge: any ForgeClient) async -> Result<PullRequest, Error> {
-        do {
-            return .success(try await forge.pullRequest(number: pullRequest.number, in: repository.root))
-        } catch {
-            return .failure(error)
-        }
-    }
-
-    private func fetchDiff(using forge: any ForgeClient) async -> Result<(files: [FileDiff], head: String), Error> {
-        do {
-            return .success(try await loadReviewDiff(using: forge))
-        } catch {
-            return .failure(error)
         }
     }
 
@@ -1114,6 +1069,7 @@ struct PullRequestDetailView: View {
         guard let forge = repository.forge else { return }
         let expectedOrigin = repository.origin
         isLoadingDiff = true
+        defer { isLoadingDiff = false }
         do {
             let loaded = try await loadReviewDiff(using: forge)
             guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
@@ -1129,7 +1085,6 @@ struct PullRequestDetailView: View {
             didFailDiff = true
             diffLoadError = error.localizedDescription
         }
-        isLoadingDiff = false
     }
 
     // MARK: - 评审

@@ -14,6 +14,10 @@ struct CIView: View {
     @State private var selectedPipelineID: Int?
     @State private var jobs: [CIJob] = []
     @State private var isLoading = false
+    @State private var listRequestID: UUID?
+    @State private var loadedOrigin: GitRemote?
+    @State private var loadedForgeKind: ForgeKind?
+    @State private var lastLoad: Date?
     @State private var isLoadingJobs = false
     @State private var jobsPipelineID: Int?
     @State private var jobsRequestID: UUID?
@@ -59,13 +63,20 @@ struct CIView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(GroveStyle.content)
-        .task(id: active) {
-            guard active && !didLoadOnce else { return }
-            await reload()
-        }
-        // 控制台手感：页面开着就定期刷新，不用手点。视图消失自动停。
+        // 轮询只随页面和项目身份重启；列表更新自身不能取消后续的任务查询。
         .task(id: pollKey) {
-            guard didLoadOnce && active else { return }
+            guard active else { return }
+            if loadedOrigin != repository.origin || loadedForgeKind != repository.forge?.kind {
+                pipelines = []
+                selectedPipelineID = nil
+                jobs = []
+                jobsPipelineID = nil
+                didLoadOnce = false
+                lastLoad = nil
+            }
+            if !didLoadOnce || Date().timeIntervalSince(lastLoad ?? .distantPast) >= (hasRunning ? 10 : 30) {
+                await reload()
+            }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(hasRunning ? 10 : 30))
                 guard !Task.isCancelled else { return }
@@ -90,15 +101,14 @@ struct CIView: View {
                 job: job,
                 pipelineID: selectedPipelineID ?? 0,
                 repository: repository,
-                onFinished: { Task { await reload(silent: true) } }
+                onFinished: { Task { await reload() } }
             )
         }
     }
 
-    /// 轮询节奏跟着状态走：有在跑的刷得勤。key 变了（选中变化/有无 running）
-    /// 任务会重启，循环从新的节奏开始。
+    /// 运行状态只影响下一次等待时长，不参与任务身份。
     private var pollKey: String {
-        "\(selectedPipelineID ?? -1)-\(hasRunning)-\(active)-\(didLoadOnce)"
+        "\(active)-\(String(describing: repository.origin))-\(repository.forge?.kind.rawValue ?? "")"
     }
 
     /// 手动跑流水线时建议的 ref：最近流水线里出现过的分支，新到旧去重。
@@ -240,7 +250,8 @@ struct CIView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task(id: selectedPipelineID) {
+        .task(id: "\(pollKey)-\(selectedPipelineID ?? -1)") {
+            guard active else { return }
             await loadJobs()
         }
     }
@@ -388,36 +399,53 @@ struct CIView: View {
     // MARK: - 动作
 
     private func reload(silent: Bool = false) async {
-        guard let forge = repository.forge else { return }
+        guard !Task.isCancelled, let forge = repository.forge else { return }
+        if silent && listRequestID != nil { return }
+        let requestID = UUID()
+        listRequestID = requestID
         let expectedOrigin = repository.origin
         if !silent { isLoading = true }
         failureText = nil
         defer {
-            isLoading = false
+            if listRequestID == requestID {
+                isLoading = false
+                listRequestID = nil
+            }
         }
         do {
             let loaded = try await forge.pipelines(in: repository.root, limit: 50)
             try Task.checkCancellation()
-            guard repository.origin == expectedOrigin else { return }
+            guard listRequestID == requestID, repository.origin == expectedOrigin,
+                  repository.forge?.kind == forge.kind else { return }
+            let previousSelection = selectedPipelineID
             let routed = app.navigation.route.flatMap { $0.matches(repository) ? $0.pipeline : nil }
             pipelines = loaded
             if let routed, !pipelines.contains(where: { $0.id == routed.id }) { pipelines.append(routed) }
             didLoadOnce = true
+            loadedOrigin = expectedOrigin
+            loadedForgeKind = forge.kind
+            lastLoad = Date()
+            if !pipelines.contains(where: { $0.id == selectedPipelineID }) {
+                selectedPipelineID = pipelines.first?.id
+            }
             // 分支 → 状态的索引顺手刷新：侧边栏工作树行的 CI 小点靠它。
             repository.updatePipelineStatuses(from: pipelines, fromOrigin: expectedOrigin)
-            if selectedPipelineID != nil {
+            // 选择变化由详情的任务加载；选择没变时才补刷，避免同一轮查两遍。
+            if selectedPipelineID != nil, selectedPipelineID == previousSelection {
                 await loadJobs(silent: true)
             }
         } catch is CancellationError {
             // 切换页面或流水线导致的请求取消，不是加载失败。
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, listRequestID == requestID,
+                  repository.origin == expectedOrigin, repository.forge?.kind == forge.kind else { return }
             didLoadOnce = true
             failureText = error.localizedDescription
         }
     }
 
     private func loadJobs(silent: Bool = false) async {
+        guard !Task.isCancelled else { return }
         guard let forge = repository.forge, let id = selectedPipelineID else {
             jobs = []
             jobsPipelineID = nil
@@ -427,6 +455,7 @@ struct CIView: View {
             return
         }
         let requestID = UUID()
+        let expectedOrigin = repository.origin
         jobsRequestID = requestID
         isLoadingJobs = !silent || jobsPipelineID != id || jobs.isEmpty
         jobsFailureText = nil
@@ -437,14 +466,16 @@ struct CIView: View {
         do {
             let loaded = try await forge.jobs(pipelineID: id, in: repository.root)
             try Task.checkCancellation()
-            guard jobsRequestID == requestID, selectedPipelineID == id else { return }
+            guard jobsRequestID == requestID, selectedPipelineID == id,
+                  repository.origin == expectedOrigin, repository.forge?.kind == forge.kind else { return }
             jobs = loaded
             jobsPipelineID = id
         } catch is CancellationError {
             // SwiftUI 取消旧任务时保持等待态，新的任务会继续加载。
         } catch {
             guard !Task.isCancelled, jobsRequestID == requestID,
-                  selectedPipelineID == id else { return }
+                  selectedPipelineID == id, repository.origin == expectedOrigin,
+                  repository.forge?.kind == forge.kind else { return }
             if jobsPipelineID != id { jobs = [] }
             jobsPipelineID = id
             jobsFailureText = error.localizedDescription
@@ -490,7 +521,7 @@ struct CIView: View {
             failureText = "\(label)失败：\(error.localizedDescription)"
             return
         }
-        await reload(silent: true)
+        await reload()
     }
 }
 

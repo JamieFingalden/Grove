@@ -22,6 +22,8 @@ final class DailyViewModel {
     private var snapshots: [String: DailyActivityService.Snapshot] = [:]
     private var loadedCache = false
     private let cacheName: String
+    @ObservationIgnored private var lastSourceKeys: [String]?
+    @ObservationIgnored private var lastScanDay: Date?
 
     init(cacheName: String = "daily-v1") { self.cacheName = cacheName }
 
@@ -47,8 +49,15 @@ final class DailyViewModel {
     }
     var aheadRepositoryCount: Int { Set(branches.filter { ($0.ahead ?? 0) > 0 }.map(\.repositoryIdentity)).count }
 
-    func refresh(in app: AppModel) async {
-        guard !isRefreshing, let git = app.git else { return }
+    func refresh(in app: AppModel, ifNeeded: Bool = false) async {
+        guard !Task.isCancelled, !isRefreshing, let git = app.git else { return }
+        let sourceKeys = app.repositories.map(\.id.identityKey)
+        let scanDay = Calendar.current.startOfDay(for: Date())
+        if ifNeeded, lastSourceKeys == sourceKeys, lastScanDay == scanDay,
+           issues.isEmpty, !isCached, let lastRefresh, Date().timeIntervalSince(lastRefresh) < 30 {
+            publish(emails: app.navigation.authorEmails)
+            return
+        }
         isRefreshing = true
         defer { isRefreshing = false }
         if !loadedCache {
@@ -64,6 +73,7 @@ final class DailyViewModel {
         var seen = Set<String>()
         var failedRepositories = Set<String>()
         for repository in app.repositories {
+            guard !Task.isCancelled else { return }
             do {
                 let identity = try await DailyActivityService.repositoryIdentity(git: git, root: repository.root)
                 guard seen.insert(identity).inserted else { continue }
@@ -104,6 +114,8 @@ final class DailyViewModel {
         }
         guard !Task.isCancelled else { return }
         lastRefresh = Date()
+        lastSourceKeys = sourceKeys
+        lastScanDay = scanDay
         isCached = !issues.isEmpty
         if let error = await OverviewCache.write(snapshots, name: cacheName) { issues.append(.init(source: "Daily", message: error)) }
     }

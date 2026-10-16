@@ -42,6 +42,8 @@ struct PullRequest: Identifiable, Hashable, Sendable, Codable {
     /// 来源平台。GitHub 的 JSON 里没有这个字段，解码后由客户端补上。
     var forge: ForgeKind = .github
     var reviewRequests: [ReviewerRequest]? = nil
+    /// 列表自带的源提交，用于后台检查；缺失时仍回退到详情接口。
+    var headRefOid: String? = nil
 
     struct ReviewerRequest: Hashable, Sendable, Codable {
         var login: String?
@@ -59,7 +61,7 @@ struct PullRequest: Identifiable, Hashable, Sendable, Codable {
     enum CodingKeys: String, CodingKey {
         case number, title, state, isDraft, headRefName, baseRefName, url, author
         case updatedAt, createdAt, additions, deletions, changedFiles, reviewDecision, mergeable
-        case isCrossRepository, labels, statusCheckRollup, body, headRepositoryOwner, reviewRequests
+        case isCrossRepository, labels, statusCheckRollup, body, headRepositoryOwner, reviewRequests, headRefOid
     }
 
     struct Author: Hashable, Sendable, Codable {

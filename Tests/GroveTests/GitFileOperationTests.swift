@@ -37,6 +37,29 @@ final class GitFileOperationTests: XCTestCase {
         )
     }
 
+    func testStagingRefreshesIndexWithoutReloadingHistory() async throws {
+        try write("原内容\n", to: "a.txt")
+        let executable = root.appendingPathComponent(".git/git-wrapper")
+        let log = root.appendingPathComponent(".git/commands")
+        try """
+        #!/bin/sh
+        echo "$*" >> "\(log.path)"
+        exec /usr/bin/git "$@"
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        git = GitClient(executable: executable, environment: ProcessInfo.processInfo.environment)
+        let model = model()
+        await model.refreshStatus()
+        let change = try XCTUnwrap(model.status.changes.first)
+        try Data().write(to: log)
+        await model.stage(change)
+        XCTAssertEqual(model.status.changes.first?.staged, .added)
+        XCTAssertEqual(try read("a.txt"), "原内容\n")
+        let commands = try String(contentsOf: log, encoding: .utf8)
+        XCTAssertTrue(commands.contains(" status "))
+        XCTAssertFalse(commands.contains(" log "), "暂存不应扫描历史和提交人")
+    }
+
     func testSelectedFileOperationsTreatWildcardsAndMagicAsLiteralNames() async throws {
         let names = ["*.txt", ":(glob)*.txt", "[a].txt", "-leading.txt", "other.txt"]
         for name in names { try write("原内容\n", to: name) }

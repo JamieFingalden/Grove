@@ -119,7 +119,7 @@ struct WorkspaceView: View {
             // 新任务等取消中的旧刷新退出，避免来源变化时漏掉首次同步。
             while store.isRefreshing && !Task.isCancelled { try? await Task.sleep(for: .milliseconds(100)) }
             guard !Task.isCancelled else { return }
-            await store.refresh(in: app)
+            await store.refresh(in: app, ifNeeded: true)
             while app.navigation.autoRefresh && !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(300)) } catch { return }
                 await store.refresh(in: app)
@@ -381,7 +381,7 @@ struct DailyView: View {
             guard app.navigation.page == .daily, app.overviewReady else { return }
             while store.isRefreshing && !Task.isCancelled { try? await Task.sleep(for: .milliseconds(100)) }
             guard !Task.isCancelled else { return }
-            await store.refresh(in: app)
+            await store.refresh(in: app, ifNeeded: true)
             while app.navigation.autoRefresh && !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(300)) } catch { return }
                 await store.refresh(in: app)

@@ -52,6 +52,13 @@ final class GitLabMergeRequestTests: XCTestCase {
         XCTAssertFalse(merge.isCrossProject)
     }
 
+    func testListCommitIsPreservedAndOlderServersMayOmitIt() throws {
+        let json = listJSON.replacingOccurrences(of: "\"iid\": 252497", with: "\"sha\": \"latest-head\", \"iid\": 252497")
+        let merge = try GitLabClient.decoder.decode([GitLabMergeRequest].self, from: Data(json.utf8))[0]
+        XCTAssertEqual(merge.asPullRequest().headRefOid, "latest-head")
+        XCTAssertNil(try decodeList()[0].asPullRequest().headRefOid)
+    }
+
     /// GitLab 的时间戳带毫秒（`...T13:04:02.802Z`），GitHub 的不带。
     /// 解码器必须两种都能吃 —— 差一个小数点就是「一个 MR 都读不出来」。
     func testTimestampsWithAndWithoutFractionalSecondsBothDecode() throws {
