@@ -342,11 +342,13 @@ final class RepositoryModel: Identifiable {
         let directory = root
         await withTaskGroup(of: (PullRequestListState, Result<[PullRequest], Error>).self) { group in
             for state in states {
-                group.addTask {
+                group.addTask { [state] in
                     do {
-                        return (state, .success(try await forge.pullRequests(
+                        // 先完成异步查询，再把结果与捕获的筛选值配对，避免发布构建丢失历史筛选标识。
+                        let requests = try await forge.pullRequests(
                             in: directory, limit: state == .open ? Self.openPullRequestLimit : 50, state: state
-                        )))
+                        )
+                        return (state, .success(requests))
                     } catch { return (state, .failure(error)) }
                 }
             }
