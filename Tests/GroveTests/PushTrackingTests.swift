@@ -2,6 +2,56 @@ import XCTest
 @testable import Grove
 
 final class PushTrackingTests: XCTestCase {
+    @MainActor
+    func testModelPublishesWithoutUpstreamAndPreservesExistingTracking() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("grove-push-\(UUID().uuidString)")
+        let root = directory.appendingPathComponent("repo")
+        let origin = directory.appendingPathComponent("origin.git")
+        let backup = directory.appendingPathComponent("backup.git")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let git = try await GitClient.resolve()
+        try await git.run(["init", "-q", "-b", "main"], in: root)
+        try await git.run(["config", "user.name", "测试"], in: root)
+        try await git.run(["config", "user.email", "t@example.invalid"], in: root)
+        try await git.run(["config", "push.autoSetupRemote", "false"], in: root)
+        try await git.run(["commit", "--allow-empty", "-qm", "初始"], in: root)
+        for remote in [origin, backup] {
+            try await git.run(["init", "--bare", "-q", remote.path], in: directory)
+        }
+        try await git.run(["remote", "add", "origin", origin.path], in: root)
+        let repository = RepositoryModel(root: root, git: git, app: nil)
+        await repository.refresh(loadForgeMetadata: false)
+        let worktree = try XCTUnwrap(repository.worktrees.first)
+        let model = try XCTUnwrap(repository.worktreeModel(for: worktree.path))
+        await model.refreshStatus()
+        XCTAssertNil(model.status.upstream)
+        await model.push()
+        var upstream = try await git.run(["rev-parse", "--abbrev-ref", "@{upstream}"], in: root)
+        XCTAssertEqual(upstream.trimmingCharacters(in: .whitespacesAndNewlines), "origin/main")
+        let local = try await git.run(["rev-parse", "HEAD"], in: root)
+        let published = try await git.run(["--git-dir=\(origin.path)", "rev-parse", "refs/heads/main"], in: directory)
+        XCTAssertEqual(local, published)
+
+        // 远端已有同名分支，但本地尚未建立跟踪时仍能补建上游。
+        try await git.run(["config", "--unset", "branch.main.remote"], in: root)
+        try await git.run(["config", "--unset", "branch.main.merge"], in: root)
+        await model.refreshStatus()
+        await model.push()
+        upstream = try await git.run(["rev-parse", "--abbrev-ref", "@{upstream}"], in: root)
+        XCTAssertEqual(upstream.trimmingCharacters(in: .whitespacesAndNewlines), "origin/main")
+
+        // 显式推送到备份远端，不能把已有的 origin 上游改掉。
+        try await git.run(["remote", "add", "backup", backup.path], in: root)
+        await repository.refresh(loadForgeMetadata: false)
+        let backupRemote = try XCTUnwrap(repository.remotes.first { $0.name == "backup" })
+        await model.push(to: backupRemote)
+        upstream = try await git.run(["rev-parse", "--abbrev-ref", "@{upstream}"], in: root)
+        XCTAssertEqual(upstream.trimmingCharacters(in: .whitespacesAndNewlines), "origin/main")
+        let backedUp = try await git.run(["--git-dir=\(backup.path)", "rev-parse", "refs/heads/main"], in: directory)
+        XCTAssertEqual(local, backedUp)
+    }
+
     func testReadsActualTrackedSHAAndRemoteBranchAfterPush() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let root = directory.appendingPathComponent("repo")

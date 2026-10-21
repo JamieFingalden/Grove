@@ -1188,6 +1188,8 @@ final class WorktreeModel: Identifiable {
     /// 推送到指定远端。`remote` 为 nil 表示「按分支自己的上游推」，
     /// 也就是终端里裸 `git push` 的行为。
     func push(to remote: NamedRemote? = nil) async {
+        // 没有上游时，单加 --set-upstream 不够，还必须指定要发布到的远端。
+        let remote = remote ?? (status.upstream == nil ? defaultRemote : nil)
         let label = remote.map { "正在推送到 \($0.name)…" } ?? "正在推送…"
         // 推送真正落地后立刻读取结果，不能等界面刷新期间的其他 Git 操作改变引用。
         var pushedCommit: (branch: String, sha: String)?
