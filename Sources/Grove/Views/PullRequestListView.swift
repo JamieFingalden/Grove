@@ -9,6 +9,8 @@ struct PullRequestListView: View {
     /// 进入时默认选中的编号。深链接（从别处跳到某个具体请求）和离屏渲染都要用它 ——
     /// 选中状态是视图内部的 @State，外面没有别的办法预置。
     var initialSelection: Int?
+    var initialMode: WorkspaceMode? = nil
+    var previewHoverNumber: Int? = nil
     var projectTab: Binding<ProjectHomeTab>? = nil
     enum WorkspaceMode {
         case list
@@ -106,7 +108,7 @@ struct PullRequestListView: View {
             guard pageActive else { return }
             if selection == nil, let initialSelection {
                 selection = initialSelection
-                mode = .review
+                mode = initialMode ?? .review
             }
             await repository.refreshPullRequests(ifNeeded: true)
         }
@@ -200,7 +202,8 @@ struct PullRequestListView: View {
                             ),
                             aiVerdict: appModel.cachedAIReview(
                                 for: repository.root, pullRequestNumber: pullRequest.number
-                            )?.review.verdict
+                            )?.review.verdict,
+                            isHoveredForPreview: pullRequest.number == previewHoverNumber
                         )
                         .tag(pullRequest.number)
                         .simultaneousGesture(TapGesture().onEnded {
@@ -209,7 +212,9 @@ struct PullRequestListView: View {
                                 mode = .review
                             }
                         })
-                        .listRowBackground(selectionBackground(selection == pullRequest.number))
+                        .listRowInsets(EdgeInsets(top: 2, leading: GroveStyle.Space.sm, bottom: 2, trailing: GroveStyle.Space.sm))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                         .contextMenu { menu(for: pullRequest) }
                     }
                 }
@@ -315,12 +320,6 @@ struct PullRequestListView: View {
         }
     }
 
-    /// 跟 Finder 侧栏一致：浅灰圆角底，不使用整块高饱和蓝色。
-    private func selectionBackground(_ isSelected: Bool) -> some View {
-        RoundedRectangle(cornerRadius: GroveStyle.radius, style: .continuous)
-            .fill(isSelected ? Color.primary.opacity(0.08) : .clear)
-    }
-
     private func worktree(for pullRequest: PullRequest) -> Worktree? {
         let candidates = [pullRequest.headRefName, "pr-\(pullRequest.number)"]
         return repository.worktrees.first { worktree in
@@ -371,6 +370,15 @@ private struct PullRequestRow: View {
     let isSelected: Bool
     let isAIReviewing: Bool
     let aiVerdict: PullRequestAIReview.Verdict?
+    var isHoveredForPreview: Bool = false
+
+    @Environment(\.controlActiveState) private var controlActiveState
+    @Environment(\.colorSchemeContrast) private var colorContrast
+    @State private var isHovering = false
+
+    private var effectiveHover: Bool {
+        isHovering || isHoveredForPreview
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: GroveStyle.Space.sm) {
@@ -462,11 +470,69 @@ private struct PullRequestRow: View {
                 .padding(.top, 2)
             }
         }
+        .padding(.leading, 14)
+        .padding(.trailing, GroveStyle.Space.md)
         .padding(.vertical, GroveStyle.Space.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
-        .contentShape(Rectangle())
-        .modifier(GroveRowHover(isSelected: isSelected))
+        .background(rowBackground)
+        .contentShape(RoundedRectangle(cornerRadius: GroveStyle.radius, style: .continuous))
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovering = hovering
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var rowBackground: some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: GroveStyle.radius, style: .continuous)
+                .fill(backgroundColor)
+
+            if isSelected {
+                RoundedRectangle(cornerRadius: GroveStyle.radius, style: .continuous)
+                    .stroke(selectionBorderColor, lineWidth: 1)
+
+                Capsule()
+                    .fill(accentIndicatorColor)
+                    .frame(width: 3)
+                    .padding(.vertical, 8)
+                    .padding(.leading, 2)
+            } else if effectiveHover {
+                RoundedRectangle(cornerRadius: GroveStyle.radius, style: .continuous)
+                    .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+            }
+        }
+    }
+
+    private var backgroundColor: Color {
+        if isSelected {
+            if controlActiveState == .inactive {
+                return GroveStyle.inactiveSelection
+            }
+            return effectiveHover
+                ? Color.accentColor.opacity(colorContrast == .increased ? 0.28 : 0.16)
+                : Color.accentColor.opacity(colorContrast == .increased ? 0.22 : 0.11)
+        } else if effectiveHover {
+            return Color.primary.opacity(0.045)
+        } else {
+            return .clear
+        }
+    }
+
+    private var selectionBorderColor: Color {
+        if controlActiveState == .inactive {
+            return Color.primary.opacity(0.08)
+        }
+        return Color.accentColor.opacity(colorContrast == .increased ? 0.45 : 0.22)
+    }
+
+    private var accentIndicatorColor: Color {
+        if controlActiveState == .inactive {
+            return Color.secondary.opacity(0.4)
+        }
+        return Color.accentColor
     }
 
     private var statusTint: Color {
