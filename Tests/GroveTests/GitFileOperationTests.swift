@@ -37,6 +37,33 @@ final class GitFileOperationTests: XCTestCase {
         )
     }
 
+    func testEditorSaveReloadsAlreadySelectedDiff() async throws {
+        try write("初始\n", to: "a.txt")
+        try await git.stageAll(in: root)
+        try await git.commit(message: "初始", in: root)
+        try write("保存前\n", to: "a.txt")
+        let model = model()
+        await model.refreshChanges()
+        try await waitForDiff(model, containing: "保存前")
+
+        try await model.writeEditorFile("保存后\n", to: root.appendingPathComponent("a.txt"))
+        try await waitForDiff(model, containing: "保存后")
+        XCTAssertEqual(try read("a.txt"), "保存后\n")
+        let additions = model.diff?.flatMap { $0.hunks.flatMap(\.lines) }
+            .filter { $0.kind == .addition }.map(\.text)
+        XCTAssertEqual(additions, ["保存后"])
+    }
+
+    private func waitForDiff(_ model: WorktreeModel, containing text: String) async throws {
+        for _ in 0..<200 {
+            if model.diff?.flatMap({ $0.hunks.flatMap(\.lines) }).contains(where: { $0.text == text }) == true {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("选中文件的 diff 未更新：\(text)")
+    }
+
     func testStagingRefreshesIndexWithoutReloadingHistory() async throws {
         try write("原内容\n", to: "a.txt")
         let executable = root.appendingPathComponent(".git/git-wrapper")

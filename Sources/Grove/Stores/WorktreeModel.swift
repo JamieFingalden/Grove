@@ -1033,6 +1033,7 @@ final class WorktreeModel: Identifiable {
 
     func writeEditorFile(_ text: String, to url: URL) async throws {
         try await git.writeData(Data(text.utf8), toPath: url.path, atomic: true)
+        await refreshChanges()
     }
 
     func editorFileModificationDate(at url: URL) async -> Date? {

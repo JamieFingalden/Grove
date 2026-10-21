@@ -297,13 +297,6 @@ struct CodeEditorSheet: View {
         loadedModificationDate = await modificationDate()
         originalText = savedText
         isDirty = currentText != savedText
-        // 让 diff 和冲突区立刻反映这次编辑；失败不拦用户，状态栏会自己刷新。
-        if model != nil {
-            await model?.refreshStatus()
-            if conflictedChange != nil {
-                await model?.reloadConflictContent()
-            }
-        }
         return !isDirty
     }
 
