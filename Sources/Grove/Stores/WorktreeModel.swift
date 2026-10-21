@@ -43,6 +43,7 @@ final class WorktreeModel: Identifiable {
     @ObservationIgnored private var statusRequestID = UUID()
     @ObservationIgnored private var changesRequestID = UUID()
     @ObservationIgnored private var linkedRequestID = UUID()
+    @ObservationIgnored private var authorsRequestID = UUID()
     var linkedPullRequest: PullRequest?
 
     var isLoading = false
@@ -225,13 +226,15 @@ final class WorktreeModel: Identifiable {
 
     func refresh() async {
         guard !Task.isCancelled else { return }
+        let requestID = UUID()
+        authorsRequestID = requestID
         // 本地变更、历史和远端关联互不依赖，分别完成后立即发布。
         async let history: Void = reloadHistory()
         async let linked: Void = refreshLinkedPullRequest()
-        async let authors = knownAuthors.isEmpty ? git.authors(in: path) : knownAuthors
+        async let authors = git.authors(in: path)
         await refreshChanges()
         let loadedAuthors = await authors
-        if !Task.isCancelled { knownAuthors = loadedAuthors }
+        if !Task.isCancelled, authorsRequestID == requestID { knownAuthors = loadedAuthors }
         _ = await (history, linked)
     }
 

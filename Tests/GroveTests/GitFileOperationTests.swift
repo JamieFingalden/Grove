@@ -64,6 +64,26 @@ final class GitFileOperationTests: XCTestCase {
         XCTFail("选中文件的 diff 未更新：\(text)")
     }
 
+    func testRefreshUpdatesCachedAuthorsAndTheirCounts() async throws {
+        try write("初始\n", to: "a.txt")
+        try await git.stageAll(in: root)
+        try await git.commit(message: "初始", in: root)
+        let model = model()
+        await model.refresh()
+        XCTAssertEqual(model.knownAuthors.map(\.name), ["测试"])
+
+        // 外部提交出现新作者，已有作者的计数也必须随手动刷新更新。
+        try await git.run(["-c", "user.name=新作者", "-c", "user.email=new@example.invalid",
+                           "commit", "--allow-empty", "-qm", "新作者提交"], in: root)
+        try await git.run(["commit", "--allow-empty", "-qm", "原作者再次提交"], in: root)
+        await model.refresh()
+        let counts = Dictionary(uniqueKeysWithValues: model.knownAuthors.map { ($0.name, $0.count) })
+        XCTAssertEqual(counts, ["测试": 2, "新作者": 1])
+        let author = try XCTUnwrap(model.knownAuthors.first { $0.name == "新作者" })
+        await model.toggleAuthor(author)
+        XCTAssertEqual(model.commits.map(\.subject), ["新作者提交"])
+    }
+
     func testStagingRefreshesIndexWithoutReloadingHistory() async throws {
         try write("原内容\n", to: "a.txt")
         let executable = root.appendingPathComponent(".git/git-wrapper")
