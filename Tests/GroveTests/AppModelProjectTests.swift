@@ -21,6 +21,40 @@ final class AppModelProjectTests: XCTestCase {
         XCTAssertEqual(project.mergedWorktrees.map(\.id), [first.id, second.id])
     }
 
+    func testLocalOriginThatCannotBeParsedIsNotReportedAsMissingRemote() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("grove-unparsed-origin-\(UUID().uuidString)")
+        let root = directory.appendingPathComponent("repo")
+        let bare = directory.appendingPathComponent("origin.git")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: bare, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await git.run(["init", "-q", "-b", "main"], in: root)
+        try await git.run(["init", "--bare", "-q"], in: bare)
+        try await git.run(["remote", "add", "origin", bare.path], in: root)
+
+        let app = AppModel()
+        let repository = RepositoryModel(root: root, git: git, app: app)
+        await repository.refresh(loadForgeMetadata: false)
+
+        XCTAssertTrue(repository.hasRemote)
+        XCTAssertTrue(repository.hasOrigin)
+        XCTAssertNil(repository.origin, "本地路径远端不能解析成托管平台地址")
+        XCTAssertNil(repository.forgeSetup, "已有但无法解析的 origin 不应显示成未配置远端")
+        XCTAssertEqual(repository.pullRequestUnavailableReason, "无法识别 origin 的地址。")
+
+        try await git.run(["remote", "rename", "origin", "backup"], in: root)
+        await repository.refresh(loadForgeMetadata: false)
+        XCTAssertNil(repository.forgeSetup)
+        XCTAssertEqual(repository.pullRequestUnavailableReason, "这个仓库没有配置 origin。")
+
+        try await git.run(["remote", "remove", "backup"], in: root)
+        await repository.refresh(loadForgeMetadata: false)
+        XCTAssertFalse(repository.hasRemote)
+        XCTAssertEqual(repository.forgeSetup?.summary, "这个仓库没有配置远端。")
+    }
+
     func testSamePathOnDifferentServersHasDistinctRowsAndSheets() {
         let path = URL(fileURLWithPath: "/srv/project")
         let first = RepositoryModel(root: path, git: git, app: nil, server: RemoteServer(host: "dev.example.com"))

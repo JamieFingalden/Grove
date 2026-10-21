@@ -199,6 +199,7 @@ final class PullRequestLoadStateTests: XCTestCase {
             forge: GitHubClient(executable: executable, environment: [:]))
         repository.origin = GitRemote.parse("https://github.com/team/Grove.git")
         repository.hasRemote = true
+        repository.hasOrigin = true
         repository.defaultBranch = "main"
         let worktree = Worktree(path: directory, head: nil, branch: "feature", isBare: false,
                                 isDetached: false, lockReason: nil, prunableReason: nil)
@@ -241,6 +242,7 @@ final class PullRequestLoadStateTests: XCTestCase {
             forge: GitHubClient(executable: URL(fileURLWithPath: "/bin/false"), environment: [:]))
         repository.origin = GitRemote.parse("https://github.com/team/Grove.git")
         repository.hasRemote = true
+        repository.hasOrigin = true
         repository.defaultBranch = "main"
         repository.resolveForgeMetadata()
         let request = PullRequest(number: 8, title: "已有评审", state: "OPEN", isDraft: false,

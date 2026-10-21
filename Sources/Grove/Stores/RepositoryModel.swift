@@ -871,6 +871,9 @@ final class RepositoryModel: Identifiable {
         // 说明走 pullRequestUnavailableReason 那条路。
         guard !isRemote else { return nil }
         guard forge == nil else { return nil }
+        // 本地路径等 Git 合法的 origin 可能无法解析成托管平台地址。
+        // 有远端却解析失败时要显示“无法识别 origin”，不能把 nil 解释成无远端。
+        guard !hasRemote || origin != nil else { return nil }
         return app?.forgeSetup(for: origin)
     }
 
@@ -882,6 +885,7 @@ final class RepositoryModel: Identifiable {
             return "远程服务器仓库暂不支持 PR / CI 视图。git 操作（提交、同步、工作树、冲突解决）全部可用；要看这个项目的 PR 和流水线，请把本地副本加进 Grove。"
         }
         guard hasRemote else { return "这个仓库没有配置远端。" }
+        guard hasOrigin else { return "这个仓库没有配置 origin。" }
         guard origin != nil else { return "无法识别 origin 的地址。" }
         guard forge != nil else { return app?.forgeSetup(for: origin)?.summary ?? "代码托管平台还未就绪，请检查 GitHub / GitLab CLI。" }
         if let forge, let message = app?.availability(of: forge.kind).message { return message }
