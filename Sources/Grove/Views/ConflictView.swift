@@ -1,6 +1,22 @@
 import AppKit
 import SwiftUI
 
+extension WorktreeModel {
+    /// 解决冲突的界面入口共用确认；标记数量由模型在暂存前重新读盘。
+    @discardableResult
+    func confirmMarkConflictResolved(_ change: FileChange) async -> Bool {
+        await markConflictResolved(change) { remaining in
+            let alert = NSAlert()
+            alert.messageText = "文件里还有 \(remaining) 处冲突标记"
+            alert.informativeText = "「\(change.displayName)」里仍然有 <<<<<<< 这样的标记。现在标记为已解决，这些标记会原样进入提交。"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "仍然标记为已解决")
+            alert.addButton(withTitle: "取消")
+            return alert.runModal() == .alertFirstButtonReturn
+        }
+    }
+}
+
 /// 冲突文件的解决面板。
 ///
 /// 顶部一条图例说清「当前 / 传入」两侧各是谁 —— git 的 ours/theirs 在变基时是反的，
@@ -127,7 +143,7 @@ private struct ConflictLegend: View {
                 }
 
                 Button("标记为已解决") {
-                    Task { await confirmMarkResolved() }
+                    Task { await model.confirmMarkConflictResolved(change) }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -153,21 +169,6 @@ private struct ConflictLegend: View {
             Label("还有 \(editor.remainingCount) / \(total) 个冲突块未处理", systemImage: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
         }
-    }
-
-    @MainActor
-    private func confirmMarkResolved() async {
-        let remaining = await model.unresolvedMarkerCount(in: change)
-        if remaining > 0 {
-            let alert = NSAlert()
-            alert.messageText = "文件里还有 \(remaining) 处冲突标记"
-            alert.informativeText = "「\(change.displayName)」里仍然有 <<<<<<< 这样的标记。现在标记为已解决，这些标记会原样进入提交。"
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "仍然标记为已解决")
-            alert.addButton(withTitle: "取消")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
-        await model.markConflictResolved(change)
     }
 
     @MainActor
@@ -355,7 +356,7 @@ private struct NoMarkersView: View {
             Text("看起来已经在外部处理过了。确认内容没问题就标记为已解决；想重来可以恢复冲突标记。")
         } actions: {
             Button("标记为已解决") {
-                Task { await model.markConflictResolved(change) }
+                Task { await model.confirmMarkConflictResolved(change) }
             }
             .buttonStyle(.borderedProminent)
             .disabled(model.activity != nil)

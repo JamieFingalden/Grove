@@ -338,6 +338,53 @@ final class ConflictEditorModelTests: XCTestCase {
         XCTAssertEqual(status.operation, .merge)
     }
 
+    func testMarkResolvedChecksDiskAfterNoMarkerContentWasLoaded() async throws {
+        try await makeMergeConflict()
+        let model = WorktreeModel(
+            worktree: Worktree(path: root, head: nil, branch: "main", isBare: false,
+                               isDetached: false, lockReason: nil, prunableReason: nil),
+            repository: nil, git: git, app: nil
+        )
+        await model.refreshStatus()
+        let conflicted = try XCTUnwrap(model.status.conflictedChanges.first { $0.path == "both.txt" })
+        try write("手工解决\n", to: "both.txt")
+        model.selectedPath = "both.txt"
+        await model.reloadConflictContent()
+        guard case .editor(let editor) = model.conflictContent else { return XCTFail("未加载冲突文本") }
+        XCTAssertTrue(editor.document.blocks.isEmpty)
+
+        let markers = "<<<<<<< HEAD\n当前内容\n=======\n传入内容\n>>>>>>> feature\n"
+        try write(markers, to: "both.txt")
+        var warningCount = 0
+        let cancelled = await model.markConflictResolved(conflicted) { count in
+            warningCount = count
+            return false
+        }
+        XCTAssertFalse(cancelled)
+        XCTAssertEqual(warningCount, 1)
+        let stillConflicted = try await git.status(in: root).changes.first { $0.path == "both.txt" }
+        XCTAssertEqual(stillConflicted?.isConflicted, true, "取消确认不得改动索引")
+        XCTAssertEqual(try read("both.txt"), markers)
+
+        await model.reloadConflictContent()
+        try await model.writeEditorFile("真正解决\n", to: root.appendingPathComponent("both.txt"))
+        for _ in 0..<200 {
+            if case .editor(let updated) = model.conflictContent, updated.document.blocks.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard case .editor(let updated) = model.conflictContent else { return XCTFail("保存后丢失冲突内容") }
+        XCTAssertTrue(updated.document.blocks.isEmpty, "保存后必须自动重载冲突内容")
+        let resolved = await model.markConflictResolved(conflicted) { _ in
+            XCTFail("无标记时不应警告")
+            return false
+        }
+        XCTAssertTrue(resolved)
+        let remaining = try await git.status(in: root).changes.first { $0.path == "both.txt" }
+        XCTAssertEqual(remaining?.isConflicted, false)
+        let staged = try await git.run(["show", ":both.txt"], in: root)
+        XCTAssertEqual(staged, "真正解决\n")
+    }
+
     /// 逐块选择要真的落到磁盘上，撤销要能把标记还回来，
     /// 而且不能盖掉用户同时在外部编辑器里做的改动。
     func testBlockResolutionWritesFileSupportsUndoAndRespectsExternalEdits() async throws {
@@ -387,7 +434,10 @@ final class ConflictEditorModelTests: XCTestCase {
         let reloaded = try await waitForEditor(model)
         XCTAssertTrue(reloaded.document.blocks.isEmpty)
 
-        await model.markConflictResolved(reloaded.change)
+        await model.markConflictResolved(reloaded.change) { _ in
+            XCTFail("已经清空标记，不应要求确认")
+            return false
+        }
         XCTAssertFalse(model.status.hasConflicts || model.status.conflictedChanges.contains { $0.path == "both.txt" })
         XCTAssertEqual(model.status.changes.first { $0.path == "both.txt" }?.staged, .modified)
     }

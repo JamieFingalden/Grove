@@ -874,10 +874,17 @@ final class WorktreeModel: Identifiable {
     }
 
     /// 把工作区里现在的内容当作解决结果（`git add` / `git rm`）。
-    func markConflictResolved(_ change: FileChange) async {
+    @discardableResult
+    func markConflictResolved(_ change: FileChange, confirmingMarkers: (Int) -> Bool) async -> Bool {
+        // 所有界面入口都在暂存前读盘，不能依赖可能已过期的冲突视图。
+        let remaining = await unresolvedMarkerCount(in: change)
+        guard remaining == 0 || confirmingMarkers(remaining) else { return false }
+        var succeeded = false
         await mutate("标记 \(change.displayName) 为已解决") {
             try await self.git.markConflictResolved(path: change.path, in: self.path)
+            succeeded = true
         }
+        return succeeded
     }
 
     /// 文件里现在还剩几个冲突块。标记为已解决之前用它拦一下 ——

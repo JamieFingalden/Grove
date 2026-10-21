@@ -415,7 +415,7 @@ private struct ConflictRow: View {
             Spacer(minLength: 4)
 
             Button {
-                Task { await confirmMarkResolved() }
+                Task { await model.confirmMarkConflictResolved(change) }
             } label: {
                 Image(systemName: "checkmark")
                     .font(.system(size: 9.5, weight: .semibold))
@@ -432,7 +432,7 @@ private struct ConflictRow: View {
         .contextMenu {
             Button("采用当前更改") { Task { await model.resolveConflict(change, taking: .ours) } }
             Button("采用传入的更改") { Task { await model.resolveConflict(change, taking: .theirs) } }
-            Button("标记为已解决") { Task { await confirmMarkResolved() } }
+            Button("标记为已解决") { Task { await model.confirmMarkConflictResolved(change) } }
             Divider()
             Button("打开文件") {
                 SystemActions.openFile(in: model.path, path: change.path)
@@ -446,22 +446,6 @@ private struct ConflictRow: View {
                 Button("恢复冲突标记…") { Task { await confirmRestore() } }
             }
         }
-    }
-
-    /// 带着 `<<<<<<<` 提交出去是冲突解决里最常见的事故，标记前先数一遍。
-    @MainActor
-    private func confirmMarkResolved() async {
-        let remaining = await model.unresolvedMarkerCount(in: change)
-        if remaining > 0 {
-            let alert = NSAlert()
-            alert.messageText = "文件里还有 \(remaining) 处冲突标记"
-            alert.informativeText = "「\(change.displayName)」里仍然有 <<<<<<< 这样的标记。现在标记为已解决，这些标记会原样进入提交。"
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "仍然标记为已解决")
-            alert.addButton(withTitle: "取消")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
-        await model.markConflictResolved(change)
     }
 
     @MainActor

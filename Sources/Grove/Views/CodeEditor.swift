@@ -32,7 +32,6 @@ struct CodeEditorSheet: View {
     @State private var showsOverwriteConfirmation = false
     @State private var showsUnsavedConfirmation = false
     @State private var showsReloadConfirmation = false
-    @State private var showsResolveConfirmation = false
     @State private var rehighlightTask: Task<Void, Never>?
 
     var body: some View {
@@ -91,12 +90,6 @@ struct CodeEditorSheet: View {
             Button("继续编辑", role: .cancel) {}
         } message: {
             Text("刚才的改动还没保存。")
-        }
-        .confirmationDialog("还有冲突标记", isPresented: $showsResolveConfirmation) {
-            Button("就这样标记为已解决") { Task { await markResolved() } }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("文件里还剩 \(remainingMarkerCount) 处 \(conflictMarkerText) 标记。带着标记标记为已解决，容易把「<<<<<<<」提交出去。")
         }
         .confirmationDialog("放弃这里的修改？", isPresented: $showsReloadConfirmation) {
             Button("放弃修改并重新加载", role: .destructive) { load() }
@@ -170,11 +163,7 @@ struct CodeEditorSheet: View {
                 Button("保存并标记为已解决…") {
                     Task {
                         guard await save() else { return }
-                        if remainingMarkerCount > 0 {
-                            showsResolveConfirmation = true
-                        } else {
-                            await markResolved()
-                        }
+                        await markResolved()
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -212,8 +201,6 @@ struct CodeEditorSheet: View {
     private var lineCount: Int {
         currentText.components(separatedBy: .newlines).count
     }
-
-    private let conflictMarkerText = "<<<<<<<"
 
     /// 工作区文本里还剩几个冲突块。清零之前不让轻易「标记为已解决」——
     /// 带着标记提交是冲突解决里最常见的事故。
@@ -305,7 +292,7 @@ struct CodeEditorSheet: View {
         guard let change = conflictedChange else { return }
         isSaving = true
         defer { isSaving = false }
-        await model?.markConflictResolved(change)
+        guard await model?.confirmMarkConflictResolved(change) == true else { return }
         // 远程暂存期间仍能继续输入，不能关闭并丢掉这些尚未保存的文字。
         if !isDirty { dismiss() }
     }
