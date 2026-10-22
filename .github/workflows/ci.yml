@@ -68,6 +68,12 @@ jobs:
           asset="Grove-$VERSION-arm64.dmg"
           mv "Grove-$VERSION.dmg" "$asset"
           shasum -a 256 "$asset" > "$asset.sha256"
+          read -r checksum _ < "$asset.sha256"
+          sed -E \
+            -e "s/^  version \".*\"$/  version \"$VERSION\"/" \
+            -e "s/^  sha256 \".*\"$/  sha256 \"$checksum\"/" \
+            ../Casks/grove.rb > grove.rb
+          ruby -c grove.rb
 
       - name: 上传安装包
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 固定 v7.0.1
@@ -76,6 +82,7 @@ jobs:
           path: |
             dist/*.dmg
             dist/*.sha256
+            dist/grove.rb
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
@@ -105,7 +112,7 @@ jobs:
         run: |
           cd dist
           sha256sum --check *.sha256
-          gh release create "$RELEASE_TAG" *.dmg *.sha256 \
+          gh release create "$RELEASE_TAG" *.dmg *.sha256 grove.rb \
             --verify-tag \
             --title "Grove $RELEASE_TAG" \
             --generate-notes

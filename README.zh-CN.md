@@ -8,6 +8,19 @@ Grove 是一个原生 macOS 应用，把 git 工作树（worktree）和代码评
 
 它围绕的工作流是：看到一个 PR，一键检出成新工作树，不打断手头的活就能review 或者修，合并之后连工作树带分支一起删掉。
 
+## 快速开始
+
+从 [Releases](https://github.com/JamieFingalden/Grove/releases) 下载 DMG，或通过项目自有的 Homebrew tap 安装：
+
+```sh
+brew tap JamieFingalden/grove https://github.com/JamieFingalden/Grove.git
+brew install --cask JamieFingalden/grove/grove
+```
+
+发布的安装包需要 **Apple Silicon 和 macOS 14+**，未经过 Apple 公证。首次启动被 macOS 拦截时，请按[首次打开说明](docs/getting-started.zh-CN.md#首次打开)操作。
+
+跟随[快速入门](docs/getting-started.zh-CN.md)完成打开仓库、创建工作树和检出 PR/MR。tap 的发布和更新方式见 [Homebrew 维护说明](docs/release/homebrew.md)。
+
 ## 系统要求
 
 - macOS 14 或更高版本
@@ -42,13 +55,15 @@ zsh scripts/build.sh
 发布版本前，先更新 `Support/Info.plist` 中的 `CFBundleShortVersionString`（三个数字组成的版本号），并递增 `CFBundleVersion`，提交并推送修改，等待 `main` 的 CI 通过。然后在包含版本修改的提交上创建并推送匹配的标签，例如：
 
 ```sh
-git tag -a v0.2.0 -m "Grove v0.2.0"
-git push origin v0.2.0
+git tag -a v0.2.1 -m "Grove v0.2.1"
+git push origin v0.2.1
 ```
 
 标签必须与 plist 版本完全一致（`v<版本号>`）。arm64 构建通过后，CI 才会创建 GitHub Release，附带自动生成的版本说明、DMG 和校验文件。已有 Release 不会被覆盖，发布修复时应使用新版本号。手动运行只生成构建产物，即使选择标签也不会发布 Release。
 
 无需配置自定义密钥，发布使用内置的 `GITHUB_TOKEN`。CI 安装包采用临时签名，未经过 Apple 公证，macOS Gatekeeper 可能要求你显式批准后才能打开。
+
+CI 还会根据 DMG 的实际校验值生成 `grove.rb`，随 Release 一起发布。发布后用该文件更新 `Casks/grove.rb`，tap 才会提供新版；步骤见 [Homebrew 维护说明](docs/release/homebrew.md)。
 
 ## 功能
 

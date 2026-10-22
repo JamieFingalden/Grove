@@ -8,6 +8,19 @@ Worktrees let you keep several branches checked out at once, in separate directo
 
 The workflow it is built around: see a PR, check it out as a new worktree with one click, review or fix it without touching what you were doing, then delete the worktree and its branch when it merges.
 
+## Getting Started
+
+Download a DMG from [Releases](https://github.com/JamieFingalden/Grove/releases), or install through the project's Homebrew tap:
+
+```sh
+brew tap JamieFingalden/grove https://github.com/JamieFingalden/Grove.git
+brew install --cask JamieFingalden/grove/grove
+```
+
+Release binaries require **Apple Silicon and macOS 14+**. They are not Apple-notarized; if macOS blocks the first launch, follow the [first-launch instructions](docs/getting-started.md#first-launch).
+
+Follow the [Getting Started guide](docs/getting-started.md) to open a repository, create a worktree, and review a PR/MR. See [Homebrew maintenance](docs/release/homebrew.md) for tap publication and updates.
+
 ## Requirements
 
 - macOS 14 or later
@@ -42,13 +55,15 @@ This produces `dist/Grove.app`. The script generates the icon, compiles a releas
 To publish a release, update `CFBundleShortVersionString` (three numeric components) and increment `CFBundleVersion` in `Support/Info.plist`, commit and push the changes, and wait for the `main` CI to pass. Then push a matching tag on the commit containing the version update, for example:
 
 ```sh
-git tag -a v0.2.0 -m "Grove v0.2.0"
-git push origin v0.2.0
+git tag -a v0.2.1 -m "Grove v0.2.1"
+git push origin v0.2.1
 ```
 
 The tag must match the plist version exactly (`v<version>`). The arm64 build must pass before CI creates a GitHub Release with generated notes, the DMG, and its checksum. An existing release is not overwritten; publish fixes under a new version. Manual runs only produce artifacts, even when a tag is selected.
 
 No custom secrets are needed: publishing uses the built-in `GITHUB_TOKEN`. CI packages use ad-hoc signing and are not Apple-notarized, so macOS Gatekeeper may require explicit approval to open them.
+
+CI also generates a `grove.rb` release asset using the DMG's actual checksum. After publishing, update `Casks/grove.rb` from that asset to make the new version available through the tap; see [Homebrew maintenance](docs/release/homebrew.md).
 
 ## What it does
 
