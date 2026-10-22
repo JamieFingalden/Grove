@@ -461,4 +461,120 @@ final class VisualPolishRenderTests: XCTestCase {
         window.setContentSize(NSSize(width: 1280, height: 800))
         try await capture("pr-review-1280-split-diff")
     }
+
+    func testPullRequestListSelectionAndHoverPolish() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["GROVE_RENDER"] == "1", "设置 GROVE_RENDER=1 才会渲染")
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent("grove-pr-list-polish-\(UUID().uuidString)")
+        let root = container.appendingPathComponent("Grove")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: container) }
+        let suite = "grove.pr.list.polish.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AIGenerationSettings(defaults: defaults)
+        settings.setAutomaticReviewEnabled(false, for: root)
+        let app = AppModel(aiGenerationSettings: settings, aiReviewCache: AIReviewCache(defaults: defaults),
+                           remoteServerStore: RemoteServerStore(defaults: defaults),
+                           remoteProjectStore: RemoteProjectStore(defaults: defaults))
+        await app.bootstrap()
+        let git = try await GitClient.resolve()
+        try await git.run(["init", "-q", "-b", "main"], in: root)
+        try await git.run(["config", "user.name", "视觉预览"], in: root)
+        try await git.run(["config", "user.email", "preview@example.invalid"], in: root)
+        try await git.run(["commit", "--allow-empty", "-qm", "预览初始提交"], in: root)
+        try await git.run(["remote", "add", "origin", "https://gitlab.example.com/developer/Grove.git"], in: root)
+
+        let executable = container.appendingPathComponent("glab")
+        let script = """
+        #!/bin/sh
+        case "$*" in
+          *"merge_requests"*)
+            cat << 'EOF'
+        [
+          {"iid":10,"title":"fix: 仓库标识改为本地解析，评审入口不再等网络探测或 PR 列表加载","state":"merged","source_branch":"feature/new-page","target_branch":"main","web_url":"https://gitlab.example.com/developer/Grove/-/merge_requests/10","author":{"username":"jamie","name":"Jamie Fingalden"},"updated_at":"2026-10-15T07:00:00Z","head_pipeline":{"id":1,"status":"success"}},
+          {"iid":9,"title":"feat: PR 详情改为列表/评审双模式全屏切换，详情重构为概览/代码/检查/评审四分区","state":"merged","source_branch":"feature/new-ui","target_branch":"main","web_url":"https://gitlab.example.com/developer/Grove/-/merge_requests/9","author":{"username":"jamie","name":"Jamie Fingalden"},"updated_at":"2026-10-14T07:00:00Z","head_pipeline":{"id":2,"status":"success"}},
+          {"iid":8,"title":"feat: 引入统一设计系统 GroveStyle 与自绘图标体系，PR/CI 页新增加载/空/失败三态","state":"closed","source_branch":"feature/new-ui","target_branch":"main","web_url":"https://gitlab.example.com/developer/Grove/-/merge_requests/8","author":{"username":"jamie","name":"Jamie Fingalden"},"updated_at":"2026-10-13T07:00:00Z"}
+        ]
+        EOF
+            ;;
+          *)
+            echo "[]"
+            ;;
+        esac
+        """
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+
+        let repository = RepositoryModel(root: root, git: git, app: app,
+            forge: GitLabClient(executable: executable, environment: ProcessInfo.processInfo.environment))
+        repository.slug = "developer/Grove"
+        repository.origin = GitRemote.parse("https://gitlab.example.com/developer/Grove.git")
+        repository.hasRemote = true
+        repository.hasOrigin = true
+        repository.defaultBranch = "main"
+        repository.worktrees = try await git.worktrees(in: root)
+        app.repositories = [repository]
+
+        await repository.refreshPullRequests()
+
+        let output = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/ui-polish")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+
+        let listView = NavigationSplitView {
+            SidebarView(sheet: .constant(nil))
+                .navigationSplitViewColumnWidth(min: 220, ideal: GroveStyle.sidebarWidth, max: 320)
+        } detail: {
+            PullRequestListView(repository: repository, initialSelection: 10, initialMode: .list, previewHoverNumber: 9)
+        }
+        .environment(app)
+
+        let controller = NSHostingController(rootView: listView.environment(\.colorScheme, .light)
+            .environment(\.controlActiveState, .key)
+            .frame(minWidth: 980, minHeight: 620))
+        controller.sizingOptions = []
+        let window = NSWindow(contentRect: CGRect(x: 120, y: 120, width: 1280, height: 800),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.title = "Grove · PR 列表交互"
+        window.toolbarStyle = .unified
+        window.contentViewController = controller
+        window.appearance = NSAppearance(named: .aqua)
+        defer { window.orderOut(nil); window.contentViewController = nil }
+        window.setContentSize(NSSize(width: 1280, height: 800))
+        NSApplication.shared.setActivationPolicy(.regular)
+        window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+
+        func capture(_ name: String, wait: Duration = .milliseconds(800)) async throws {
+            try await Task.sleep(for: wait)
+            window.layoutIfNeeded()
+            let path = output.appendingPathComponent(name + ".png").path
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+            process.arguments = ["-x", "-o", "-l", String(window.windowNumber), path]
+            let success = (try? process.run()) != nil && {
+                process.waitUntilExit()
+                return process.terminationStatus == 0
+            }()
+            if !success {
+                let rect = NSRect(origin: .zero, size: window.frame.size)
+                if let bitmap = window.contentView?.bitmapImageRepForCachingDisplay(in: rect) {
+                    window.contentView?.cacheDisplay(in: rect, to: bitmap)
+                    let image = NSImage(size: rect.size)
+                    image.addRepresentation(bitmap)
+                    if let data = bitmap.representation(using: .png, properties: [:]) {
+                        try data.write(to: URL(fileURLWithPath: path))
+                    }
+                }
+            }
+            print("已渲染原生窗口：\(path)")
+        }
+
+        try await capture("pr-list-polish-light")
+        window.appearance = NSAppearance(named: .darkAqua)
+        controller.rootView = listView.environment(\.colorScheme, .dark)
+            .environment(\.controlActiveState, .key)
+            .frame(minWidth: 980, minHeight: 620)
+        try await capture("pr-list-polish-dark")
+    }
 }
