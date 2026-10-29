@@ -142,6 +142,21 @@ struct ChangesView: View {
                 .background(Color.red.opacity(0.12), in: Capsule())
             }
 
+            if model.status.changes.contains(where: \.hasUndecodableName) {
+                let count = model.status.changes.filter(\.hasUndecodableName).count
+                HStack(spacing: 3) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                    Text("\(count) 个文件名无法解码")
+                        .font(GroveStyle.micro)
+                }
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1.5)
+                .background(Color.orange.opacity(0.12), in: Capsule())
+                .help("这些文件名包含无法按 UTF-8 解码的字节（多见于远程 Linux 仓库的历史文件名）。相关行上的操作已禁用，请在终端中处理。")
+            }
+
             Spacer()
 
             if model.isLoading {
@@ -311,6 +326,13 @@ private struct ChangeRow: View {
                     .help("部分暂存：这个文件在暂存区和工作区都有改动")
             }
 
+            if change.hasUndecodableName {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+                    .help("文件名包含无法按 UTF-8 解码的字节，Grove 拿到的路径与磁盘上的真实名字不一致，暂存、丢弃和 diff 都会失败。请在终端中处理该文件。")
+            }
+
             Button {
                 Task {
                     if isStaged { await model.unstage(change) } else { await model.stage(change) }
@@ -323,7 +345,8 @@ private struct ChangeRow: View {
             }
             .buttonStyle(.plain)
             .opacity(isHovering ? 1.0 : 0.4)
-            .help(isStaged ? "取消暂存" : "暂存")
+            .disabled(change.hasUndecodableName)
+            .help(stageButtonHelp)
         }
         .padding(.vertical, 2.5)
         .contentShape(Rectangle())
@@ -334,6 +357,7 @@ private struct ChangeRow: View {
                     if isStaged { await model.unstage(change) } else { await model.stage(change) }
                 }
             }
+            .disabled(change.hasUndecodableName)
             Button("打开文件") {
                 SystemActions.openFile(in: model.path, path: change.path)
             }
@@ -347,8 +371,16 @@ private struct ChangeRow: View {
                 Button("丢弃改动…", role: .destructive) {
                     Task { await confirmDiscard() }
                 }
+                .disabled(change.hasUndecodableName)
             }
         }
+    }
+
+    private var stageButtonHelp: String {
+        if change.hasUndecodableName {
+            return "文件名含无法解码的字节，无法按路径操作"
+        }
+        return isStaged ? "取消暂存" : "暂存"
     }
 
     private var tint: Color {
@@ -424,15 +456,21 @@ private struct ConflictRow: View {
             }
             .buttonStyle(.plain)
             .opacity(isHovering ? 1.0 : 0.5)
-            .help("标记为已解决：把工作区里现在的内容当作结果")
+            .disabled(change.hasUndecodableName)
+            .help(change.hasUndecodableName
+                  ? "文件名含无法解码的字节，无法按路径操作；请在终端中处理"
+                  : "标记为已解决：把工作区里现在的内容当作结果")
         }
         .padding(.vertical, 2.5)
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .contextMenu {
             Button("采用当前更改") { Task { await model.resolveConflict(change, taking: .ours) } }
+                .disabled(change.hasUndecodableName)
             Button("采用传入的更改") { Task { await model.resolveConflict(change, taking: .theirs) } }
+                .disabled(change.hasUndecodableName)
             Button("标记为已解决") { Task { await model.confirmMarkConflictResolved(change) } }
+                .disabled(change.hasUndecodableName)
             Divider()
             Button("打开文件") {
                 SystemActions.openFile(in: model.path, path: change.path)

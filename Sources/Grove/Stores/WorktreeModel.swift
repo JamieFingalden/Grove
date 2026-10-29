@@ -466,7 +466,21 @@ final class WorktreeModel: Identifiable {
 
     // MARK: - 暂存
 
+    /// 文件名没通过 UTF-8 解码的条目，Grove 拿到的路径与磁盘真实字节不一致，
+    /// 任何按路径的 git 操作都会失配。界面已禁用入口，这里再兜一层，
+    /// 防止其他调用路径漏掉。
+    private func decodableGuardFails(_ change: FileChange, action: String) -> Bool {
+        guard change.hasUndecodableName else { return false }
+        app?.report(
+            title: "无法\(action)「\(change.displayName)」",
+            detail: "这个文件名包含无法按 UTF-8 解码的字节，Grove 拿到的路径与磁盘上的真实名字不一致，按路径操作都会失败。请在终端中处理该文件。",
+            repository: repository, context: failureContext
+        )
+        return true
+    }
+
     func stage(_ change: FileChange) async {
+        guard !decodableGuardFails(change, action: "暂存") else { return }
         await mutate("暂存 \(change.displayName)") {
             try await self.git.stage(paths: [change.path], in: self.path)
         }
@@ -475,7 +489,10 @@ final class WorktreeModel: Identifiable {
     func stageAll() async {
         // 有冲突时不能 `add --all`：它会把还带着 `<<<<<<<` 标记的文件一起标成已解决。
         // 只加那些真正的未暂存改动，冲突文件走「标记为已解决」那条路。
-        let unresolved = status.changes.filter { $0.unstaged != nil && !$0.isConflicted }.map(\.path)
+        // 文件名无法解码的条目也要剔除——按失配路径 add 只会失败。
+        let unresolved = status.changes
+            .filter { $0.unstaged != nil && !$0.isConflicted && !$0.hasUndecodableName }
+            .map(\.path)
         if status.hasConflicts {
             guard !unresolved.isEmpty else { return }
         }
@@ -489,13 +506,16 @@ final class WorktreeModel: Identifiable {
     }
 
     func unstage(_ change: FileChange) async {
+        guard !decodableGuardFails(change, action: "取消暂存") else { return }
         await mutate("取消暂存 \(change.displayName)") {
             try await self.git.unstage(paths: Self.unstagePaths(for: change), in: self.path)
         }
     }
 
     func unstageAll() async {
-        let staged = status.changes.filter(\.isStaged).flatMap(Self.unstagePaths)
+        let staged = status.changes
+            .filter { $0.isStaged && !$0.hasUndecodableName }
+            .flatMap(Self.unstagePaths)
         guard !staged.isEmpty else { return }
         await mutate("全部取消暂存") {
             try await self.git.unstage(paths: staged, in: self.path)
@@ -509,6 +529,7 @@ final class WorktreeModel: Identifiable {
     }
 
     func discard(_ change: FileChange) async {
+        guard !decodableGuardFails(change, action: "丢弃") else { return }
         await mutate("丢弃 \(change.displayName) 的改动") {
             if change.unstaged == .untracked {
                 try await self.git.discard(paths: [], untracked: [change.path], in: self.path)
@@ -875,6 +896,7 @@ final class WorktreeModel: Identifiable {
     /// 整个文件采用一侧。
     func resolveConflict(_ change: FileChange, taking side: GitClient.ConflictSide) async {
         guard let kind = change.conflict else { return }
+        guard !decodableGuardFails(change, action: side.actionLabel) else { return }
         await mutate("\(side.actionLabel)：\(change.displayName)") {
             try await self.git.resolveConflict(path: change.path, taking: side, kind: kind, in: self.path)
         }
@@ -882,7 +904,8 @@ final class WorktreeModel: Identifiable {
 
     /// 所有冲突文件都采用同一侧。调用方必须先确认过 —— 这是一口气把所有文件定下来。
     func resolveAllConflicts(taking side: GitClient.ConflictSide) async {
-        let conflicted = status.conflictedChanges
+        // 文件名无法解码的条目按失配路径操作必然失败，跳过并保留未解决状态。
+        let conflicted = status.conflictedChanges.filter { !$0.hasUndecodableName }
         guard !conflicted.isEmpty else { return }
         await mutate("全部\(side.actionLabel)") {
             for change in conflicted {
@@ -895,6 +918,7 @@ final class WorktreeModel: Identifiable {
     /// 把工作区里现在的内容当作解决结果（`git add` / `git rm`）。
     @discardableResult
     func markConflictResolved(_ change: FileChange, confirmingMarkers: (Int) -> Bool) async -> Bool {
+        guard !decodableGuardFails(change, action: "标记已解决") else { return false }
         // 所有界面入口都在暂存前读盘，不能依赖可能已过期的冲突视图。
         let remaining = await unresolvedMarkerCount(in: change)
         guard remaining == 0 || confirmingMarkers(remaining) else { return false }
@@ -917,6 +941,7 @@ final class WorktreeModel: Identifiable {
 
     /// 把文件恢复成 git 刚合并完、带冲突标记的样子。会丢掉用户在这个文件里做的所有改动。
     func restoreConflictMarkers(_ change: FileChange) async {
+        guard !decodableGuardFails(change, action: "恢复冲突标记") else { return }
         await mutate("恢复 \(change.displayName) 的冲突标记") {
             try await self.git.restoreConflictMarkers(path: change.path, in: self.path)
         }

@@ -193,4 +193,30 @@ final class StatusParserTests: XCTestCase {
         let status = StatusParser.parse(data)
         XCTAssertEqual(status.changes.map(\.path), ["alpha.txt", "middle.txt", "zebra.txt"])
     }
+
+    func testUndecodableFileNameIsFlagged() {
+        // 文件名字节不是合法 UTF-8（Latin-1 历史文件名，远程 Linux 仓库常见）。
+        // 宽松解码把非法字节换成 U+FFFD，路径与磁盘真实字节从此对不上；
+        // 条目必须能被识别出来，界面据此禁用按路径的操作并说明原因，
+        // 而不是让用户点了之后收到一句莫名的 pathspec 报错。
+        let data = Data("1 .M N... 100644 100644 100644 aaa bbb bad-".utf8)
+            + Data([0xFF, 0xFE])
+            + Data("-name.txt\0".utf8)
+
+        let status = StatusParser.parse(data)
+
+        XCTAssertEqual(status.changes.count, 1)
+        XCTAssertTrue(status.changes[0].hasUndecodableName)
+        XCTAssertTrue(status.changes[0].path.contains("\u{FFFD}"))
+
+        // 正常文件名不受影响；重命名的来源路径同样参与判定。
+        XCTAssertFalse(
+            FileChange(path: "正常.swift", originalPath: nil, staged: nil, unstaged: .modified, conflict: nil)
+                .hasUndecodableName
+        )
+        XCTAssertTrue(
+            FileChange(path: "ok.txt", originalPath: "\u{FFFD}旧名", staged: .renamed, unstaged: nil, conflict: nil)
+                .hasUndecodableName
+        )
+    }
 }
