@@ -209,6 +209,29 @@ struct AIGenerationSettings {
         }
     }
 
+    /// 清掉「路径已不在本机、且当前未打开」的仓库的项目级设置。
+    /// 提示词 / 审查范围 / 自动审查 / 自动发布四个字典按仓库路径为键、
+    /// 只增不减，仓库删除后条目成了死数据。仍在本机磁盘上的路径保留——
+    /// 重新打开时这些配置理应还在；当前打开的（可能在移动卷上）也保留。
+    func pruneRepositorySettings(keeping openRepositories: [URL]) {
+        let keep = Set(openRepositories.map { $0.standardizedFileURL.path })
+        let settingsKeys = [
+            reviewInstructionsKey, reviewAreasKey, legacyReviewInstructionsKey,
+            "grove.aiReview.automaticByRepository.v1", "grove.aiReview.autoPublishByRepository.v1"
+        ]
+        for key in settingsKeys {
+            guard var values = defaults.dictionary(forKey: key), !values.isEmpty else { continue }
+            let original = values
+            for path in original.keys {
+                guard !keep.contains(path), !FileManager.default.fileExists(atPath: path) else { continue }
+                values.removeValue(forKey: path)
+            }
+            if values.count != original.count {
+                defaults.set(values, forKey: key)
+            }
+        }
+    }
+
     var provider: AIGenerationProvider {
         defaults.string(forKey: providerKey)
             .flatMap(AIGenerationProvider.init(rawValue:)) ?? .codex

@@ -454,6 +454,29 @@ final class AIGenerationSettingsHeadStateTests: XCTestCase {
         settings.removeAutomaticReviewState(for: url)
         XCTAssertTrue(settings.hasNotifiedReviewHead("other", for: "https://github.com/a/b/pull/3"))
     }
+
+    func testPruneRepositorySettingsRemovesOnlyDeadPaths() throws {
+        let alive = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("grove-prune-alive-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: alive, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: alive) }
+
+        let dead = URL(fileURLWithPath: "/definitely/not/existing-\(UUID().uuidString)")
+        let openOnly = URL(fileURLWithPath: "/also/not/on/disk-\(UUID().uuidString)")
+
+        settings.setAutomaticReviewPublishEnabled(true, for: alive)   // 磁盘还在 → 保留
+        settings.setReviewInstructions("死数据", for: dead)
+        settings.setAutomaticReviewPublishEnabled(true, for: dead)    // 路径已消失 → 清掉
+        settings.setAutomaticReviewEnabled(false, for: openOnly)      // 虽不在磁盘，但当前打开 → 保留
+
+        settings.pruneRepositorySettings(keeping: [openOnly])
+
+        XCTAssertTrue(settings.automaticReviewPublishEnabled(for: alive), "磁盘上还在的仓库设置保留")
+        XCTAssertFalse(settings.automaticReviewPublishEnabled(for: dead), "路径消失的条目被清掉（回落默认值）")
+        XCTAssertEqual(settings.reviewInstructions(for: dead),
+                       PullRequestReviewPromptBuilder.defaultInstructions, "死仓库的提示词一并清掉")
+        XCTAssertFalse(settings.automaticReviewEnabled(for: openOnly), "当前打开的仓库（即使路径暂时不在磁盘）保留")
+    }
 }
 
 @MainActor

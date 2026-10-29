@@ -807,6 +807,9 @@ final class AppModel {
         async let repositoryRestore: Void = restoreBookmarkedRepositories()
         await detectForges()
         await repositoryRestore
+        // 顺手清一次「路径已不在本机且未打开」的仓库的项目级 AI 设置——
+        // 提示词/审查范围/自动审查/自动发布四个字典只有这里能收敛。
+        aiGenerationSettings.pruneRepositorySettings(keeping: repositories.map(\.root))
         overviewReady = true
         sshExecutable = await sshLocation
         // 本地评审入口不等 SSH 环境恢复，也不等其他项目的网络请求。
