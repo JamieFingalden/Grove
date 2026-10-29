@@ -52,7 +52,7 @@ brew update
 brew upgrade --cask JamieFingalden/grove/grove
 ```
 
-后续版本采用相同流程。无需修改 Cask 中的下载 URL 模板，也无需额外的自动提交机器人。
+后续版本采用相同流程。无需修改 Cask 中的下载 URL 模板，也无需额外的自动提交机器人；main 分支的 CI 会在每次推送时校验 `Casks/grove.rb` 的版本与最新已发布 Release 一致，忘记第 5 步回写会在下一次 push 时被直接拦下（发布完成前的中间态不受影响——校验对象是已建成的 Release，不是标签）。
 
 ## 检查范围
 

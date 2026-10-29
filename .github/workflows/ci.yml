@@ -46,6 +46,24 @@ jobs:
           fi
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
+      - name: 校验 Cask 与最新发布一致
+        # 发布后的手工回写（docs/release/homebrew.md 第 5 步）没有自动化；
+        # 这里在下一次 push main 时校验 Casks/grove.rb 与最新 Release 一致，
+        # 忘记回写会立刻被拦下，而不是 tap 静默停在旧版本。
+        # 按已发布 Release 而非 tag 比对：tag 推送后、Release 建成前是
+        # homebrew.md 许可的中间态，按 tag 比对会误报。
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          latest=$(gh release list --limit 1 --exclude-drafts --exclude-prereleases --json tagName --jq '.[0].tagName // ""' | sed 's/^v//')
+          cask=$(sed -n 's/^  version "\(.*\)"$/\1/p' Casks/grove.rb)
+          if [ -n "$latest" ] && [ "$cask" != "$latest" ]; then
+            echo "::error::Casks/grove.rb 版本 $cask 与最新已发布版本 $latest 不一致。请按 docs/release/homebrew.md 第 5 步，用发布附件中的 grove.rb 回写 Casks/grove.rb 后重新推送。"
+            exit 1
+          fi
+
       - name: 运行测试
         run: swift test
 
