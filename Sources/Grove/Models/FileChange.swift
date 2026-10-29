@@ -122,13 +122,12 @@ struct FileChange: Identifiable, Hashable, Sendable {
     var id: String { path }
     var isConflicted: Bool { conflict != nil }
 
-    /// 文件名没能按 UTF-8 解码（`CommandResult.decode` 把非法字节替换成了 U+FFFD）。
-    /// 这样的路径与磁盘 / 索引上的真实字节不再一致，任何按路径操作（暂存、丢弃、
-    /// diff）都会失配 —— 界面上要禁用操作并说明原因，而不是让用户点了个寂寞。
-    /// 真实文件名里出现字面 U+FFFD 实际不可能，判定不会误伤。
-    var hasUndecodableName: Bool {
-        path.contains("\u{FFFD}") || originalPath?.contains("\u{FFFD}") == true
-    }
+    /// 记录的字段没按 UTF-8 解码成功（`StatusParser` 解析时逐段严格解码判定）。
+    /// 这样的路径与磁盘 / 索引上的真实字节不一致，按路径的操作（暂存、丢弃、
+    /// diff、编辑）都会失配甚至写坏文件，界面要禁用并说明原因。
+    /// 刻意存解析期元数据而不是从字符串内容反推：字面 U+FFFD 是合法的
+    /// 文件名字符，反推会把真实名字里带 U+FFFD 的文件误伤成解码失败。
+    var hasUndecodableName = false
 
     var isStaged: Bool { staged != nil }
     var isFullyStaged: Bool { staged != nil && unstaged == nil }

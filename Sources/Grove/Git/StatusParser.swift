@@ -9,9 +9,20 @@ import Foundation
 /// （见下面 `2` 分支的注释），解析时必须用游标而不能简单 map。
 enum StatusParser {
     static func parse(_ data: Data) -> WorktreeStatus {
-        let text = CommandResult.decode(data)
-        // 末尾那个 NUL 会切出一个空段，直接滤掉。
-        let fields = text.components(separatedBy: "\0").filter { !$0.isEmpty }
+        // 先按 NUL 切**原始字节**、逐段严格解码：解码失败的段落记下元数据。
+        // 不能先整体宽松解码再从字符串反推——字面 U+FFFD 是合法文件名字符，
+        // 反推无法区分「解码替换出来的」和「名字里本来就有的」。
+        var fields: [String] = []
+        var undecodableFields: Set<Int> = []
+        for (offset, raw) in data.split(separator: 0, omittingEmptySubsequences: false).map(Data.init).enumerated() {
+            guard !raw.isEmpty else { continue }   // 末尾 NUL 切出的空段
+            if let text = String(data: raw, encoding: .utf8) {
+                fields.append(text)
+            } else {
+                fields.append(CommandResult.decode(raw))
+                undecodableFields.insert(offset)
+            }
+        }
 
         var status = WorktreeStatus.empty
         var changes: [FileChange] = []
@@ -19,6 +30,7 @@ enum StatusParser {
 
         while index < fields.count {
             let field = fields[index]
+            let fieldUndecodable = undecodableFields.contains(index)
             index += 1
 
             guard let marker = field.first else { continue }
@@ -26,19 +38,37 @@ enum StatusParser {
             case "#":
                 applyHeader(field, to: &status)
             case "1":
-                if let change = parseOrdinary(field) { changes.append(change) }
+                if var change = parseOrdinary(field) {
+                    change.hasUndecodableName = fieldUndecodable
+                    changes.append(change)
+                }
             case "2":
                 // 重命名 / 复制：来源路径是**下一段**，不在本段里。
                 // git 这么设计是为了让两个路径都能安全地含任意字节。
-                let originalPath = index < fields.count ? fields[index] : nil
-                if originalPath != nil { index += 1 }
-                if let change = parseRename(field, originalPath: originalPath) { changes.append(change) }
+                let hasOriginalPath = index < fields.count
+                let originalPath = hasOriginalPath ? fields[index] : nil
+                var originalUndecodable = false
+                if hasOriginalPath {
+                    originalUndecodable = undecodableFields.contains(index)
+                    index += 1
+                }
+                if var change = parseRename(field, originalPath: originalPath) {
+                    change.hasUndecodableName = fieldUndecodable || originalUndecodable
+                    changes.append(change)
+                }
             case "u":
-                if let change = parseUnmerged(field) { changes.append(change) }
+                if var change = parseUnmerged(field) {
+                    change.hasUndecodableName = fieldUndecodable
+                    changes.append(change)
+                }
             case "?":
                 let path = String(field.dropFirst(2))
                 if !path.isEmpty {
-                    changes.append(FileChange(path: path, originalPath: nil, staged: nil, unstaged: .untracked, conflict: nil))
+                    changes.append(FileChange(
+                        path: path, originalPath: nil, staged: nil,
+                        unstaged: .untracked, conflict: nil,
+                        hasUndecodableName: fieldUndecodable
+                    ))
                 }
             case "!":
                 break   // 被忽略的文件不进变更列表

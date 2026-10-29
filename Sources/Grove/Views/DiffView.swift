@@ -185,7 +185,10 @@ struct DiffPane: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("直接在 Grove 里编辑这个文件（⌘S 保存）；冲突文件改完可以标记为已解决")
+                .disabled(change.hasUndecodableName)
+                .help(change.hasUndecodableName
+                      ? "文件名含无法解码的字节，编辑会把替换字符写回磁盘、损坏文件"
+                      : "直接在 Grove 里编辑这个文件（⌘S 保存）；冲突文件改完可以标记为已解决")
             }
 
             if let change = model.selectedChange, !showsConflictPane(for: change) {
@@ -210,6 +213,8 @@ struct DiffPane: View {
                 }
             } else if let change = model.selectedChange, showsConflictPane(for: change) {
                 ConflictPane(model: model, change: change)
+            } else if let change = model.selectedChange, change.hasUndecodableName {
+                undecodableNameExplanation
             } else if let diff = model.diff {
                 if diff.isEmpty {
                     emptyDiffExplanation
@@ -238,6 +243,16 @@ struct DiffPane: View {
     private func showsConflictPane(for change: FileChange) -> Bool {
         guard let kind = change.conflict else { return false }
         return !kind.hasTextualMarkers || model.conflictViewMode == .resolve
+    }
+
+    /// 文件名没按 UTF-8 解码：按路径的读取必然失配。说清楚原因，
+    /// 而不是留一片空白或弹一条没人看得懂的 pathspec 报错。
+    private var undecodableNameExplanation: some View {
+        ContentUnavailableView {
+            Label("无法读取这个文件", systemImage: "exclamationmark.triangle")
+        } description: {
+            Text("文件名包含无法按 UTF-8 解码的字节，Grove 拿到的路径与磁盘上的真实名字不一致。请在终端中处理该文件。")
+        }
     }
 
     /// diff 为空有好几种正当原因。直接显示空白会让人以为程序坏了，

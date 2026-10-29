@@ -403,6 +403,14 @@ final class WorktreeModel: Identifiable {
             return
         }
 
+        if change.hasUndecodableName {
+            // 路径与磁盘真实字节不一致，diff 必然查不到。不发无意义的 git
+            // 请求、不走错误上报——DiffView 会按这个标记给出明确的说明。
+            setDiff(nil)
+            conflictContent = nil
+            return
+        }
+
         if change.isConflicted {
             await loadConflictContent(for: change)
             guard !Task.isCancelled else { return }
