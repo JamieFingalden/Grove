@@ -9,7 +9,10 @@ struct CommandResult: Sendable {
 
     var isSuccess: Bool { exitCode == 0 }
 
-    /// 宽松解码：UTF-8 失败时退回 ISO Latin-1（永不失败），保证任何字节序列都有字符串形态。
+    /// 宽松解码：UTF-8 失败时退回有损替换——非法字节变成 U+FFFD（永不失败）。
+    /// 故意不用 ISO Latin-1：它会把多字节内容静默变成 mojibake，且与真实的
+    /// Latin-1 文本无法区分；替换字符让损坏可见，也是检测非 UTF-8 文件名
+    /// （`FileChange.hasUndecodableName`）的标志物。
     var stdout: String { CommandResult.decode(standardOutput) }
     var stderr: String { CommandResult.decode(standardError) }
 

@@ -656,7 +656,7 @@ final class WorktreeModel: Identifiable {
         do {
             let raw: String
             if diffSide == .staged {
-                raw = try await git.run(["show", ":\(path)"], in: worktree.path)
+                raw = try await stagedContent(of: path)
             } else if let data = await readEditorFile(at: worktree.path.appendingPathComponent(path)),
                       let text = String(data: data, encoding: .utf8) {
                 // 远程工作树经 ssh 读，本机读盘 —— 严格 UTF-8，解不出来按没有处理。
@@ -675,6 +675,21 @@ final class WorktreeModel: Identifiable {
         } catch {
             return nil
         }
+    }
+
+    /// 暂存区里某个文件的内容。不走 `git show :<path>` 简写：文件名本身含 `:`
+    /// 时（`a:b.swift`）会被当成 `:<stage>:<path>` 语法解析失败。改由 ls-files
+    /// 按 `--` + 字面路径拿到 blob SHA，再用 cat-file 取内容，任意文件名都成立。
+    private func stagedContent(of path: String) async throws -> String {
+        let listing = try await git.run(
+            ["--literal-pathspecs", "ls-files", "--stage", "--", path], in: worktree.path
+        )
+        // 输出形如 `100644 <sha> 0\ta b.txt`；文件不在索引里时为空。
+        let fields = listing.trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: "\t").first?
+            .components(separatedBy: " ") ?? []
+        guard fields.count >= 2, !fields[1].isEmpty else { return "" }
+        return try await git.run(["cat-file", "blob", fields[1]], in: worktree.path)
     }
 
     func hunkSelectionState(_ hunk: DiffHunk) -> HunkSelection {
@@ -1099,7 +1114,6 @@ final class WorktreeModel: Identifiable {
                 try Task.checkCancellation()
                 self.commitMessage = generated.text
                 self.generatedDiffNotice = generated.note
-                self.hasGeneratedCommitMessage = true
                 self.hasGeneratedCommitMessage = true
             } catch is CancellationError {
                 // 用户主动取消不属于失败，静默回到空闲状态。

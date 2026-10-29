@@ -129,6 +129,19 @@ final class GitFileOperationTests: XCTestCase {
         }
     }
 
+    func testUnchangedLinesReadsStagedFileNamedWithColon() async throws {
+        // 文件名含 `:` 时 `git show :<path>` 会被解析成 stage 语法而失败；
+        // 展开未更改区域必须换 ls-files → cat-file 的路径安全路径。
+        try write("第一行\n第二行\n", to: "a:b.swift")
+        try await git.stageAll(in: root)
+        try await git.commit(message: "初始", in: root)
+
+        let model = model()
+        model.diffSide = .staged
+        let lines = await model.unchangedLines(path: "a:b.swift", startLine: 1, count: 2)
+        XCTAssertEqual(lines, ["第一行", "第二行"])
+    }
+
     func testCleanTreatsWildcardAndMagicAsLiteralNames() async throws {
         for name in ["*.txt", ":(glob)*.txt", "other.txt"] {
             try write("未跟踪\n", to: name)
