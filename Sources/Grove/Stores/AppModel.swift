@@ -439,9 +439,18 @@ final class AppModel {
         aiReviewResultsRevision &+= 1
     }
 
-    func removeCachedAIReview(for repository: URL, pullRequestNumber: Int) {
+    func removeCachedAIReview(
+        for repository: URL,
+        pullRequestNumber: Int,
+        requestURL: String? = nil
+    ) {
         cancelAIReview(for: repository, pullRequestNumber: pullRequestNumber)
         aiReviewCache.remove(for: repository, pullRequestNumber: pullRequestNumber)
+        if let requestURL {
+            // 请求已合并 / 关闭：顺手清掉它的自动评审 head 状态，
+            // 否则三个按 URL 累积的字典会随历史 PR 无限增长。
+            aiGenerationSettings.removeAutomaticReviewState(for: requestURL)
+        }
         aiReviewResultsRevision &+= 1
     }
 

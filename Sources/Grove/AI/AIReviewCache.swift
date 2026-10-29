@@ -32,6 +32,12 @@ struct AIReviewCache {
         }?.value
     }
 
+    /// 条目上限。整个缓存存在单个 UserDefaults key 里，每次读写都全量解码 /
+    /// 重编码，成本随条目数线性增长（1000 条时单次查找 ~17ms，累积保存呈
+    /// 平方级 —— 见 AIReviewCacheScaleTests 的量化）。300 条以内保持个位数
+    /// 毫秒、plist 体积 ~600KB 封顶；超限按 createdAt 淘汰最旧的。
+    private static let entryLimit = 300
+
     func save(
         _ review: PullRequestAIReview,
         diffFingerprint: String,
@@ -60,6 +66,16 @@ struct AIReviewCache {
             updated[index] = entry
         } else {
             updated.append(entry)
+        }
+        if updated.count > Self.entryLimit {
+            let excessKeys = Set(
+                updated.sorted { $0.value.createdAt < $1.value.createdAt }
+                    .prefix(updated.count - Self.entryLimit)
+                    .map { "\($0.repositoryPath)\n\($0.pullRequestNumber)" }
+            )
+            updated.removeAll {
+                excessKeys.contains("\($0.repositoryPath)\n\($0.pullRequestNumber)")
+            }
         }
         persist(updated)
     }

@@ -1455,7 +1455,8 @@ struct PullRequestDetailView: View {
         repository.removePullRequest(number: current.number)
         appModel.removeCachedAIReview(
             for: repository.root,
-            pullRequestNumber: current.number
+            pullRequestNumber: current.number,
+            requestURL: current.url
         )
         await repository.fetch()
     }

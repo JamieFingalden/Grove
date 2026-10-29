@@ -850,7 +850,8 @@ struct MergePullRequestSheet: View {
         repository.removePullRequest(number: pullRequest.number)
         appModel.removeCachedAIReview(
             for: repository.root,
-            pullRequestNumber: pullRequest.number
+            pullRequestNumber: pullRequest.number,
+            requestURL: pullRequest.url
         )
         dismiss()
         // 服务端已经合并成功就立刻关弹窗。后面的 fetch、分支和所有工作树

@@ -166,10 +166,32 @@ struct AIGenerationSettings {
         return values[requestURL]?.contains(head) == true
     }
 
+    /// 每 URL 只保留最近几个已通知的 head。PR 的 force-push 能让这个数组
+    /// 无限增长，而第 6 个以前的 head 再也不会被比对——留着没有意义。
+    private static let notifiedHeadLimit = 5
+
     func setNotifiedReviewHead(_ head: String, for requestURL: String) {
         var values = defaults.dictionary(forKey: "grove.aiReview.notifiedHeads.v1") as? [String: [String]] ?? [:]
         if values[requestURL]?.contains(head) != true { values[requestURL, default: []].append(head) }
+        if values[requestURL]?.count ?? 0 > Self.notifiedHeadLimit {
+            values[requestURL] = Array(values[requestURL]!.suffix(Self.notifiedHeadLimit))
+        }
         defaults.set(values, forKey: "grove.aiReview.notifiedHeads.v1")
+    }
+
+    /// 请求结束（合并 / 关闭）时忘掉它的全部自动评审状态。
+    /// 三个 head 字典按 URL 累积，不清理会随历史 PR 无限增长；
+    /// 请求都已结束，这些状态不会再被比对。
+    func removeAutomaticReviewState(for requestURL: String) {
+        for key in ["grove.aiReview.publishedHeads.v1", "grove.aiReview.initialHeads.v1"] {
+            var values = defaults.dictionary(forKey: key) as? [String: String] ?? [:]
+            guard values.removeValue(forKey: requestURL) != nil else { continue }
+            defaults.set(values, forKey: key)
+        }
+        var notified = defaults.dictionary(forKey: "grove.aiReview.notifiedHeads.v1") as? [String: [String]] ?? [:]
+        if notified.removeValue(forKey: requestURL) != nil {
+            defaults.set(notified, forKey: "grove.aiReview.notifiedHeads.v1")
+        }
     }
 
     var provider: AIGenerationProvider {

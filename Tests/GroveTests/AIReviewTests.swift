@@ -385,6 +385,75 @@ final class AIReviewCacheTests: XCTestCase {
             AIReviewCache.diffFingerprint(changed)
         )
     }
+
+    func testSaveEvictsOldestEntriesBeyondLimit() {
+        let cache = AIReviewCache(defaults: defaults)
+        let review = PullRequestAIReview(verdict: .ready, summary: "无风险。", assessments: [], wasTruncated: false)
+        let total = 350
+        for index in 0..<total {
+            cache.save(
+                review,
+                diffFingerprint: String(index),
+                for: URL(fileURLWithPath: "/tmp/lru-\(index)"),
+                pullRequestNumber: index,
+                createdAt: Date(timeIntervalSince1970: Double(index))
+            )
+        }
+        // 上限 300：最旧的 50 条被淘汰，边界两侧各验一条。
+        XCTAssertNil(cache.review(for: URL(fileURLWithPath: "/tmp/lru-0"), pullRequestNumber: 0))
+        XCTAssertNil(cache.review(for: URL(fileURLWithPath: "/tmp/lru-49"), pullRequestNumber: 49))
+        XCTAssertNotNil(cache.review(for: URL(fileURLWithPath: "/tmp/lru-50"), pullRequestNumber: 50))
+        XCTAssertNotNil(cache.review(for: URL(fileURLWithPath: "/tmp/lru-349"), pullRequestNumber: 349))
+    }
+}
+
+final class AIGenerationSettingsHeadStateTests: XCTestCase {
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+    private var settings: AIGenerationSettings!
+
+    override func setUp() {
+        super.setUp()
+        suiteName = "AIGenerationSettingsHeadStateTests.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)!
+        settings = AIGenerationSettings(defaults: defaults)
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults = nil
+        settings = nil
+        suiteName = nil
+        super.tearDown()
+    }
+
+    func testNotifiedHeadsCappedAtFivePerRequest() {
+        let url = "https://github.com/a/b/pull/1"
+        for index in 0..<7 {
+            settings.setNotifiedReviewHead("head-\(index)", for: url)
+        }
+        // 只保留最近 5 个（head-2…head-6），更早的再也不会被比对，直接丢弃。
+        XCTAssertFalse(settings.hasNotifiedReviewHead("head-1", for: url))
+        XCTAssertTrue(settings.hasNotifiedReviewHead("head-2", for: url))
+        XCTAssertTrue(settings.hasNotifiedReviewHead("head-6", for: url))
+    }
+
+    func testRemovingAutomaticReviewStateForgetsAllHeadDictionaries() {
+        let url = "https://github.com/a/b/pull/2"
+        settings.setAutomaticReviewHead("h1", for: url)
+        settings.setInitialReviewHead("h0", for: url)
+        settings.setNotifiedReviewHead("n1", for: url)
+
+        settings.removeAutomaticReviewState(for: url)
+
+        XCTAssertNil(settings.automaticReviewHead(for: url))
+        XCTAssertNil(settings.initialReviewHead(for: url))
+        XCTAssertFalse(settings.hasNotifiedReviewHead("n1", for: url))
+        // 其他请求的状态不受影响。
+        settings.setNotifiedReviewHead("other", for: "https://github.com/a/b/pull/3")
+        settings.removeAutomaticReviewState(for: url)
+        XCTAssertTrue(settings.hasNotifiedReviewHead("other", for: "https://github.com/a/b/pull/3"))
+    }
 }
 
 @MainActor
