@@ -679,8 +679,21 @@ final class AppModel {
                     step = "读取评审讨论"
                     input.threads = try await forge.reviewThreads(number: input.pullRequest.number, in: input.repositoryRoot)
                 } else if automatic { throw ReviewDiscussionError.unavailable }
+                // 发布链路的去重与回复匹配只信任当前用户自己的评论——
+                // marker 是明文，平台上任何人都能复制伪造；见
+                // AIReviewAutomation.contains。只在这次会发布时取一次身份。
+                let publishesFindings = (automatic || confirmedByUser)
+                    && aiGenerationSettings.automaticReviewPublishEnabled(for: input.repositoryRoot)
+                var trustedAuthor: String?
+                if publishesFindings, let forge {
+                    trustedAuthor = try? await forge.currentUser(in: input.repositoryRoot)
+                }
                 try await validate()
-                if automatic, let head, AIReviewAutomation.contains(AIReviewAutomation.marker(head: head, area: "complete"), in: input.threads) {
+                if automatic, let head,
+                   AIReviewAutomation.contains(
+                       AIReviewAutomation.marker(head: head, area: "complete"),
+                       in: input.threads, trustedAuthor: trustedAuthor
+                   ) {
                     aiGenerationSettings.setAutomaticReviewHead(head, for: input.pullRequest.url)
                     finishAIReview(key: key, jobID: jobID)
                     return
@@ -708,15 +721,13 @@ final class AppModel {
                 // 显式开启了「自动发布」，风险发现才以用户账号发到平台讨论区。
                 // 纯手动 Review 一律不自动发布，结果保留在本地，
                 // 由详情页的「添加讨论…」逐条发布。
-                if (automatic || confirmedByUser),
-                   aiGenerationSettings.automaticReviewPublishEnabled(for: input.repositoryRoot),
-                   let forge, let head {
+                if publishesFindings, let forge, let head {
                     for assessment in result.discussionFindings {
                         let marker = AIReviewAutomation.marker(head: head, area: AIReviewAutomation.issueKey(assessment))
-                        if AIReviewAutomation.contains(marker, in: input.threads) { continue }
+                        if AIReviewAutomation.contains(marker, in: input.threads, trustedAuthor: trustedAuthor) { continue }
                         try await validate()
                         let body = AIReviewAutomation.body(for: assessment, head: head)
-                        if let thread = AIReviewAutomation.existingDiscussion(for: assessment, threads: input.threads) {
+                        if let thread = AIReviewAutomation.existingDiscussion(for: assessment, threads: input.threads, trustedAuthor: trustedAuthor) {
                             step = "回复评审讨论 \(thread.id)"
                             try await forge.reply(number: input.pullRequest.number, thread: thread, body: body, in: input.repositoryRoot)
                         } else {

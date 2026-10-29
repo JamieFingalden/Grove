@@ -462,6 +462,17 @@ final class RepositoryModel: Identifiable {
         listPullRequests.removeAll { $0.number == number }
     }
 
+    /// 当前登录账号（forge 侧）。marker 信任判定（评审「已发布」角标）用：
+    /// 详情页加载讨论时顺带取一次；取不到（未登录、接口失败）保持 nil，
+    /// 判定按全部不可信处理——宁可显示「尚未发布」走人工发布，不认伪造 marker。
+    private(set) var currentUserLogin: String?
+
+    func refreshCurrentUserLogin() async {
+        guard let forge, currentUserLogin == nil else { return }
+        let login = try? await forge.currentUser(in: root)
+        if currentUserLogin == nil { currentUserLogin = login }
+    }
+
     // MARK: - 同步操作
 
     func fetch() async {

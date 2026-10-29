@@ -17,8 +17,22 @@ enum AIReviewAutomation {
         "<!-- grove-ai-review:\(head):\(area) -->"
     }
 
-    static func contains(_ marker: String, in threads: [ReviewThread]) -> Bool {
-        threads.contains { thread in thread.notes.contains { $0.body.contains(marker) } }
+    /// marker 只在**当前用户自己发布的评论**里可信：发布走用户账号，合法
+    /// marker 必然出自本人；而 marker 是明文，平台上任何人都可能复制粘贴来
+    /// 伪造去重（让发现被静默跳过）或劫持回复目标。`trustedAuthor` 为 nil
+    /// （拿不到当前用户）时按全部不可信处理——宁可重复发布，不能让伪造者
+    /// 决定抑制什么、回复到哪。
+    static func contains(
+        _ marker: String,
+        in threads: [ReviewThread],
+        trustedAuthor: String?
+    ) -> Bool {
+        guard let author = trustedAuthor?.lowercased() else { return false }
+        return threads.contains { thread in
+            thread.notes.contains { note in
+                note.authorLogin.lowercased() == author && note.body.contains(marker)
+            }
+        }
     }
 
     static func issueKey(_ finding: PullRequestAIReview.Assessment) -> String {
@@ -89,8 +103,18 @@ enum AIReviewAutomation {
         return ReviewLocation(file: file, line: nearest, isOldSide: false)
     }
 
-    static func existingDiscussion(for assessment: PullRequestAIReview.Assessment, threads: [ReviewThread]) -> ReviewThread? {
-        let available = threads.filter { !$0.isResolved && !$0.isSystemOnly }
+    /// 与 `contains(marker:…)` 同一套信任规则：只有包含当前用户自己评论的
+    /// 线程才可能成为回复目标，防止伪造 marker/摘要把回复劫持进他人线程。
+    static func existingDiscussion(
+        for assessment: PullRequestAIReview.Assessment,
+        threads: [ReviewThread],
+        trustedAuthor: String?
+    ) -> ReviewThread? {
+        guard let author = trustedAuthor?.lowercased() else { return nil }
+        let available = threads.filter { thread in
+            !thread.isResolved && !thread.isSystemOnly
+                && thread.notes.contains { $0.authorLogin.lowercased() == author }
+        }
         if let id = assessment.discussionID, let existing = available.first(where: { $0.id == id }) {
             return existing
         }

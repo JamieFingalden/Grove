@@ -244,7 +244,38 @@ final class AIReviewAutomationTests: XCTestCase {
         XCTAssertTrue(AIReviewAutomation.contains("<!-- grove-ai-review:first:complete -->", in: [
             ReviewThread(id: "1", notes: [.init(id: "1", authorName: "作者", authorLogin: "author", body: body,
                 createdAt: nil, isSystem: false)], filePath: nil, line: nil, isResolved: false, isResolvable: false)
-        ]))
+        ], trustedAuthor: "author"))
+    }
+
+    /// marker 是明文，任何平台用户都能复制伪造。去重与回复目标只信任
+    /// 当前用户自己评论里的 marker；拿不到当前用户时全部按不可信处理。
+    func testMarkersAreOnlyTrustedInCurrentUserNotes() {
+        let marker = AIReviewAutomation.marker(head: "h", area: "complete")
+        func thread(_ id: String, login: String, body: String) -> ReviewThread {
+            ReviewThread(id: id, notes: [.init(id: id, authorName: login, authorLogin: login, body: body,
+                createdAt: nil, isSystem: false)], filePath: nil, line: nil, isResolved: false, isResolvable: false)
+        }
+        let own = thread("1", login: "me", body: marker)
+        let forged = thread("2", login: "attacker", body: marker)
+
+        XCTAssertTrue(AIReviewAutomation.contains(marker, in: [own], trustedAuthor: "me"))
+        XCTAssertTrue(AIReviewAutomation.contains(marker, in: [own], trustedAuthor: "ME"), "账号比较不区分大小写")
+        XCTAssertFalse(AIReviewAutomation.contains(marker, in: [forged], trustedAuthor: "me"),
+                       "伪造者评论里的 marker 不能参与去重")
+        XCTAssertFalse(AIReviewAutomation.contains(marker, in: [own], trustedAuthor: nil),
+                       "拿不到当前用户时按全部不可信处理")
+
+        // 回复目标同理：伪造 marker/摘要不能把回复劫持进他人线程。
+        let assessment = PullRequestAIReview.Assessment(area: .compilation, status: .risk,
+            summary: "调用方会编译失败", evidence: nil, file: "a.swift", line: 1)
+        let hijack = thread("3", login: "attacker",
+            body: ":\(AIReviewAutomation.issueKey(assessment)) --> 以及 \(assessment.summary)")
+        XCTAssertNil(AIReviewAutomation.existingDiscussion(for: assessment, threads: [hijack], trustedAuthor: "me"))
+        XCTAssertNil(AIReviewAutomation.existingDiscussion(for: assessment, threads: [own], trustedAuthor: "me"),
+                     "自己的线程里没有对应 marker 时也不该命中")
+        var mineWithMarker = own
+        mineWithMarker.notes[0].body = ":\(AIReviewAutomation.issueKey(assessment)) -->"
+        XCTAssertEqual(AIReviewAutomation.existingDiscussion(for: assessment, threads: [mineWithMarker], trustedAuthor: "me")?.id, "1")
     }
 
     func testSuccessiveCommitsReplyToExistingDiscussionAndIncludeResolutionInContext() async throws {
@@ -594,16 +625,16 @@ final class AIReviewAutomationTests: XCTestCase {
         var thread = ReviewThread(id: "old", notes: [.init(id: "1", authorName: "审查者", authorLogin: "reviewer",
             body: AIReviewAutomation.body(for: assessment, head: "first"), createdAt: nil, isSystem: false)],
             filePath: "a.swift", line: 1, isResolved: false, isResolvable: true)
-        XCTAssertEqual(AIReviewAutomation.existingDiscussion(for: assessment, threads: [thread])?.id, "old")
+        XCTAssertEqual(AIReviewAutomation.existingDiscussion(for: assessment, threads: [thread], trustedAuthor: "reviewer")?.id, "old")
         var different = assessment
         different.summary = "同一文件的另一种接口风险"
-        XCTAssertNil(AIReviewAutomation.existingDiscussion(for: different, threads: [thread]))
+        XCTAssertNil(AIReviewAutomation.existingDiscussion(for: different, threads: [thread], trustedAuthor: "reviewer"))
         different.discussionID = "old"
         different.line = 100
-        XCTAssertEqual(AIReviewAutomation.existingDiscussion(for: different, threads: [thread])?.id, "old")
+        XCTAssertEqual(AIReviewAutomation.existingDiscussion(for: different, threads: [thread], trustedAuthor: "reviewer")?.id, "old")
         thread.isResolved = true
-        XCTAssertNil(AIReviewAutomation.existingDiscussion(for: assessment, threads: [thread]))
-        XCTAssertNil(AIReviewAutomation.existingDiscussion(for: different, threads: [thread]))
+        XCTAssertNil(AIReviewAutomation.existingDiscussion(for: assessment, threads: [thread], trustedAuthor: "reviewer"))
+        XCTAssertNil(AIReviewAutomation.existingDiscussion(for: different, threads: [thread], trustedAuthor: "reviewer"))
     }
 
     func testDiscussionContextOmitsSecretFileThreads() {
@@ -742,6 +773,20 @@ final class AIReviewAutomationTests: XCTestCase {
             directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             suite = "AIReviewAutomationTests.\(UUID().uuidString)"
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            // marker 信任判定（AIReviewAutomation.contains）经 GitHubClient.currentUser
+            // 走「git remote get-url origin → gh api user」：给目录配最小 git 仓库
+            // 和 origin，假 gh 提供 api:user。
+            for arguments in [["init", "-q", directory.path],
+                              ["-C", directory.path, "remote", "add", "origin",
+                               "https://github.com/example/pr.git"]] {
+                let git = Process()
+                git.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                git.arguments = arguments
+                git.standardOutput = FileHandle.nullDevice
+                git.standardError = FileHandle.nullDevice
+                try git.run()
+                git.waitUntilExit()
+            }
             try write("head", "first")
             try write("detail", Self.request)
             try write("list", "[\(Self.request)]")
@@ -793,6 +838,7 @@ final class AIReviewAutomationTests: XCTestCase {
                 esac ;;
               pr:diff) cat "$GROVE_TEST_ROOT/diff" ;;
               repo:view) printf 'group/project' ;;
+              api:user) printf 'grove-reviewer\n' ;;
               api:graphql) cat "$GROVE_TEST_ROOT/graphql" ;;
               api:*pulls/*comments*)
                 case "$*" in

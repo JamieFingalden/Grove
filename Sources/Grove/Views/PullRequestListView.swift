@@ -1111,6 +1111,8 @@ struct PullRequestDetailView: View {
         isLoadingThreads = true
         let expectedOrigin = repository.origin
         defer { isLoadingThreads = false }
+        // 「已发布」角标只认当前用户自己评论里的 marker，顺带取一次登录账号。
+        await repository.refreshCurrentUserLogin()
         do {
             let loaded = try await forge.reviewThreads(number: pullRequest.number, in: repository.root)
             guard !Task.isCancelled, repository.origin == expectedOrigin else { return }
@@ -1943,7 +1945,8 @@ struct PullRequestDetailView: View {
         if assessment.status == .risk {
             HStack {
                 let published = AIReviewAutomation.contains(
-                    AIReviewAutomation.marker(head: diffHead, area: AIReviewAutomation.issueKey(assessment)), in: threads
+                    AIReviewAutomation.marker(head: diffHead, area: AIReviewAutomation.issueKey(assessment)),
+                    in: threads, trustedAuthor: repository.currentUserLogin
                 )
                 Label(published ? "AI 审查意见 · 已发布" : "AI 审查意见 · 尚未发布", systemImage: "sparkles")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
