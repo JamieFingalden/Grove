@@ -156,29 +156,101 @@ struct AIGenerationSettings {
         defaults.set(values, forKey: "grove.aiReview.autoPublishByRepository.v1")
     }
 
+    // MARK: - 自动评审 head 簿记（v2）
+
+    /// 按 URL 记录的自动评审状态。v1 是三个独立 UserDefaults 字典、按 URL
+    /// 只增不减（PR 不经 Grove 关闭/合并就永远留着）。v2 合并为一个 JSON
+    /// blob：`order` 记 URL 的最近使用顺序，超过 `headStateURLLimit` 个 URL
+    /// 时淘汰最久未用的——增长有了硬上限，与「PR 关闭时清理」的软钩子互补。
+    private struct HeadState: Codable {
+        var published: [String: String] = [:]
+        var initial: [String: String] = [:]
+        var notified: [String: [String]] = [:]
+        var order: [String] = []
+    }
+
+    /// 跟踪的请求 URL 总量上限。覆盖一个仓库几百个开放 PR 的量级绰绰有余，
+    /// 超过即按最久未用淘汰。
+    private static let headStateURLLimit = 400
+    private static let headStateKey = "grove.aiReview.headState.v2"
+    private static let legacyHeadStateKeys = [
+        "grove.aiReview.publishedHeads.v1", "grove.aiReview.initialHeads.v1", "grove.aiReview.notifiedHeads.v1"
+    ]
+
+    /// 进程内缓存：设置以值类型传递，但读写都经过同一个引用箱子，
+    /// UserDefaults 只在状态变更时真正落盘，读取不重复解码。
+    private final class HeadStateBox {
+        var state: HeadState?
+    }
+    private let headStateBox = HeadStateBox()
+
+    private func loadHeadState() -> HeadState {
+        if let cached = headStateBox.state { return cached }
+        var state = HeadState()
+        var migrated = false
+        if let data = defaults.data(forKey: Self.headStateKey) {
+            state = (try? JSONDecoder().decode(HeadState.self, from: data)) ?? HeadState()
+        } else {
+            // v1 → v2 一次性迁移：三个字典合并；order 无历史信息，按任意顺序起步。
+            state.published = defaults.dictionary(forKey: Self.legacyHeadStateKeys[0]) as? [String: String] ?? [:]
+            state.initial = defaults.dictionary(forKey: Self.legacyHeadStateKeys[1]) as? [String: String] ?? [:]
+            state.notified = defaults.dictionary(forKey: Self.legacyHeadStateKeys[2]) as? [String: [String]] ?? [:]
+            state.order = Array(Set(state.published.keys).union(state.initial.keys).union(state.notified.keys))
+            migrated = !(state.published.isEmpty && state.initial.isEmpty && state.notified.isEmpty)
+        }
+        if migrated {
+            persistHeadState(state)
+            for key in Self.legacyHeadStateKeys {
+                defaults.removeObject(forKey: key)
+            }
+        }
+        headStateBox.state = state
+        return state
+    }
+
+    private func persistHeadState(_ state: HeadState) {
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        defaults.set(data, forKey: Self.headStateKey)
+    }
+
+    /// 把 URL 标记为最近使用，并按上限淘汰最久未用的 URL（三个字典一起清）。
+    private func touch(_ url: String, of state: inout HeadState) {
+        state.order.removeAll { $0 == url }
+        state.order.append(url)
+        while state.order.count > Self.headStateURLLimit {
+            let evicted = state.order.removeFirst()
+            state.published.removeValue(forKey: evicted)
+            state.initial.removeValue(forKey: evicted)
+            state.notified.removeValue(forKey: evicted)
+        }
+    }
+
     func automaticReviewHead(for requestURL: String) -> String? {
-        (defaults.dictionary(forKey: "grove.aiReview.publishedHeads.v1") as? [String: String])?[requestURL]
+        loadHeadState().published[requestURL]
     }
 
     func setAutomaticReviewHead(_ head: String, for requestURL: String) {
-        var values = defaults.dictionary(forKey: "grove.aiReview.publishedHeads.v1") as? [String: String] ?? [:]
-        values[requestURL] = head
-        defaults.set(values, forKey: "grove.aiReview.publishedHeads.v1")
+        var state = loadHeadState()
+        state.published[requestURL] = head
+        touch(requestURL, of: &state)
+        headStateBox.state = state
+        persistHeadState(state)
     }
 
     func initialReviewHead(for requestURL: String) -> String? {
-        (defaults.dictionary(forKey: "grove.aiReview.initialHeads.v1") as? [String: String])?[requestURL]
+        loadHeadState().initial[requestURL]
     }
 
     func setInitialReviewHead(_ head: String, for requestURL: String) {
-        var values = defaults.dictionary(forKey: "grove.aiReview.initialHeads.v1") as? [String: String] ?? [:]
-        values[requestURL] = head
-        defaults.set(values, forKey: "grove.aiReview.initialHeads.v1")
+        var state = loadHeadState()
+        state.initial[requestURL] = head
+        touch(requestURL, of: &state)
+        headStateBox.state = state
+        persistHeadState(state)
     }
 
     func hasNotifiedReviewHead(_ head: String, for requestURL: String) -> Bool {
-        let values = defaults.dictionary(forKey: "grove.aiReview.notifiedHeads.v1") as? [String: [String]] ?? [:]
-        return values[requestURL]?.contains(head) == true
+        loadHeadState().notified[requestURL]?.contains(head) == true
     }
 
     /// 每 URL 只保留最近几个已通知的 head。PR 的 force-push 能让这个数组
@@ -186,27 +258,31 @@ struct AIGenerationSettings {
     private static let notifiedHeadLimit = 5
 
     func setNotifiedReviewHead(_ head: String, for requestURL: String) {
-        var values = defaults.dictionary(forKey: "grove.aiReview.notifiedHeads.v1") as? [String: [String]] ?? [:]
-        if values[requestURL]?.contains(head) != true { values[requestURL, default: []].append(head) }
-        if values[requestURL]?.count ?? 0 > Self.notifiedHeadLimit {
-            values[requestURL] = Array(values[requestURL]!.suffix(Self.notifiedHeadLimit))
+        var state = loadHeadState()
+        if state.notified[requestURL]?.contains(head) != true {
+            state.notified[requestURL, default: []].append(head)
         }
-        defaults.set(values, forKey: "grove.aiReview.notifiedHeads.v1")
+        if (state.notified[requestURL]?.count ?? 0) > Self.notifiedHeadLimit {
+            state.notified[requestURL] = Array(state.notified[requestURL]!.suffix(Self.notifiedHeadLimit))
+        }
+        touch(requestURL, of: &state)
+        headStateBox.state = state
+        persistHeadState(state)
     }
 
     /// 请求结束（合并 / 关闭）时忘掉它的全部自动评审状态。
-    /// 三个 head 字典按 URL 累积，不清理会随历史 PR 无限增长；
-    /// 请求都已结束，这些状态不会再被比对。
     func removeAutomaticReviewState(for requestURL: String) {
-        for key in ["grove.aiReview.publishedHeads.v1", "grove.aiReview.initialHeads.v1"] {
-            var values = defaults.dictionary(forKey: key) as? [String: String] ?? [:]
-            guard values.removeValue(forKey: requestURL) != nil else { continue }
-            defaults.set(values, forKey: key)
-        }
-        var notified = defaults.dictionary(forKey: "grove.aiReview.notifiedHeads.v1") as? [String: [String]] ?? [:]
-        if notified.removeValue(forKey: requestURL) != nil {
-            defaults.set(notified, forKey: "grove.aiReview.notifiedHeads.v1")
-        }
+        var state = loadHeadState()
+        var changed = false
+        if state.published.removeValue(forKey: requestURL) != nil { changed = true }
+        if state.initial.removeValue(forKey: requestURL) != nil { changed = true }
+        if state.notified.removeValue(forKey: requestURL) != nil { changed = true }
+        let orderCount = state.order.count
+        state.order.removeAll { $0 == requestURL }
+        if state.order.count != orderCount { changed = true }
+        guard changed else { return }
+        headStateBox.state = state
+        persistHeadState(state)
     }
 
     /// 清掉「路径已不在本机、且当前未打开」的仓库的项目级设置。

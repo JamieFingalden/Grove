@@ -788,6 +788,11 @@ final class AppModel {
         guard !didBootstrap else { return }
         didBootstrap = true
         Task { await AIUsageLog.shared.startMaintenance() }
+        // 评审缓存装载（旧 UserDefaults 存储在此一次性迁移到 Caches 目录）。
+        // 装载完成前的读取按未命中处理；完成后 bump 修订计数，
+        // 让可能已经渲染过的缓存角标刷新。
+        await aiReviewCache.loadIfNeeded()
+        aiReviewResultsRevision &+= 1
 
         do {
             git = try await GitClient.resolve()

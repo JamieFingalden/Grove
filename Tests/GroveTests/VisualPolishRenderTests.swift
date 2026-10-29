@@ -23,7 +23,9 @@ final class VisualPolishRenderTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = AIGenerationSettings(defaults: defaults)
         settings.setAutomaticReviewEnabled(false, for: root)
-        let app = AppModel(aiGenerationSettings: settings, aiReviewCache: AIReviewCache(defaults: defaults),
+        let app = AppModel(aiGenerationSettings: settings,
+                           aiReviewCache: AIReviewCache(storageDirectory: FileManager.default.temporaryDirectory
+                               .appendingPathComponent("grove-render-cache-\(UUID().uuidString)", isDirectory: true)),
                            remoteServerStore: RemoteServerStore(defaults: defaults),
                            remoteProjectStore: RemoteProjectStore(defaults: defaults))
         await app.bootstrap()
@@ -166,7 +168,9 @@ final class VisualPolishRenderTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = AIGenerationSettings(defaults: defaults)
-        let app = AppModel(aiGenerationSettings: settings, aiReviewCache: AIReviewCache(defaults: defaults),
+        let app = AppModel(aiGenerationSettings: settings,
+                           aiReviewCache: AIReviewCache(storageDirectory: FileManager.default.temporaryDirectory
+                               .appendingPathComponent("grove-render-cache-\(UUID().uuidString)", isDirectory: true)),
                            remoteServerStore: RemoteServerStore(defaults: defaults),
                            remoteProjectStore: RemoteProjectStore(defaults: defaults))
         await app.bootstrap()
@@ -271,7 +275,9 @@ final class VisualPolishRenderTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = AIGenerationSettings(defaults: defaults)
         settings.setAutomaticReviewEnabled(false, for: root)
-        let app = AppModel(aiGenerationSettings: settings, aiReviewCache: AIReviewCache(defaults: defaults),
+        let app = AppModel(aiGenerationSettings: settings,
+                           aiReviewCache: AIReviewCache(storageDirectory: FileManager.default.temporaryDirectory
+                               .appendingPathComponent("grove-render-cache-\(UUID().uuidString)", isDirectory: true)),
                            remoteServerStore: RemoteServerStore(defaults: defaults),
                            remoteProjectStore: RemoteProjectStore(defaults: defaults))
         await app.bootstrap()
@@ -473,7 +479,9 @@ final class VisualPolishRenderTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = AIGenerationSettings(defaults: defaults)
         settings.setAutomaticReviewEnabled(false, for: root)
-        let app = AppModel(aiGenerationSettings: settings, aiReviewCache: AIReviewCache(defaults: defaults),
+        let app = AppModel(aiGenerationSettings: settings,
+                           aiReviewCache: AIReviewCache(storageDirectory: FileManager.default.temporaryDirectory
+                               .appendingPathComponent("grove-render-cache-\(UUID().uuidString)", isDirectory: true)),
                            remoteServerStore: RemoteServerStore(defaults: defaults),
                            remoteProjectStore: RemoteProjectStore(defaults: defaults))
         await app.bootstrap()

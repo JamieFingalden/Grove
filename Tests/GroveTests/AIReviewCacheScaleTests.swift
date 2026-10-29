@@ -1,33 +1,34 @@
 import XCTest
 @testable import Grove
 
-/// GROVE-003 量化：AIReviewCache 的全部条目存在单个 UserDefaults key 里，
-/// 每次读写都全量解码 / 重编码。这里量出真实耗时曲线，验证 300 条上限
-/// （AIReviewCache.entryLimit）是否把成本压在可接受范围。
+/// AIReviewCache 的成本守门。
 ///
-/// 不是功能门禁，只为拿到数字。N=100 常规跑；500/1000 按 GROVE_SCALE=1
-/// 显式开启（对齐渲染测试 GROVE_RENDER=1 的先例），避免拖慢常规 CI。
+/// 历史结论（催生新设计的量化，2026-10-29）：旧版把全部条目塞一个
+/// UserDefaults key，每次读写全量解码/重编码——无界时 1000 条单次查找
+/// ~17ms（主线程）、逐条累积保存呈平方级（1000 次共 ~17s）；加 300 条
+/// LRU 上限后稳态仍有 ~6ms/查找、~11ms/保存。
+///
+/// 新设计（内存字典 + 后台单文件写盘）目标：查找回到微秒级（视图在
+/// body 里同步查缓存），写盘移出主线程。这里守住这两点不回退。
+/// N=1000 的写入量按 GROVE_SCALE=1 显式开启（对齐 GROVE_RENDER 先例）。
+@MainActor
 final class AIReviewCacheScaleTests: XCTestCase {
-    private var suiteName: String!
-    private var suite: UserDefaults!
+    private var directory: URL!
     private var cache: AIReviewCache!
 
     override func setUp() {
         super.setUp()
-        suiteName = "grove-cache-scale-\(UUID().uuidString)"
-        suite = UserDefaults(suiteName: suiteName)
-        cache = AIReviewCache(defaults: suite, storageKey: "grove.aiReview.results.scaleTest")
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("grove-cache-scale-\(UUID().uuidString)", isDirectory: true)
+        cache = AIReviewCache(storageDirectory: directory)
     }
 
     override func tearDown() {
-        suite.removePersistentDomain(forName: suiteName)
+        try? FileManager.default.removeItem(at: directory)
         super.tearDown()
     }
 
-    // MARK: - 构造真实形状的数据
-
-    /// 一条接近实际评审结果的条目：五个评估项 + 风险 findings，
-    /// summary/evidence 各几十到两百字，单条 JSON 约 1-2KB。
+    /// 一条接近实际评审结果的条目（五个评估项 + findings，~1-2KB）。
     private func makeReview(seed: Int) -> PullRequestAIReview {
         func text(_ prefix: String) -> String {
             prefix + String(repeating: "核对过的符号、路径与判断依据见 evidence。", count: 4)
@@ -60,69 +61,57 @@ final class AIReviewCacheScaleTests: XCTestCase {
         )
     }
 
-    private func repository(_ index: Int) -> URL {
-        URL(fileURLWithPath: "/tmp/scale-repo-\(index % 10)")
-    }
-
-    /// 逐条 save（真实的累积方式：每次 save 都全量重写）。
-    private func populate(_ count: Int) {
-        let start = ContinuousClock.now
-        for index in 0..<count {
+    /// 查找必须停在内存字典上：一千次命中/未命中混合查找应在毫秒级。
+    func testLookupStaysInMemoryFastAtCap() {
+        for index in 0..<AIReviewCache.entryLimit {
             cache.save(
                 makeReview(seed: index),
-                diffFingerprint: String(format: "%016x", index),
-                for: repository(index),
-                pullRequestNumber: index / 10 + 1,
+                diffFingerprint: String(index),
+                for: URL(fileURLWithPath: "/tmp/scale-repo-\(index % 10)"),
+                pullRequestNumber: index,
                 createdAt: Date(timeIntervalSince1970: Double(index))
             )
         }
-        let millis = Double(start.duration(to: .now).components.attoseconds) / 1e15
-            + Double(start.duration(to: .now).components.seconds) * 1000
-        print("[GROVE-003] N=\(count) 累积 \(count) 次 save 总耗时 \(String(format: "%.0f", millis))ms")
+        measure {
+            for index in 0..<1000 {
+                _ = cache.review(
+                    for: URL(fileURLWithPath: "/tmp/scale-repo-\(index % 10)"),
+                    pullRequestNumber: index % (AIReviewCache.entryLimit + 50)
+                )
+            }
+        }
     }
 
-    /// 单次 save 的手动计时（一个测试方法只允许一个 measure 块，保存路径用打印）。
-    private func measureOneSave() {
-        let start = ContinuousClock.now
+    /// 满上限时的一次写盘（后台串行、整文件 ~600KB）——量的是后台耗时，
+    /// 不在主线程；这里只验证往返正确与时延有界。
+    func testPersistenceRoundTripAtCap() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["GROVE_SCALE"] == "1",
+                          "设置 GROVE_SCALE=1 才测量满上限写盘")
+        for index in 0..<AIReviewCache.entryLimit {
+            cache.save(
+                makeReview(seed: index),
+                diffFingerprint: String(index),
+                for: URL(fileURLWithPath: "/tmp/scale-repo-\(index % 10)"),
+                pullRequestNumber: index,
+                createdAt: Date(timeIntervalSince1970: Double(index))
+            )
+        }
         cache.save(
             makeReview(seed: .max),
             diffFingerprint: "updated",
-            for: repository(0),
+            for: URL(fileURLWithPath: "/tmp/scale-repo-0"),
             pullRequestNumber: 1
         )
-        let duration = start.duration(to: .now)
-        let millis = Double(duration.components.attoseconds) / 1e15
-            + Double(duration.components.seconds) * 1000
-        print("[GROVE-003] 单次 save 耗时 \(String(format: "%.1f", millis))ms")
-    }
+        let start = ContinuousClock.now
+        await cache.waitForPersistence()
+        let millis = Double(start.duration(to: .now).components.seconds) * 1000
+            + Double(start.duration(to: .now).components.attoseconds) / 1e15
+        print("[AIReviewCache] 满上限（\(AIReviewCache.entryLimit) 条）单次写盘 \(String(format: "%.1f", millis))ms（后台线程）")
 
-    // MARK: - 测量
-
-    func testScale100Lookup() throws {
-        try runLookupScale(100)
-    }
-
-    func testScale500LookupAndSave() throws {
-        try XCTSkipUnless(ProcessInfo.processInfo.environment["GROVE_SCALE"] == "1",
-                          "设置 GROVE_SCALE=1 才测量 500/1000 规模")
-        try runLookupScale(500)
-        measureOneSave()
-    }
-
-    func testScale1000LookupAndSave() throws {
-        try XCTSkipUnless(ProcessInfo.processInfo.environment["GROVE_SCALE"] == "1",
-                          "设置 GROVE_SCALE=1 才测量 500/1000 规模")
-        try runLookupScale(1000)
-        measureOneSave()
-    }
-
-    private func runLookupScale(_ count: Int) throws {
-        populate(count)
-        // 十次查找（含未命中）——每次都走全量解码路径。
-        measure {
-            for number in 0..<10 {
-                _ = cache.review(for: repository(number), pullRequestNumber: number)
-            }
-        }
+        let reloaded = AIReviewCache(storageDirectory: directory)
+        await reloaded.loadIfNeeded()
+        XCTAssertNotNil(reloaded.review(for: URL(fileURLWithPath: "/tmp/scale-repo-0"), pullRequestNumber: 1))
+        XCTAssertNil(reloaded.review(for: URL(fileURLWithPath: "/tmp/scale-repo-0"), pullRequestNumber: 0),
+                     "LRU 淘汰在重装后仍然成立")
     }
 }

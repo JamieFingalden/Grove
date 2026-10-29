@@ -922,7 +922,13 @@ final class AIReviewAutomationTests: XCTestCase {
             if autoPublish {
                 settings.setAutomaticReviewPublishEnabled(true, for: directory)
             }
-            let model = AppModel(aiGenerationSettings: settings, aiReviewCache: AIReviewCache(defaults: defaults),
+            // 缓存按 fixture 目录隔离；同步装载让「重启」（新建 AppModel）能读回
+            // 上一实例写入的结果——真实的 bootstrap 走异步 loadIfNeeded。
+            let cache = AIReviewCache(
+                storageDirectory: directory.appendingPathComponent("review-cache", isDirectory: true)
+            )
+            cache.loadSynchronously()
+            let model = AppModel(aiGenerationSettings: settings, aiReviewCache: cache,
                                  aiReviewUpdateNotifier: notifier, aiReviewGenerator: generator)
             var environment = ProcessInfo.processInfo.environment
             environment["GROVE_TEST_ROOT"] = directory.path

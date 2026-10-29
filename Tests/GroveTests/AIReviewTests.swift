@@ -307,24 +307,26 @@ final class PullRequestReviewPromptBuilderTests: XCTestCase {
     }
 }
 
+@MainActor
 final class AIReviewCacheTests: XCTestCase {
-    private var suiteName: String!
-    private var defaults: UserDefaults!
+    private var directory: URL!
+    private var cache: AIReviewCache!
 
     override func setUp() {
         super.setUp()
-        suiteName = "AIReviewCacheTests.\(UUID().uuidString)"
-        defaults = UserDefaults(suiteName: suiteName)!
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AIReviewCacheTests.\(UUID().uuidString)", isDirectory: true)
+        cache = AIReviewCache(storageDirectory: directory)
     }
 
     override func tearDown() {
-        defaults.removePersistentDomain(forName: suiteName)
-        defaults = nil
-        suiteName = nil
+        try? FileManager.default.removeItem(at: directory)
+        cache = nil
+        directory = nil
         super.tearDown()
     }
 
-    func testReviewSurvivesCacheRecreationAndCanBeRemoved() {
+    func testReviewSurvivesCacheRecreationAndCanBeRemoved() async throws {
         let repository = URL(fileURLWithPath: "/tmp/example")
         let review = PullRequestAIReview(
             verdict: .needsChanges,
@@ -339,15 +341,17 @@ final class AIReviewCacheTests: XCTestCase {
             )],
             wasTruncated: false
         )
-        AIReviewCache(defaults: defaults).save(
+        cache.save(
             review,
             diffFingerprint: "abc",
             for: repository,
             pullRequestNumber: 596,
             createdAt: Date(timeIntervalSince1970: 123)
         )
+        await cache.waitForPersistence()
 
-        let recreated = AIReviewCache(defaults: defaults)
+        let recreated = AIReviewCache(storageDirectory: directory)
+        await recreated.loadIfNeeded()
         let cached = recreated.review(for: repository, pullRequestNumber: 596)
         XCTAssertEqual(cached?.review, review)
         XCTAssertEqual(cached?.diffFingerprint, "abc")
@@ -355,7 +359,28 @@ final class AIReviewCacheTests: XCTestCase {
         XCTAssertNil(recreated.review(for: repository, pullRequestNumber: 598))
 
         recreated.remove(for: repository, pullRequestNumber: 596)
-        XCTAssertNil(recreated.review(for: repository, pullRequestNumber: 596))
+        await recreated.waitForPersistence()
+        let third = AIReviewCache(storageDirectory: directory)
+        await third.loadIfNeeded()
+        XCTAssertNil(third.review(for: repository, pullRequestNumber: 596))
+    }
+
+    /// 装载完成前的读取按未命中处理——启动早期界面不能因等待磁盘而阻塞。
+    func testReadsBeforeLoadMissUntilLoaded() async throws {
+        let repository = URL(fileURLWithPath: "/tmp/not-yet-loaded")
+        cache.save(
+            PullRequestAIReview(verdict: .ready, summary: "无风险。", assessments: [], wasTruncated: false),
+            diffFingerprint: "abc",
+            for: repository,
+            pullRequestNumber: 1,
+            createdAt: Date(timeIntervalSince1970: 10)
+        )
+        await cache.waitForPersistence()
+
+        let fresh = AIReviewCache(storageDirectory: directory)
+        XCTAssertNil(fresh.review(for: repository, pullRequestNumber: 1), "未装载的实例读不到")
+        await fresh.loadIfNeeded()
+        XCTAssertNotNil(fresh.review(for: repository, pullRequestNumber: 1))
     }
 
     func testDiffFingerprintIsStableAndChangesWithDiff() {
@@ -387,7 +412,6 @@ final class AIReviewCacheTests: XCTestCase {
     }
 
     func testSaveEvictsOldestEntriesBeyondLimit() {
-        let cache = AIReviewCache(defaults: defaults)
         let review = PullRequestAIReview(verdict: .ready, summary: "无风险。", assessments: [], wasTruncated: false)
         let total = 350
         for index in 0..<total {
@@ -436,6 +460,45 @@ final class AIGenerationSettingsHeadStateTests: XCTestCase {
         XCTAssertFalse(settings.hasNotifiedReviewHead("head-1", for: url))
         XCTAssertTrue(settings.hasNotifiedReviewHead("head-2", for: url))
         XCTAssertTrue(settings.hasNotifiedReviewHead("head-6", for: url))
+    }
+
+    /// URL 总量有硬上限：不经 Grove 关闭/合并的 PR 也不能让状态无限增长，
+    /// 淘汰按最久未用（不是只在 PR 关闭时才清理）。
+    func testHeadStateEvictsLeastRecentlyUsedURLsBeyondLimit() {
+        let limit = 400
+        for index in 0..<limit + 20 {
+            settings.setAutomaticReviewHead("h\(index)", for: "https://example.invalid/pr/\(index)")
+        }
+        // 最旧的 20 个 URL 被淘汰；最近使用的还在。
+        XCTAssertNil(settings.automaticReviewHead(for: "https://example.invalid/pr/0"))
+        XCTAssertNil(settings.automaticReviewHead(for: "https://example.invalid/pr/19"))
+        XCTAssertEqual(settings.automaticReviewHead(for: "https://example.invalid/pr/20"), "h20")
+        XCTAssertEqual(settings.automaticReviewHead(for: "https://example.invalid/pr/\(limit + 19)"), "h\(limit + 19)")
+
+        // 旧 URL 再被使用会「复活」到最近端：复活本身不淘汰（仍在限内），
+        // 下一次溢出淘汰的才是次旧的 pr/21，复活过的 pr/20 保留。
+        settings.setNotifiedReviewHead("n", for: "https://example.invalid/pr/20")
+        settings.setAutomaticReviewHead("h-new", for: "https://example.invalid/pr/9999")
+        XCTAssertNil(settings.automaticReviewHead(for: "https://example.invalid/pr/21"))
+        XCTAssertEqual(settings.automaticReviewHead(for: "https://example.invalid/pr/20"), "h20")
+    }
+
+    /// v1 的三个独立字典在首次访问时一次性迁移进 v2，并删除 v1 key。
+    func testHeadStateMigratesFromV1Dictionaries() {
+        defaults.set(["https://example.invalid/pr/1": "h1"], forKey: "grove.aiReview.publishedHeads.v1")
+        defaults.set(["https://example.invalid/pr/1": "h0"], forKey: "grove.aiReview.initialHeads.v1")
+        defaults.set(["https://example.invalid/pr/1": ["n1"]], forKey: "grove.aiReview.notifiedHeads.v1")
+
+        XCTAssertEqual(settings.automaticReviewHead(for: "https://example.invalid/pr/1"), "h1")
+        XCTAssertEqual(settings.initialReviewHead(for: "https://example.invalid/pr/1"), "h0")
+        XCTAssertTrue(settings.hasNotifiedReviewHead("n1", for: "https://example.invalid/pr/1"))
+
+        for key in ["grove.aiReview.publishedHeads.v1", "grove.aiReview.initialHeads.v1", "grove.aiReview.notifiedHeads.v1"] {
+            XCTAssertNil(defaults.object(forKey: key), "v1 key 应在迁移后删除：\(key)")
+        }
+        // 迁移后的状态在新实例（新的进程内缓存）里同样可见。
+        let fresh = AIGenerationSettings(defaults: defaults)
+        XCTAssertEqual(fresh.automaticReviewHead(for: "https://example.invalid/pr/1"), "h1")
     }
 
     func testRemovingAutomaticReviewStateForgetsAllHeadDictionaries() {
@@ -520,7 +583,8 @@ final class AIReviewCoordinatorTests: XCTestCase {
         )
         let model = AppModel(
             aiGenerationSettings: AIGenerationSettings(defaults: defaults),
-            aiReviewCache: AIReviewCache(defaults: defaults),
+            aiReviewCache: AIReviewCache(storageDirectory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("grove-coordinator-\(UUID().uuidString)", isDirectory: true)),
             aiReviewGenerator: { _ in
                 await Task.yield()
                 return result
