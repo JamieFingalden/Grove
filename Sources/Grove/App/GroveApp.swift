@@ -16,6 +16,8 @@ struct GroveApp: App {
         _model = State(initialValue: model)
 
         let router = PipelineNotificationRouter()
+        notificationRouter = router
+        let delegate = appDelegate
         router.openRepository = { root in
             // 主页的分栏自己带加载；这里只负责把仓库送到眼前。
             // 只有本机仓库会有流水线通知，所以按本机位置构造 RepoID。
@@ -31,17 +33,15 @@ struct GroveApp: App {
                 model.selection = .repositoryHome(repository: repository.id)
             }
             model.presentedFailure = failure
-            NSApp.windows.first(where: { $0.canBecomeKey })?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            delegate.showMainWindow()
         }
         UNUserNotificationCenter.current().delegate = router
-        notificationRouter = router
         Task { await AIReviewNotifier.registerActions() }
     }
 
     var body: some Scene {
-        WindowGroup {
-            RootView()
+        Window("Grove", id: AppDelegate.mainWindowID) {
+            MainWindowContent(appDelegate: appDelegate)
                 .environment(model)
                 .preferredColorScheme(model.navigation.colorScheme)
                 .task { await model.bootstrap() }
@@ -58,8 +58,31 @@ struct GroveApp: App {
     }
 }
 
+private struct MainWindowContent: View {
+    let appDelegate: AppDelegate
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        RootView()
+            .onAppear {
+                appDelegate.openMainWindow = { [openWindow] in
+                    openWindow(id: AppDelegate.mainWindowID)
+                }
+            }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    static let mainWindowID = "grove-main"
+    var openMainWindow: (() -> Void)?
+
+    func showMainWindow() {
+        // 按场景标识恢复或重建主窗口，不能误唤起隐藏的设置窗口。
+        openMainWindow?()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
@@ -68,12 +91,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ sender: NSApplication,
         hasVisibleWindows flag: Bool
     ) -> Bool {
-        guard !flag, let window = sender.windows.first(where: { $0.canBecomeKey }) else {
+        guard !flag, openMainWindow != nil else {
             return true
         }
-        window.makeKeyAndOrderFront(nil)
-        sender.activate(ignoringOtherApps: true)
-        return true
+        showMainWindow()
+        return false
     }
 }
 
