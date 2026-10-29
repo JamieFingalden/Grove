@@ -475,13 +475,16 @@ final class AppModel {
     }
 
     /// 用户点击通知里的按钮才进入这条路径，重新读取最新提交与历史讨论。
+    /// confirmedByUser：这是用户明确确认的重审，发布策略跟自动链路走
+    /// （项目开了「自动发布」就发布）；纯手动 Review 不在此列。
     func startRequestedAIReview(for root: URL, pullRequestNumber: Int) {
         guard canUseAIGeneration, !isAIReviewing(for: root, pullRequestNumber: pullRequestNumber), let service = aiReviewService,
               let repository = repositories.first(where: { $0.root == root }),
               let request = repository.pullRequests.first(where: { $0.number == pullRequestNumber && $0.isActive }) else { return }
         startAIReview(.init(pullRequest: request, files: [], customInstructions: aiReviewInstructions(for: root),
                             selectedAreas: aiReviewAreas(for: root), model: aiReviewModel,
-                            reasoningEffort: aiReviewReasoningEffort, service: service, repositoryRoot: root))
+                            reasoningEffort: aiReviewReasoningEffort, service: service, repositoryRoot: root),
+                      confirmedByUser: true)
     }
 
     func automaticAIReviewEnabled(for repository: URL) -> Bool {
@@ -493,6 +496,17 @@ final class AppModel {
         aiGenerationSettings.setAutomaticReviewEnabled(enabled, for: repository)
         automaticAIReviewSettingsRevision &+= 1
         if !enabled { cancelAutomaticAIReviews(for: repository) }
+    }
+
+    /// 自动审查的风险发现是否自动发布到平台讨论区。默认关闭。
+    func automaticAIReviewPublishEnabled(for repository: URL) -> Bool {
+        _ = automaticAIReviewSettingsRevision
+        return aiGenerationSettings.automaticReviewPublishEnabled(for: repository)
+    }
+
+    func setAutomaticAIReviewPublishEnabled(_ enabled: Bool, for repository: URL) {
+        aiGenerationSettings.setAutomaticReviewPublishEnabled(enabled, for: repository)
+        automaticAIReviewSettingsRevision &+= 1
     }
 
     private func cancelAutomaticAIReviews(for repository: URL? = nil) {
@@ -607,7 +621,14 @@ final class AppModel {
         }
     }
 
-    func startAIReview(_ request: AIReviewGenerationRequest, automatic: Bool = false, expectedHead: String? = nil) {
+    /// - Parameter confirmedByUser: 用户在通知里点了「重新审查」——重审本身是
+    ///   用户明确发起的，发布策略跟随自动链路的项目开关。
+    func startAIReview(
+        _ request: AIReviewGenerationRequest,
+        automatic: Bool = false,
+        expectedHead: String? = nil,
+        confirmedByUser: Bool = false
+    ) {
         let key = AIReviewJobKey(repository: request.repositoryRoot, pullRequestNumber: request.pullRequest.number)
         cancelAIReview(for: request.repositoryRoot, pullRequestNumber: request.pullRequest.number, suppressAutomatic: false)
         pendingAIReviewHeads.removeValue(forKey: key)
@@ -678,7 +699,18 @@ final class AppModel {
                 try await validate()
                 saveAIReview(result, diffFingerprint: fingerprint, for: input.repositoryRoot,
                              pullRequestNumber: input.pullRequest.number, head: head, requestURL: input.pullRequest.url)
-                if let forge, let head {
+                // 「这个 head 已完成」的记录时机分两种：
+                // - 发布（未开启、或非自动/非确认路径）：保存即完成——不记录的话
+                //   60 秒轮询会对同一个 head 无限重复评审。
+                // - 发布：全部风险发现发完才记录。部分发布失败时保持未记录，
+                //   下一轮轮询用缓存结果重试补发，不会重新生成。
+                // 发布与生成分离：只有自动链路（或用户在通知里确认的重审）、且该项目
+                // 显式开启了「自动发布」，风险发现才以用户账号发到平台讨论区。
+                // 纯手动 Review 一律不自动发布，结果保留在本地，
+                // 由详情页的「添加讨论…」逐条发布。
+                if (automatic || confirmedByUser),
+                   aiGenerationSettings.automaticReviewPublishEnabled(for: input.repositoryRoot),
+                   let forge, let head {
                     for assessment in result.discussionFindings {
                         let marker = AIReviewAutomation.marker(head: head, area: AIReviewAutomation.issueKey(assessment))
                         if AIReviewAutomation.contains(marker, in: input.threads) { continue }
@@ -696,6 +728,10 @@ final class AppModel {
                     }
                     try await validate()
                     try Task.checkCancellation()
+                    aiGenerationSettings.setAutomaticReviewHead(head, for: input.pullRequest.url)
+                    pendingAIReviewHeads.removeValue(forKey: key)
+                    aiReviewResultsRevision &+= 1
+                } else if let head {
                     aiGenerationSettings.setAutomaticReviewHead(head, for: input.pullRequest.url)
                     pendingAIReviewHeads.removeValue(forKey: key)
                     aiReviewResultsRevision &+= 1

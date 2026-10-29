@@ -101,12 +101,21 @@ struct ProjectHomeView: View {
         .background(.bar)
     }
 
+    /// 自动审查此刻的状态短语（开关的 accessibility 值和帮助文案共用）。
+    private var automaticReviewStatus: String {
+        let enabled = appModel.automaticAIReviewEnabled(for: repository.root)
+        let running = repository.pullRequests.contains {
+            appModel.isAIReviewing(for: repository.root, pullRequestNumber: $0.number)
+        }
+        return !enabled ? "已关闭" : !appModel.canUseAIGeneration ? "已暂停" : running ? "审查中" : "已开启"
+    }
+
     private func automaticReviewToggle(compact: Bool) -> some View {
         let enabled = appModel.automaticAIReviewEnabled(for: repository.root)
         let running = repository.pullRequests.contains {
             appModel.isAIReviewing(for: repository.root, pullRequestNumber: $0.number)
         }
-        let status = !enabled ? "已关闭" : !appModel.canUseAIGeneration ? "已暂停" : running ? "审查中" : "已开启"
+        let status = automaticReviewStatus
         return Toggle(isOn: Binding(
             get: { appModel.automaticAIReviewEnabled(for: repository.root) },
             set: { appModel.setAutomaticAIReviewEnabled($0, for: repository.root) }
@@ -134,9 +143,22 @@ struct ProjectHomeView: View {
         .disabled(!appModel.canUseAIGeneration)
         .accessibilityLabel("当前仓库自动审查")
         .accessibilityValue(status)
-        .help(appModel.canUseAIGeneration
-              ? "当前仓库自动审查\(status)。Grove 运行期间自动审查新 PR；后续推送只通知你，由你决定是否重新审查。"
-              : "AI 功能当前不可用，自动审查已暂停。请在设置中启用 AI 并配置服务。")
+        .help(reviewToggleHelp)
+    }
+
+    /// 自动审查开关的完整说明。发布状态必须写明：它决定风险意见会不会
+    /// 以用户账号出现在公开讨论区，是用户最需要知情的一项。
+    private var reviewToggleHelp: String {
+        guard appModel.canUseAIGeneration else {
+            return "AI 功能当前不可用，自动审查已暂停。请在设置中启用 AI 并配置服务。"
+        }
+        var help = "当前仓库自动审查\(automaticReviewStatus)。Grove 运行期间自动审查新 PR；后续推送只通知你，由你决定是否重新审查。"
+        if appModel.automaticAIReviewPublishEnabled(for: repository.root) {
+            help += "风险发现会自动发布到讨论区。"
+        } else {
+            help += "风险发现不自动发布（可在设置 · AI 开启），详情页可逐条发布。"
+        }
+        return help
     }
 
     /// 远端网页地址：从 origin 的 host/path 拼，不依赖平台接口。

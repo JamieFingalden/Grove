@@ -1112,6 +1112,18 @@ struct PreferencesView: View {
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
 
+                    Toggle("自动发布风险发现到讨论区", isOn: Binding(
+                        get: { selectedReviewRepository.map { model.automaticAIReviewPublishEnabled(for: $0.root) } ?? false },
+                        set: { enabled in
+                            if let repository = selectedReviewRepository {
+                                model.setAutomaticAIReviewPublishEnabled(enabled, for: repository.root)
+                            }
+                        }
+                    ))
+                    Text("默认关闭。开启后，自动审查发现的风险会以你的账号发布到该项目的 PR/MR 讨论区。关闭时风险意见只保留在 Grove 与通知里，可在请求详情页用「添加讨论…」检查内容后逐条发布；手动 Review 一律不自动发布。")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+
                     Text("PR 详情里的滑杆按钮还能为单次 Review 临时调整，不会覆盖这里的项目默认值。")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)

@@ -141,6 +141,21 @@ struct AIGenerationSettings {
         defaults.set(values, forKey: "grove.aiReview.automaticByRepository.v1")
     }
 
+    /// 自动审查发现的风险是否**自动发布**到托管平台讨论区。与「是否自动审查」
+    /// 分离且默认关闭：Grove 不在未明确授权的情况下以用户账号对外发言。
+    /// 关闭时风险意见保留在本地缓存与通知里，可在请求详情页逐条发布；
+    /// 手动 Review 一律不自动发布（AppModel.startAIReview 强制）。
+    func automaticReviewPublishEnabled(for repository: URL) -> Bool {
+        let values = defaults.dictionary(forKey: "grove.aiReview.autoPublishByRepository.v1") as? [String: Bool] ?? [:]
+        return values[repository.standardizedFileURL.path] ?? false
+    }
+
+    func setAutomaticReviewPublishEnabled(_ enabled: Bool, for repository: URL) {
+        var values = defaults.dictionary(forKey: "grove.aiReview.autoPublishByRepository.v1") as? [String: Bool] ?? [:]
+        values[repository.standardizedFileURL.path] = enabled
+        defaults.set(values, forKey: "grove.aiReview.autoPublishByRepository.v1")
+    }
+
     func automaticReviewHead(for requestURL: String) -> String? {
         (defaults.dictionary(forKey: "grove.aiReview.publishedHeads.v1") as? [String: String])?[requestURL]
     }

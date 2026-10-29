@@ -210,7 +210,7 @@ final class AIReviewAutomationTests: XCTestCase {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
         try fixture.write("diff", "diff --git a/a.swift b/a.swift\n--- a/a.swift\n+++ b/a.swift\n@@ -1 +1,2 @@\n-old\n+new\n+second\n")
-        let model = fixture.model { _ in
+        let model = fixture.model(autoPublish: true) { _ in
             var review = Self.review
             var first = review.assessments[0]
             first.file = "a.swift"
@@ -251,7 +251,7 @@ final class AIReviewAutomationTests: XCTestCase {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }
         let inputs = Inputs()
-        let model = fixture.model { request in
+        let model = fixture.model(autoPublish: true) { request in
             await inputs.append(request)
             var result = Self.review
             result.assessments[0].file = "a.swift"
@@ -311,7 +311,7 @@ final class AIReviewAutomationTests: XCTestCase {
             return result
         }
         try fixture.write("fail-second", "1")
-        let model = fixture.model(generator: generator)
+        let model = fixture.model(autoPublish: true, generator: generator)
         await model.pollAutomaticAIReviews()
         try await waitForReview(model)
         XCTAssertEqual(try fixture.publicationTargets(), ["inline"])
@@ -344,7 +344,7 @@ final class AIReviewAutomationTests: XCTestCase {
             await inputs.append(request)
             return Self.review
         }
-        let model = fixture.model(notifier: notifier, generator: generator)
+        let model = fixture.model(notifier: notifier, autoPublish: true, generator: generator)
         await model.pollAutomaticAIReviews()
         try await waitForReview(model)
         let first = await inputs.values
@@ -407,6 +407,67 @@ final class AIReviewAutomationTests: XCTestCase {
         try fixture.write("list", "[\(Fixture.request)]")
         await model.pollAutomaticAIReviews()
         XCTAssertEqual(model.activeAIReviewCount, 0)
+    }
+
+    /// 发布默认关闭：自动审查照常生成并入缓存，但一个字都不发到平台；
+    /// 已审过的 head 也不会因为「没发布」而被下一轮重复评审。
+    func testPublishOffByDefaultKeepsResultsLocalWithoutReReviewLoop() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        let inputs = Inputs()
+        let notifier: AIReviewUpdateNotifier = { _, _, head in await inputs.notify(head) }
+        let model = fixture.model(notifier: notifier) { request in
+            await inputs.append(request)
+            return Self.review
+        }
+        await model.pollAutomaticAIReviews()
+        try await waitForReview(model)
+
+        let generated = await inputs.values.count
+        XCTAssertEqual(generated, 1)
+        XCTAssertNotNil(model.cachedAIReview(for: fixture.directory, pullRequestNumber: 42))
+        XCTAssertEqual(try fixture.publicationTargets(), [], "默认关闭时任何内容都不能发到平台")
+        XCTAssertTrue(model.failures.isEmpty)
+
+        // 同一个 head 的后续轮次不得重新评审（head 已无条件记录，与发布无关）。
+        await model.pollAutomaticAIReviews()
+        await model.pollAutomaticAIReviews()
+        let afterRePolls = await inputs.values.count
+        XCTAssertEqual(afterRePolls, 1)
+        XCTAssertEqual(model.activeAIReviewCount, 0)
+
+        // 新推送只通知；用户在通知里确认重审后同样不发布，结果留在本地。
+        try fixture.write("head", "second")
+        await model.pollAutomaticAIReviews()
+        await model.pollAutomaticAIReviews()
+        let notices = await inputs.notifications
+        XCTAssertEqual(notices, ["second"])
+        model.startRequestedAIReview(for: fixture.directory, pullRequestNumber: 42)
+        try await waitForReview(model)
+        XCTAssertEqual(try fixture.publicationTargets(), [])
+        let cached = try XCTUnwrap(model.cachedAIReview(for: fixture.directory, pullRequestNumber: 42))
+        XCTAssertEqual(cached.head, "second")
+    }
+
+    /// 纯手动 Review（详情页按钮）即使项目开了「自动发布」也不自动发布——
+    /// 用户点的是「生成」，发布必须逐条确认。
+    func testManualReviewNeverPublishesEvenWithAutoPublishEnabled() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        let model = fixture.model(autoPublish: true) { _ in Self.review }
+        let repository = try XCTUnwrap(model.repositories.first)
+        let forge = try XCTUnwrap(repository.forge)
+        let request = try await forge.pullRequest(number: 42, in: fixture.directory)
+
+        model.startAIReview(.init(pullRequest: request, files: [], customInstructions: "",
+            selectedAreas: [.compilation], model: .sol, reasoningEffort: .high,
+            service: .codex(model: .sol, reasoningEffort: .high), repositoryRoot: fixture.directory))
+        try await waitForReview(model)
+
+        // Self.review 带一条 risk 评估，若发布门控失效这里会出现一条 inline 发布。
+        XCTAssertEqual(try fixture.publicationTargets(), [], "手动 Review 不得自动发布")
+        XCTAssertNotNil(model.cachedAIReview(for: fixture.directory, pullRequestNumber: 42))
+        XCTAssertTrue(model.failures.isEmpty)
     }
 
     func testPushAfterFailedInitialReviewOnlyNotifiesEvenAfterRestart() async throws {
@@ -803,10 +864,18 @@ final class AIReviewAutomationTests: XCTestCase {
             }
         }
 
-        @MainActor func model(notifier: @escaping AIReviewUpdateNotifier = { _, _, _ in }, generator: @escaping AIReviewGenerator) -> AppModel {
+        @MainActor func model(
+            notifier: @escaping AIReviewUpdateNotifier = { _, _, _ in },
+            autoPublish: Bool = false,
+            generator: @escaping AIReviewGenerator
+        ) -> AppModel {
             let defaults = UserDefaults(suiteName: suite)!
             let settings = AIGenerationSettings(defaults: defaults)
             settings.setEnabled(true)
+            // 「自动发布风险发现」默认关闭；显式开启的用例才走发布路径。
+            if autoPublish {
+                settings.setAutomaticReviewPublishEnabled(true, for: directory)
+            }
             let model = AppModel(aiGenerationSettings: settings, aiReviewCache: AIReviewCache(defaults: defaults),
                                  aiReviewUpdateNotifier: notifier, aiReviewGenerator: generator)
             var environment = ProcessInfo.processInfo.environment
