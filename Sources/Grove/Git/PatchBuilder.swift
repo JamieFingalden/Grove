@@ -124,6 +124,24 @@ enum PatchBuilder {
         return (header + body).joined(separator: "\n") + "\n"
     }
 
+    /// 把多个文件的选中行合并成一个补丁，供一次 `git apply` 原子应用。
+    ///
+    /// 逐文件单独 apply 的话，第 N 个文件失败时前 N-1 个已经生效，留下
+    /// 半完成状态；合并成单个补丁后 git apply 整体成功或整体不动。
+    /// 各文件补丁本身都以换行结尾，直接首尾相接就是 git 原生的多文件 diff 布局。
+    static func multiFilePatch(
+        for files: [FileDiff],
+        selecting selected: Set<Int>,
+        direction: Direction
+    ) -> String? {
+        var combined = ""
+        for file in files {
+            guard let patch = patch(for: file, selecting: selected, direction: direction) else { continue }
+            combined += patch
+        }
+        return combined.isEmpty ? nil : combined
+    }
+
     /// `<起始>,<行数>`。行数为 1 时 git 会省略逗号部分，这里跟着省
     /// —— 格式跟 git 自己的输出一致，排查问题时对照起来方便。
     private static func range(_ start: Int, _ count: Int) -> String {

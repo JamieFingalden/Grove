@@ -746,11 +746,12 @@ final class WorktreeModel: Identifiable {
         defer { activity = nil }
 
         do {
-            for file in diff {
-                guard let patch = PatchBuilder.patch(
-                    for: file, selecting: selectedLines, direction: direction
-                ) else { continue }
-                try await git.applyPatch(patch, in: path, cached: cached, reverse: reverse)
+            // 合并成单个补丁一次应用：git apply 对整个输入 all-or-nothing，
+            // 多文件场景不会再留下「前几个文件已生效、后面的失败了」的半完成状态。
+            if let combined = PatchBuilder.multiFilePatch(
+                for: diff, selecting: selectedLines, direction: direction
+            ) {
+                try await git.applyPatch(combined, in: path, cached: cached, reverse: reverse)
             }
             selectedLines.removeAll()
         } catch {

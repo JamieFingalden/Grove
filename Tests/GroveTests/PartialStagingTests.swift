@@ -288,6 +288,71 @@ final class PartialStagingTests: XCTestCase {
         let file = try await git.diff(in: root, staged: false)[0]
         XCTAssertNil(PatchBuilder.patch(for: file, selecting: [], direction: .forward))
     }
+
+    /// 多文件的选中行合并成一个补丁、一次应用 —— 两个文件都按预期进索引。
+    func testMultiFilePatchStagesSelectionsAcrossFiles() async throws {
+        try write("一\n二\n三\n", to: "a.txt")
+        try write("甲\n乙\n丙\n", to: "b.txt")
+        try await run(["add", "-A"])
+        try await run(["commit", "-qm", "初始"])
+
+        try write("一\n二改\n三\n", to: "a.txt")
+        try write("甲\n乙改\n丙\n", to: "b.txt")
+
+        let diffs = try await git.diff(in: root, staged: false)
+        XCTAssertEqual(diffs.count, 2)
+        let selected = Set(diffs.flatMap { file in
+            file.hunks.flatMap(\.lines)
+                .filter { $0.kind == .addition || $0.kind == .deletion }
+                .map(\.id)
+        })
+
+        let combined = try XCTUnwrap(
+            PatchBuilder.multiFilePatch(for: diffs, selecting: selected, direction: .forward)
+        )
+        try await git.applyPatch(combined, in: root, cached: true, reverse: false)
+
+        try await run(["commit", "-qm", "两个文件各改一行"])
+        let a = try await git.run(["show", "HEAD:a.txt"], in: root)
+        let b = try await git.run(["show", "HEAD:b.txt"], in: root)
+        XCTAssertEqual(a, "一\n二改\n三\n")
+        XCTAssertEqual(b, "甲\n乙改\n丙\n")
+    }
+
+    /// 合并补丁的原子性：第二段应用失败时，第一段也必须原封不动 ——
+    /// 这是把逐文件 apply 改成单次 apply 的全部意义。
+    func testMultiFilePatchAppliesAtomically() async throws {
+        try write("一\n二\n三\n", to: "a.txt")
+        try write("甲\n乙\n丙\n", to: "b.txt")
+        try await run(["add", "-A"])
+        try await run(["commit", "-qm", "初始"])
+        try write("一\n二改\n三\n", to: "a.txt")
+        try write("甲\n乙改\n丙\n", to: "b.txt")
+
+        let diffs = try await git.diff(in: root, staged: false)
+        let aFile = try XCTUnwrap(diffs.first { $0.newPath == "a.txt" })
+        let bFile = try XCTUnwrap(diffs.first { $0.newPath == "b.txt" })
+        let aSelected = Set(aFile.hunks.flatMap(\.lines)
+            .filter { $0.kind == .addition || $0.kind == .deletion }.map(\.id))
+        let bSelected = Set(bFile.hunks.flatMap(\.lines)
+            .filter { $0.kind == .addition || $0.kind == .deletion }.map(\.id))
+
+        let validA = try XCTUnwrap(PatchBuilder.patch(for: aFile, selecting: aSelected, direction: .forward))
+        let validB = try XCTUnwrap(PatchBuilder.patch(for: bFile, selecting: bSelected, direction: .forward))
+        // 把 b 段的上下文行篡改成磁盘上不存在的内容：git apply 必须整体拒绝。
+        let poisoned = validB
+            .replacingOccurrences(of: " 甲\n", with: " 不存在的上下文\n")
+            .replacingOccurrences(of: " 丙\n", with: " 同样不存在\n")
+
+        do {
+            try await git.applyPatch(validA + poisoned, in: root, cached: true, reverse: false)
+            XCTFail("第二段补丁应用失败时必须抛错")
+        } catch is CommandFailure {
+            // 预期路径。
+        }
+        let staged = try await git.diff(in: root, staged: true)
+        XCTAssertTrue(staged.isEmpty, "任何一段失败时，前一段也绝不能生效")
+    }
 }
 
 /// Shift 范围选择的纯逻辑测试。
