@@ -103,7 +103,8 @@ struct GroveFailure: Identifiable, Sendable {
         if message.contains("already exists") || message.contains("has already been taken") {
             return "目标已经存在。请检查同名仓库、分支、标签或目录，换一个名称后重试。"
         }
-        if message.contains("403") || message.contains("forbidden") {
+        if message.contains("http 403") || message.contains("code 403")
+            || message.contains("error 403") || message.contains("forbidden") {
             return "服务拒绝了当前账号的访问。请检查账号对这个仓库或操作的权限，必要时联系管理员。"
         }
         if message.contains("could not resolve host")
@@ -959,8 +960,10 @@ final class AppModel {
     ///
     /// 主机列表只在启动时读一次，所以用户在终端里 `glab auth login` 之后，
     /// 不刷新的话 Grove 还认为这台主机不认识 —— 「登录完还得重启 app」
-    /// 是个很没道理的要求。
+    /// 是个很没道理的要求。负缓存一并清掉：中途新装的 CLI
+    /// （brew install gh）不重启也能被发现。
     func redetectForges() async {
+        await ToolLocator.shared.forgetMissingTools()
         await detectForges()
 
         await refreshLocalForgeMetadata()
@@ -1275,22 +1278,31 @@ final class AppModel {
         /// 组内全部工作树，按服务器身份与路径去重。同一个仓库可能被打开成多个条目
         /// （比如把各个工作树目录分别拖进 Grove），每个条目都会列出全部
         /// 工作树 —— 不去重的话每行要出现 N 遍。远端路径不经过本机符号链接解析。
-        @MainActor
-        var mergedWorktrees: [(id: RepoID, worktree: Worktree, repository: RepositoryModel)] {
-            var seen = Set<RepoID>()
-            var merged: [(RepoID, Worktree, RepositoryModel)] = []
-            for repository in repositories {
-                for worktree in repository.worktrees {
-                    let id = RepoID(location: repository.location, root: worktree.path)
-                    guard seen.insert(id).inserted else { continue }
-                    merged.append((id, worktree, repository))
-                }
-            }
-            return merged
-        }
+        /// 构建分组时一并算好（侧边栏每次 body 求值都要读）。
+        var mergedWorktrees: [(id: RepoID, worktree: Worktree, repository: RepositoryModel)] = []
     }
 
+    /// 分组的指纹缓存。分组只随「仓库列表 / origin / 工作树清单」变化，
+    /// 指纹没变时直接回缓存 —— 侧边栏每次 body 求值都会读 `projects`，
+    /// 不缓存的话每次都要全量分组 + 排序 + 工作树去重合并。
+    @ObservationIgnored private var projectGroupCache: (signature: [String], groups: [ProjectGroup])?
+
     var projects: [ProjectGroup] {
+        let signature = allRepositories.map { repository in
+            let origin = repository.origin
+                .map { "origin:\($0.host.lowercased()):\($0.path)" } ?? "solo"
+            let worktrees = repository.worktrees.map(\.path.path).joined(separator: "\u{1F}")
+            return "\(repository.id.identityKey)|\(origin)|\(worktrees)"
+        }
+        if let cache = projectGroupCache, cache.signature == signature {
+            return cache.groups
+        }
+        let groups = buildProjectGroups()
+        projectGroupCache = (signature, groups)
+        return groups
+    }
+
+    private func buildProjectGroups() -> [ProjectGroup] {
         var groups: [String: ProjectGroup] = [:]
         var order: [String] = []
 
@@ -1322,6 +1334,16 @@ final class AppModel {
             if let local = result[index].local {
                 result[index].name = local.name
             }
+            var seen = Set<RepoID>()
+            var merged: [(RepoID, Worktree, RepositoryModel)] = []
+            for repository in result[index].repositories {
+                for worktree in repository.worktrees {
+                    let id = RepoID(location: repository.location, root: worktree.path)
+                    guard seen.insert(id).inserted else { continue }
+                    merged.append((id, worktree, repository))
+                }
+            }
+            result[index].mergedWorktrees = merged
         }
         return result.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }

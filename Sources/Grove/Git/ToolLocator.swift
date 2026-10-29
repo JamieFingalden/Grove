@@ -54,6 +54,13 @@ actor ToolLocator {
         return nil
     }
 
+    /// 清掉「没找到」的负缓存。用户中途装了 CLI（brew install gh）之后点
+    /// 「重新检测」应能立刻找到，而不是要求重启整个 app；已定位成功的
+    /// 路径不动——同路径更新不改变解析结果。
+    func forgetMissingTools() {
+        notFound.removeAll()
+    }
+
     /// 给子进程用的环境变量：在继承环境的基础上把已知目录并进 PATH。
     ///
     /// 光有 git 的绝对路径不够 —— git 自己还要 fork 出别的东西：

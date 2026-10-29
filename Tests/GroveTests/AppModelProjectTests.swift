@@ -55,14 +55,21 @@ final class AppModelProjectTests: XCTestCase {
         XCTAssertEqual(repository.forgeSetup?.summary, "这个仓库没有配置远端。")
     }
 
-    func testSamePathOnDifferentServersHasDistinctRowsAndSheets() {
+    func testSamePathOnDifferentServersHasDistinctRowsAndSheets() throws {
         let path = URL(fileURLWithPath: "/srv/project")
         let first = RepositoryModel(root: path, git: git, app: nil, server: RemoteServer(host: "dev.example.com"))
         let second = RepositoryModel(root: path, git: git, app: nil, server: RemoteServer(host: "dev.example.com"))
         first.worktrees = [worktree(at: path)]
         second.worktrees = [worktree(at: path)]
-        let group = AppModel.ProjectGroup(key: "project", name: "项目", locals: [], remotes: [first, second])
+        // 同 origin 才会并成一组：两条远程副本、同路径，必须仍是两行。
+        let origin = try XCTUnwrap(GitRemote.parse("https://gitlab.example.com/group/project.git"))
+        first.origin = origin
+        second.origin = origin
+        let app = AppModel()
+        app.remoteRepositories = [first, second]
 
+        let group = try XCTUnwrap(app.projects.first)
+        XCTAssertEqual(app.projects.count, 1)
         XCTAssertEqual(group.mergedWorktrees.count, 2)
         XCTAssertNotEqual(group.mergedWorktrees[0].id, group.mergedWorktrees[1].id)
         XCTAssertNotEqual(
