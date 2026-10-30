@@ -132,7 +132,7 @@ struct AIGenerationSettings {
 
     func automaticReviewEnabled(for repository: URL) -> Bool {
         let values = defaults.dictionary(forKey: "grove.aiReview.automaticByRepository.v1") as? [String: Bool] ?? [:]
-        return values[repository.standardizedFileURL.path] ?? true
+        return values[repository.standardizedFileURL.path] ?? false
     }
 
     func setAutomaticReviewEnabled(_ enabled: Bool, for repository: URL) {

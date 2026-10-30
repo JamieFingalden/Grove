@@ -261,7 +261,9 @@ final class AIGenerationSettingsTests: XCTestCase {
     }
 
     func testDefaultsToDisabled() {
-        XCTAssertFalse(AIGenerationSettings(defaults: defaults).isEnabled)
+        let settings = AIGenerationSettings(defaults: defaults)
+        XCTAssertFalse(settings.isEnabled)
+        XCTAssertFalse(settings.automaticReviewEnabled(for: URL(fileURLWithPath: "/tmp/new-repository")))
     }
 
     func testPersistsGlobalEnabledState() {

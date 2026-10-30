@@ -918,6 +918,8 @@ final class AIReviewAutomationTests: XCTestCase {
             let defaults = UserDefaults(suiteName: suite)!
             let settings = AIGenerationSettings(defaults: defaults)
             settings.setEnabled(true)
+            // 自动审查也必须显式开启；默认关闭是产品安全策略。
+            settings.setAutomaticReviewEnabled(true, for: directory)
             // 「自动发布风险发现」默认关闭；显式开启的用例才走发布路径。
             if autoPublish {
                 settings.setAutomaticReviewPublishEnabled(true, for: directory)

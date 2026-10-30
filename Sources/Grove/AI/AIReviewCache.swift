@@ -50,12 +50,17 @@ final class AIReviewCache {
     nonisolated private static let legacyStorageKey = "grove.aiReview.results.v2"
 
     private let fileURL: URL
+    private let legacyDefaults: UserDefaults
     private var entries: [Key: CachedPullRequestAIReview] = [:]
     private var persistenceTask: Task<Void, Never>?
     private(set) var isLoaded = false
 
-    init(storageDirectory: URL = AIReviewCache.defaultDirectory) {
+    init(
+        storageDirectory: URL = AIReviewCache.defaultDirectory,
+        legacyDefaults: UserDefaults = .standard
+    ) {
         fileURL = storageDirectory.appendingPathComponent("entries.json")
+        self.legacyDefaults = legacyDefaults
     }
 
     // MARK: - 装载与迁移
@@ -70,10 +75,14 @@ final class AIReviewCache {
         }.value
         var didMigrate = false
         if store == nil {
+            let legacyData = legacyDefaults.data(forKey: Self.legacyStorageKey)
             store = await Task.detached(priority: .utility) { () -> Store? in
-                Self.readLegacyStore()
+                Self.decodeLegacyStore(legacyData)
             }.value
             didMigrate = store != nil
+            if didMigrate {
+                legacyDefaults.removeObject(forKey: Self.legacyStorageKey)
+            }
         }
         ingest(store)
         if didMigrate { schedulePersist() }
@@ -86,8 +95,11 @@ final class AIReviewCache {
         var didMigrate = false
         var store = Self.readStore(at: fileURL)
         if store == nil {
-            store = Self.readLegacyStore()
+            store = Self.decodeLegacyStore(legacyDefaults.data(forKey: Self.legacyStorageKey))
             didMigrate = store != nil
+            if didMigrate {
+                legacyDefaults.removeObject(forKey: Self.legacyStorageKey)
+            }
         }
         ingest(store)
         if didMigrate { schedulePersist() }
@@ -108,15 +120,19 @@ final class AIReviewCache {
         return try? decoder.decode(Store.self, from: data)
     }
 
-    /// 旧版迁移：读 UserDefaults 单 key 的全部条目，迁移成功即删除原 key。
-    nonisolated private static func readLegacyStore() -> Store? {
-        guard let data = UserDefaults.standard.data(forKey: legacyStorageKey) else { return nil }
-        // 旧 Entry 形状与本版一致（repositoryPath/pullRequestNumber/value）。
+    /// 旧版迁移：旧版本保存的是顶层 Entry 数组，不是当前 Store 对象。
+    /// 同时接受对象形状，避免中间开发版本留下的缓存无法迁移。
+    nonisolated private static func decodeLegacyStore(_ data: Data?) -> Store? {
+        guard let data else { return nil }
+        let decoder = JSONDecoder()
+        if let entries = try? decoder.decode([Store.Entry].self, from: data) {
+            return Store(entries: entries)
+        }
+
         struct LegacyStore: Codable {
             var entries: [Store.Entry]
         }
-        guard let legacy = try? JSONDecoder().decode(LegacyStore.self, from: data) else { return nil }
-        UserDefaults.standard.removeObject(forKey: legacyStorageKey)
+        guard let legacy = try? decoder.decode(LegacyStore.self, from: data) else { return nil }
         return Store(entries: legacy.entries)
     }
 

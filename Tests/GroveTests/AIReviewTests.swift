@@ -365,6 +365,40 @@ final class AIReviewCacheTests: XCTestCase {
         XCTAssertNil(third.review(for: repository, pullRequestNumber: 596))
     }
 
+    func testMigratesLegacyUserDefaultsArrayAndRemovesLegacyKey() async throws {
+        let suiteName = "AIReviewCacheMigrationTests.\(UUID().uuidString)"
+        let legacyDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { legacyDefaults.removePersistentDomain(forName: suiteName) }
+
+        let repository = URL(fileURLWithPath: "/tmp/legacy-example")
+        let review = PullRequestAIReview(
+            verdict: .ready,
+            summary: "旧缓存仍然可见。",
+            assessments: [],
+            wasTruncated: false
+        )
+        let entry = AIReviewCache.Store.Entry(
+            repositoryPath: repository.standardizedFileURL.path,
+            pullRequestNumber: 7,
+            value: CachedPullRequestAIReview(
+                review: review,
+                diffFingerprint: "legacy",
+                createdAt: Date(timeIntervalSince1970: 123)
+            )
+        )
+        legacyDefaults.set(
+            try JSONEncoder().encode([entry]),
+            forKey: "grove.aiReview.results.v2"
+        )
+
+        let migrated = AIReviewCache(storageDirectory: directory, legacyDefaults: legacyDefaults)
+        await migrated.loadIfNeeded()
+
+        XCTAssertEqual(migrated.review(for: repository, pullRequestNumber: 7)?.review, review)
+        XCTAssertNil(legacyDefaults.data(forKey: "grove.aiReview.results.v2"), "旧数组缓存迁移成功后应删除旧 key")
+        await migrated.waitForPersistence()
+    }
+
     /// 装载完成前的读取按未命中处理——启动早期界面不能因等待磁盘而阻塞。
     func testReadsBeforeLoadMissUntilLoaded() async throws {
         let repository = URL(fileURLWithPath: "/tmp/not-yet-loaded")
