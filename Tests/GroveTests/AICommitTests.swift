@@ -44,7 +44,10 @@ final class CommitPromptBuilderTests: XCTestCase {
         ))
 
         XCTAssertTrue(result.wasTruncated)
-        XCTAssertLessThan(result.text.utf8.count, 2_000)
+        // 护栏是「diff 部分遵守预算」：原始 diff 约 19KB，预算 100 字节，
+        // 失效时总量会大一个数量级。上界放的是提示词固定骨架（约 2KB）
+        // 加预算余量，骨架字数变化时同步调整。
+        XCTAssertLessThan(result.text.utf8.count, 2_200)
     }
 
     func testMergeSubjectsAreExcludedFromStyleSamples() {
@@ -66,6 +69,22 @@ final class CommitPromptBuilderTests: XCTestCase {
         ))
         XCTAssertTrue(result.contains("没有可用的历史提交标题"))
     }
+
+    /// 格式是硬性要求：即使仓库历史本身没有前缀（模型以前会跟着历史学坏），
+    /// 提示词也必须强制 Conventional Commits，不再让模型「自行推断」格式。
+    func testPromptRequiresConventionalPrefixRegardlessOfHistoryStyle() {
+        let result = CommitPromptBuilder.prompt(.init(
+            stagedDiff: "+change",
+            recentSubjects: ["文本方向评分改按字符基线一致性避免跨行拉长误判"],
+            fileSummary: "a.txt | 1 +"
+        ))
+
+        XCTAssertTrue(result.contains("Conventional Commits"))
+        XCTAssertTrue(result.contains("都必须带"))
+        XCTAssertTrue(result.contains("type 填"))
+        XCTAssertTrue(result.contains("feat"))
+        XCTAssertFalse(result.contains("自行推断"))
+    }
 }
 
 final class CommitMessageCleanerTests: XCTestCase {
@@ -81,6 +100,70 @@ final class CommitMessageCleanerTests: XCTestCase {
         XCTAssertEqual(
             CommitMessageCleaner.clean("提交信息：chore: 更新依赖\n\n"),
             "chore: 更新依赖"
+        )
+    }
+}
+
+final class CommitSubjectFormatterTests: XCTestCase {
+    /// 模型输出的前缀写法不规范时统一成 `type(scope)!: 正文`。
+    func testNormalizesColonWidthSpacingAndCase() {
+        XCTAssertEqual(
+            CommitSubjectFormatter.canonicalize("feat：添加登录", declaredType: nil),
+            "feat: 添加登录"
+        )
+        XCTAssertEqual(
+            CommitSubjectFormatter.canonicalize("Fix(parser):处理空响应", declaredType: nil),
+            "fix(parser): 处理空响应"
+        )
+        XCTAssertEqual(
+            CommitSubjectFormatter.canonicalize("  REFACTOR: 拆分解析器\n", declaredType: nil),
+            "refactor: 拆分解析器"
+        )
+        XCTAssertEqual(
+            CommitSubjectFormatter.canonicalize("feat!:接口改为必填", declaredType: nil),
+            "feat!: 接口改为必填"
+        )
+    }
+
+    /// 标题整个漏掉前缀时，用 schema 的 type 字段补上 —— 用户遇到的
+    /// 「文本方向评分改按字符基线一致性……」这类裸标题就走到这里。
+    func testPrependsDeclaredTypeWhenSubjectLacksPrefix() {
+        XCTAssertEqual(
+            CommitSubjectFormatter.canonicalize("文本方向评分改按字符基线一致性", declaredType: "fix"),
+            "fix: 文本方向评分改按字符基线一致性"
+        )
+        XCTAssertEqual(
+            CommitSubjectFormatter.canonicalize("组件评分用组内字符高度中位数", declaredType: " Refactor "),
+            "refactor: 组件评分用组内字符高度中位数"
+        )
+    }
+
+    /// 两边都给不出可信类型时原样返回：宁可没有前缀，也不猜一个错的。
+    func testKeepsSubjectWhenNoTrustworthyType() {
+        XCTAssertEqual(
+            CommitSubjectFormatter.canonicalize("组件评分用组内字符高度中位数", declaredType: nil),
+            "组件评分用组内字符高度中位数"
+        )
+        XCTAssertEqual(
+            CommitSubjectFormatter.canonicalize("组件评分用组内字符高度中位数", declaredType: "improvement"),
+            "组件评分用组内字符高度中位数"
+        )
+    }
+
+    /// 两个字段打架时信标题自带的前缀，且不重复拼接。
+    func testSubjectPrefixWinsAndIsNotDuplicated() {
+        XCTAssertEqual(
+            CommitSubjectFormatter.canonicalize("docs: 修正发布文档", declaredType: "feat"),
+            "docs: 修正发布文档"
+        )
+    }
+
+    /// 「feature:」这类长得像类型但不在白名单里的词不算前缀，
+    /// 交给 type 字段兜底或原样保留。
+    func testPrefixLikeWordsOutsideAllowListDoNotMatch() {
+        XCTAssertEqual(
+            CommitSubjectFormatter.canonicalize("feature: 添加登录", declaredType: nil),
+            "feature: 添加登录"
         )
     }
 }

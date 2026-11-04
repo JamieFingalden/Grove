@@ -1,9 +1,17 @@
 import Foundation
 
 struct CodexCommitGenerator {
-    static let outputSchema = """
-    {"type":"object","properties":{"subject":{"type":"string"},"body":{"type":"string"}},"required":["subject","body"],"additionalProperties":false}
-    """
+    /// `type` 是标题的 Conventional Commits 类型，用 enum 限制取值。
+    /// 让模型单独填一个枚举字段，比指望它在自由文本里记得加前缀可靠得多；
+    /// 标题整个漏掉前缀时，`CommitSubjectFormatter` 会用这个字段补上。
+    static let outputSchema: String = {
+        let types = CommitSubjectFormatter.allowedTypes
+            .map { "\"\($0)\"" }
+            .joined(separator: ",")
+        return """
+        {"type":"object","properties":{"type":{"type":"string","enum":[\(types)]},"subject":{"type":"string"},"body":{"type":"string"}},"required":["type","subject","body"],"additionalProperties":false}
+        """
+    }()
 
     struct PreparedInput: Sendable {
         var prompt: String
@@ -21,6 +29,9 @@ struct CodexCommitGenerator {
     }
 
     private struct StructuredOutput: Decodable {
+        /// 类型声明是冗余信号：schema 限制为枚举，但 API 网关不一定严格执行
+        /// schema，所以按可选解码，交给 `CommitSubjectFormatter` 校验取用。
+        var type: String?
         var subject: String
         var body: String?
     }
@@ -55,7 +66,10 @@ struct CodexCommitGenerator {
             guard let output = try? JSONDecoder().decode(StructuredOutput.self, from: data) else {
                 throw CodexGenerationError.invalidOutput
             }
-            let subject = CommitMessageCleaner.clean(output.subject)
+            let subject = CommitSubjectFormatter.canonicalize(
+                CommitMessageCleaner.clean(output.subject),
+                declaredType: output.type
+            )
             let body = CommitMessageCleaner.clean(output.body ?? "")
             guard !subject.isEmpty else { throw CodexGenerationError.emptyOutput }
             let message = body.isEmpty ? subject : "\(subject)\n\n\(body)"
