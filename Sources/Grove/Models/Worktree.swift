@@ -56,7 +56,7 @@ struct Branch: Identifiable, Hashable, Sendable {
     var hasUpstream: Bool { upstream != nil }
 }
 
-/// 一个远端分支的精简信息，用于「基于远端分支建工作树」。
+/// 一个远端分支的精简信息。「基于远端分支建工作树」和远端分支管理列表都用它。
 struct RemoteBranch: Identifiable, Hashable, Sendable {
     /// 完整短名，例如 `origin/feature/login`。
     var name: String
@@ -64,6 +64,8 @@ struct RemoteBranch: Identifiable, Hashable, Sendable {
     var localName: String
     var oid: String
     var lastCommitDate: Date?
+    /// 最后一次提交的说明。远端分支管理列表里靠它认人。
+    var subject: String
 
     var id: String { name }
 }

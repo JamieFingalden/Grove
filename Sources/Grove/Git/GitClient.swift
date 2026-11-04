@@ -738,6 +738,20 @@ struct GitClient: Sendable {
         return arguments
     }
 
+    /// 删除远端上的分支。破坏性、直接作用于远端仓库，影响所有协作者 ——
+    /// 调用方必须先经用户确认。
+    func deleteRemoteBranch(_ branch: String, on remote: String, in directory: URL) async throws {
+        try await run(
+            Self.remoteBranchDeleteArguments(remote: remote, branch: branch),
+            in: directory,
+            timeout: ProcessRunner.networkTimeout
+        )
+    }
+
+    static func remoteBranchDeleteArguments(remote: String, branch: String) -> [String] {
+        ["push", remote, "--delete", branch]
+    }
+
     /// 上游是否正好指向本地 HEAD 改写前的位置。
     ///
     /// 普通 amend 后 `HEAD@{1}` 是远端已有的旧提交、`HEAD` 是新提交。

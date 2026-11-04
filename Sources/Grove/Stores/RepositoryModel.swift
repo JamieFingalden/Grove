@@ -870,6 +870,31 @@ final class RepositoryModel: Identifiable {
         branches.filter { $0.upstreamIsGone && !$0.isCheckedOut }
     }
 
+    /// 某条远端分支所属的远端名（`origin/feature/x` → `origin`）。认不出返回
+    /// nil —— 多半是远端已被移除后留下的陈旧引用，那种删不了远端，只能靠 prune。
+    func remoteName(of branch: RemoteBranch) -> String? {
+        RemoteListParser.remoteName(inUpstream: branch.name, knownRemotes: remotes.map(\.name))
+    }
+
+    /// 是否默认分支。`defaultBranch` 已剥掉远端前缀，跨远端按名字比对。
+    /// 删默认分支会让仓库失去落点，界面上直接不给选，这里再兜一层底。
+    func isDefaultRemoteBranch(_ branch: RemoteBranch) -> Bool {
+        branch.localName == defaultBranch
+    }
+
+    /// 删除远端分支。逐条执行、各自报错（一条失败不影响其余）；默认分支和认不出
+    /// 远端的引用跳过。完成后统一抓取修剪 —— 远端分支列表要靠 prune 才会消失，
+    /// 本地跟踪分支也才会变 `[gone]`、出现在「清理已合并分支」里。
+    func deleteRemoteBranches(_ selection: [RemoteBranch]) async {
+        for branch in selection {
+            guard !isDefaultRemoteBranch(branch), let remote = remoteName(of: branch) else { continue }
+            await perform("正在删除远端分支 \(branch.name)…") {
+                try await self.git.deleteRemoteBranch(branch.localName, on: remote, in: self.root)
+            }
+        }
+        await fetch()
+    }
+
     // MARK: - 托管商
 
     /// 这个仓库的评审功能由哪个平台提供。

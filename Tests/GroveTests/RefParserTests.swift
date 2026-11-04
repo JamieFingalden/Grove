@@ -58,9 +58,9 @@ final class RefParserTests: XCTestCase {
 
     func testRemoteBranchesStripPrefixAndDropHead() {
         let output = [
-            line("origin/HEAD", "aaa", "2026-08-27T14:03:09Z"),
-            line("origin/main", "bbb", "2026-08-27T14:03:09Z"),
-            line("origin/feature/deep/name", "ccc", "2026-08-26T10:00:00Z")
+            line("origin/HEAD", "aaa", "2026-08-27T14:03:09Z", "指向默认分支"),
+            line("origin/main", "bbb", "2026-08-27T14:03:09Z", "初始提交"),
+            line("origin/feature/deep/name", "ccc", "2026-08-26T10:00:00Z", "深度命名")
         ].joined(separator: "\n")
 
         let remotes = RefParser.parseRemoteBranches(output)
@@ -68,6 +68,7 @@ final class RefParserTests: XCTestCase {
         // origin/HEAD 是符号引用，不是真分支，检出它没意义。
         XCTAssertEqual(remotes.count, 2)
         XCTAssertEqual(remotes.map(\.localName), ["main", "feature/deep/name"])
+        XCTAssertEqual(remotes.map(\.subject), ["初始提交", "深度命名"])
     }
 
     func testStripRemotePrefixOnlyRemovesFirstSegment() {

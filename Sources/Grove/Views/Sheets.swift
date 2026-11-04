@@ -699,6 +699,246 @@ struct CleanupBranchesSheet: View {
     }
 }
 
+// MARK: - 远端分支管理
+
+/// 浏览并删除**远端仓库上**的分支（`git push <remote> --delete`）。跟本地清理
+/// （`CleanupBranchesSheet`）不是一个量级 —— 直接影响所有协作者，所以多一道
+/// 确认，并且默认分支不可选。
+struct RemoteBranchesSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let repository: RepositoryModel
+
+    @State private var selected: Set<String> = []
+    @State private var searchText = ""
+    @State private var isWorking = false
+    @State private var showsConfirmation = false
+
+    /// 远端已被移除的陈旧引用归到的组名。
+    private static let unresolvedGroupName = "未识别远端"
+
+    private var filteredBranches: [RemoteBranch] {
+        let query = searchText.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return repository.remoteBranches }
+        return repository.remoteBranches.filter { $0.name.localizedStandardContains(query) }
+    }
+
+    /// 搜索命中且可以删除的分支。「全选」只动这些。
+    private var selectableBranches: [RemoteBranch] {
+        filteredBranches.filter(isSelectable)
+    }
+
+    private var allFilteredSelected: Bool {
+        !selectableBranches.isEmpty && selectableBranches.allSatisfy { selected.contains($0.name) }
+    }
+
+    private func isSelectable(_ branch: RemoteBranch) -> Bool {
+        !repository.isDefaultRemoteBranch(branch) && repository.remoteName(of: branch) != nil
+    }
+
+    private struct RemoteGroup: Identifiable {
+        let name: String
+        let branches: [RemoteBranch]
+        var id: String { name }
+    }
+
+    /// 按所属远端分组，配置里的远端按配置顺序排，认不出的垫底。
+    private var groups: [RemoteGroup] {
+        var byRemote: [String: [RemoteBranch]] = [:]
+        var order: [String] = []
+        for branch in filteredBranches {
+            let key = repository.remoteName(of: branch) ?? Self.unresolvedGroupName
+            if byRemote[key] == nil { order.append(key) }
+            byRemote[key, default: []].append(branch)
+        }
+        let knownOrder = repository.remotes.map(\.name)
+        return order
+            .sorted {
+                (knownOrder.firstIndex(of: $0) ?? knownOrder.count, $0)
+                    < (knownOrder.firstIndex(of: $1) ?? knownOrder.count, $1)
+            }
+            .map { RemoteGroup(name: $0, branches: byRemote[$0] ?? []) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+
+            if repository.remoteBranches.isEmpty {
+                ContentUnavailableView {
+                    Label("没有远端分支", systemImage: "arrow.triangle.2.circlepath")
+                } description: {
+                    Text("先「抓取远端」再回来看看。")
+                }
+            } else {
+                searchField
+
+                if filteredBranches.isEmpty {
+                    GroveEmptyState(title: "没有匹配的分支", systemImage: "magnifyingglass",
+                                    description: "换个关键词试试。") {}
+                } else {
+                    branchList
+                }
+
+                Divider()
+                footer
+            }
+        }
+        .frame(width: 560, height: 470)
+        .alert("删除 \(selected.count) 个远端分支？", isPresented: $showsConfirmation) {
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) {
+                Task { await delete() }
+            }
+        } message: {
+            Text("选中的分支会立即从远端仓库删除，所有协作者都会看到；有关联的打开 PR 会随之关闭。本地分支不受影响，跟踪它们的本地分支之后可在「清理已合并分支」里处理。")
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("管理远端分支")
+                .font(.system(size: 15, weight: .semibold))
+            Text("删除会直接作用于远端仓库，影响所有协作者。本地分支不受影响。")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            TextField("搜索分支", text: $searchText)
+                .textFieldStyle(.plain)
+                .font(GroveStyle.metadata)
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, GroveStyle.Space.sm)
+        .frame(height: GroveStyle.toolHitArea)
+        .background(GroveStyle.secondarySurface, in: RoundedRectangle(cornerRadius: GroveStyle.smallRadius))
+        .overlay {
+            RoundedRectangle(cornerRadius: GroveStyle.smallRadius)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 0.5)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+    }
+
+    private var branchList: some View {
+        List {
+            if groups.count > 1 {
+                ForEach(groups) { group in
+                    Section(group.name) {
+                        ForEach(group.branches, content: row)
+                    }
+                }
+            } else {
+                ForEach(filteredBranches, content: row)
+            }
+        }
+        .listStyle(.inset)
+        .disabled(isWorking)
+    }
+
+    private func row(_ branch: RemoteBranch) -> some View {
+        let isDefault = repository.isDefaultRemoteBranch(branch)
+        let isUnresolved = repository.remoteName(of: branch) == nil
+
+        return HStack(spacing: 8) {
+            Toggle("", isOn: Binding(
+                get: { selected.contains(branch.name) },
+                set: { isOn in
+                    if isOn { selected.insert(branch.name) } else { selected.remove(branch.name) }
+                }
+            ))
+            .toggleStyle(.checkbox)
+            .labelsHidden()
+            .disabled(isDefault || isUnresolved)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(branch.localName)
+                    .font(.system(size: 11.5, design: .monospaced))
+                Text(branch.subject)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            if isDefault {
+                Badge(text: "默认分支", tint: .secondary)
+            } else if isUnresolved {
+                Text("远端已移除")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.tertiary)
+            } else {
+                Text(branch.lastCommitDate.map(RelativeDate.format) ?? "")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .help(rowHelp(branch, isDefault: isDefault, isUnresolved: isUnresolved))
+    }
+
+    private func rowHelp(_ branch: RemoteBranch, isDefault: Bool, isUnresolved: Bool) -> String {
+        if isDefault { return "仓库的默认分支，不能删除。" }
+        if isUnresolved { return "所属远端已不在仓库配置里；执行「抓取远端」即可清掉这条引用。" }
+        return "在 \(repository.remoteName(of: branch) ?? "") 上删除 \(branch.localName)"
+    }
+
+    private var footer: some View {
+        HStack {
+            Button(allFilteredSelected ? "全不选" : "全选") {
+                if allFilteredSelected {
+                    selected.subtract(Set(selectableBranches.map(\.name)))
+                } else {
+                    selected.formUnion(selectableBranches.map(\.name))
+                }
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 11))
+            .disabled(selectableBranches.isEmpty || isWorking)
+
+            if isWorking { ProgressView().controlSize(.small) }
+
+            Spacer()
+
+            Button("取消") { dismiss() }
+                .keyboardShortcut(.cancelAction)
+            Button("删除 \(selected.count) 个远端分支") {
+                showsConfirmation = true
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .disabled(selected.isEmpty || isWorking)
+        }
+        .padding(14)
+    }
+
+    private func delete() async {
+        isWorking = true
+        defer { isWorking = false }
+        let selection = repository.remoteBranches.filter { selected.contains($0.name) }
+        await repository.deleteRemoteBranches(selection)
+        dismiss()
+    }
+}
+
 // MARK: - 合并 PR
 
 struct MergePullRequestSheet: View {

@@ -20,7 +20,8 @@ enum RefParser {
     static let remoteBranchFormat = [
         "%(refname:short)",
         "%(objectname)",
-        "%(committerdate:iso8601-strict)"
+        "%(committerdate:iso8601-strict)",
+        "%(subject)"
     ].joined(separator: "%00")
 
     static func parseBranches(_ output: String, currentBranch: String?) -> [Branch] {
@@ -48,7 +49,7 @@ enum RefParser {
     static func parseRemoteBranches(_ output: String) -> [RemoteBranch] {
         output.components(separatedBy: "\n").compactMap { line in
             let fields = line.components(separatedBy: "\0")
-            guard fields.count >= 3, !fields[0].isEmpty else { return nil }
+            guard fields.count >= 4, !fields[0].isEmpty else { return nil }
             let name = fields[0]
             // `origin/HEAD` 是个符号引用，不是真分支，检出它没有意义。
             guard !name.hasSuffix("/HEAD") else { return nil }
@@ -57,7 +58,8 @@ enum RefParser {
                 name: name,
                 localName: stripRemotePrefix(name),
                 oid: fields[1],
-                lastCommitDate: DateParsing.iso8601(fields[2])
+                lastCommitDate: DateParsing.iso8601(fields[2]),
+                subject: fields[3]
             )
         }
     }

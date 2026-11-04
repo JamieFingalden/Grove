@@ -528,6 +528,9 @@ private struct RepositoryHomeRow: View {
         Button("清理已合并分支…") { sheet = .cleanupBranches(repository) }
             .disabled(repository.staleBranches.isEmpty)
 
+        Button("管理远端分支…") { sheet = .remoteBranches(repository) }
+            .disabled(repository.remoteBranches.isEmpty)
+
         Divider()
 
         if repository.isRemote, let server = repository.server {
