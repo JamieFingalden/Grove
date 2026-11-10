@@ -30,14 +30,8 @@ enum CommitGraphLayout {
         var incoming: [Link]
         var outgoing: [Link]
         var isMerge: Bool
-        /// 默认投影把超出视觉上限的提交收进聚合标识，不会伪造一个落在可见 lane 的圆点。
-        var isCollapsed = false
-        /// 此行附近仍活跃、但未绘制的真实动态路径数量。
-        var overflowCount = 0
         var isFocused = false
-        var isFocusMode = false
-        /// 同一份紧凑投影的每一行都预留聚合标识区域，避免提交标题左右跳动。
-        var showsOverflowArea = false
+        var isDimmed = false
 
         var id: String { oid }
     }
@@ -63,102 +57,33 @@ enum CommitGraphLayout {
 
         static let empty = Graph(rows: [], laneCount: 0, fixedLaneCount: 0, parentsByOID: [:])
 
-        /// 默认视图只保留少数动态 lane；focus 时只提升被选路径的 lane，不能把全仓库
-        /// 的历史峰值宽度带回列表。
-        func projected(maxDynamicLanes: Int, focusOID: String?) -> Graph {
+        /// 标记聚焦路径，突出显示选中的提交血缘并弱化其余分支。
+        func projected(maxDynamicLanes: Int = 0, focusOID: String?) -> Graph {
             guard let focusOID, parentsByOID[focusOID] != nil else {
-                return collapsedProjection(maxDynamicLanes: maxDynamicLanes)
+                return self
             }
             let focusedOIDs = focusPathOIDs(from: focusOID)
-            return focusProjection(
-                maxDynamicLanes: maxDynamicLanes,
-                focusOID: focusOID,
-                focusedOIDs: focusedOIDs
-            )
-        }
-
-        private func focusProjection(
-            maxDynamicLanes: Int,
-            focusOID: String,
-            focusedOIDs: Set<String>
-        ) -> Graph {
-            let visibleDynamicCount = max(1, maxDynamicLanes)
-            let selectedLane = rows.first(where: { $0.oid == focusOID })?.commitLane
-            let focusedLanes = rows.flatMap { row in
-                (row.incoming + row.outgoing)
-                    .filter { focusedOIDs.contains($0.sourceOID ?? "") && focusedOIDs.contains($0.targetOID ?? "") }
-                    .flatMap { [$0.from, $0.to] }
-            }
-            let promotedLanes = uniqueLanes(
-                [selectedLane].compactMap { $0 } + focusedLanes
-            )
-            .filter { $0 >= fixedLaneCount }
-            .prefix(visibleDynamicCount)
-
-            var laneMap = Dictionary(uniqueKeysWithValues: (0..<fixedLaneCount).map { ($0, $0) })
-            for (index, lane) in promotedLanes.enumerated() {
-                laneMap[lane] = fixedLaneCount + index
-            }
-            let visibleLaneCount = fixedLaneCount + promotedLanes.count
-            let hasOverflow = laneCount > visibleLaneCount
-
             return Graph(
                 rows: rows.map { row in
                     var copy = row
-                    copy.isFocused = focusedOIDs.contains(row.oid)
-                    copy.isFocusMode = true
-                    copy.incoming = projectedLinks(row.incoming, laneMap: laneMap, focusedOIDs: focusedOIDs)
-                    copy.outgoing = projectedLinks(row.outgoing, laneMap: laneMap, focusedOIDs: focusedOIDs)
-                    copy.isCollapsed = laneMap[row.commitLane] == nil
-                    copy.overflowCount = copy.isCollapsed ? 1 : 0
-                    copy.showsOverflowArea = hasOverflow
-                    if let lane = laneMap[row.commitLane] { copy.commitLane = lane }
-                    return copy
-                },
-                laneCount: visibleLaneCount,
-                fixedLaneCount: fixedLaneCount,
-                parentsByOID: parentsByOID
-            )
-        }
-
-        private func projectedLinks(
-            _ links: [Link],
-            laneMap: [Int: Int],
-            focusedOIDs: Set<String>
-        ) -> [Link] {
-            links.compactMap { link in
-                guard let from = laneMap[link.from], let to = laneMap[link.to] else { return nil }
-                var copy = link
-                copy.from = from
-                copy.to = to
-                copy.isFocused = focusedOIDs.contains(link.sourceOID ?? "")
-                    && focusedOIDs.contains(link.targetOID ?? "")
-                return copy
-            }
-        }
-
-        private func collapsedProjection(maxDynamicLanes: Int) -> Graph {
-            let visibleLaneCount = min(laneCount, fixedLaneCount + max(1, maxDynamicLanes))
-            guard laneCount > visibleLaneCount else { return self }
-            return Graph(
-                rows: rows.map { row in
-                    let activeOverflowLanes = Set(
-                        row.incoming.flatMap { [$0.from, $0.to] }
-                        + row.outgoing.flatMap { [$0.from, $0.to] }
-                        + [row.commitLane]
-                    ).filter { $0 >= visibleLaneCount }
-                    let beginsOverflow = row.outgoing.contains { link in
-                        link.from < visibleLaneCount && link.to >= visibleLaneCount
+                    let isRowFocused = focusedOIDs.contains(row.oid)
+                    copy.isFocused = isRowFocused
+                    copy.isDimmed = !isRowFocused
+                    copy.incoming = row.incoming.map { link in
+                        var copy = link
+                        copy.isFocused = focusedOIDs.contains(link.sourceOID ?? "")
+                            && focusedOIDs.contains(link.targetOID ?? "")
+                        return copy
                     }
-                    var copy = row
-                    copy.incoming = row.incoming.filter { $0.from < visibleLaneCount && $0.to < visibleLaneCount }
-                    copy.outgoing = row.outgoing.filter { $0.from < visibleLaneCount && $0.to < visibleLaneCount }
-                    copy.isCollapsed = row.commitLane >= visibleLaneCount
-                    copy.overflowCount = (copy.isCollapsed || beginsOverflow) ? activeOverflowLanes.count : 0
-                    copy.showsOverflowArea = true
+                    copy.outgoing = row.outgoing.map { link in
+                        var copy = link
+                        copy.isFocused = focusedOIDs.contains(link.sourceOID ?? "")
+                            && focusedOIDs.contains(link.targetOID ?? "")
+                        return copy
+                    }
                     return copy
                 },
-                laneCount: visibleLaneCount,
+                laneCount: laneCount,
                 fixedLaneCount: fixedLaneCount,
                 parentsByOID: parentsByOID
             )
@@ -183,11 +108,6 @@ enum CommitGraphLayout {
             return result
         }
 
-        private func uniqueLanes(_ lanes: [Int]) -> [Int] {
-            var seen: Set<Int> = []
-            return lanes.filter { seen.insert($0).inserted }
-        }
-
         private func traverse(from start: String, through edges: [String: [String]]) -> Set<String> {
             var visited: Set<String> = []
             var pending = [start]
@@ -207,7 +127,7 @@ enum CommitGraphLayout {
     private enum Color {
         static let main = 0
         static let current = 1
-        static let dynamic = 2
+        static let dynamicStart = 2
     }
 
     /// 传入的提交必须是 `--topo-order` 的顺序。
@@ -220,13 +140,13 @@ enum CommitGraphLayout {
         // main 的视觉主线遵循 Git 约定的第一 parent；若把 merge 的第二 parent
         // 也算进来，被合入的 feature 会错误地挤到 main lane。
         let mainLineage = firstParentAncestors(of: mainTip, parentsByOID: parentsByOID)
-        let currentLineage = ancestors(of: currentTip, parentsByOID: parentsByOID)
+        let currentLineage = firstParentAncestors(of: currentTip, parentsByOID: parentsByOID)
 
         // 共同祖先属于 main lane。当前分支只在从分叉到汇合的独有区间占 lane 1。
         let currentOnly = currentLineage.subtracting(mainLineage)
         let hasMainLane = !mainLineage.isEmpty
         let hasCurrentLane = !currentOnly.isEmpty
-        let dynamicStart = hasMainLane && hasCurrentLane ? 2 : 1
+        let dynamicStart = (hasMainLane ? 1 : 0) + (hasCurrentLane ? 1 : 0)
 
         func preferredLane(for oid: String) -> Int? {
             if mainLineage.contains(oid) { return 0 }
@@ -245,6 +165,13 @@ enum CommitGraphLayout {
         var lanes = Array<Lane?>(repeating: nil, count: dynamicStart)
         var rows: [Row] = []
         var laneCount = dynamicStart
+        var nextDynamicColor = Color.dynamicStart
+
+        func allocateDynamicColor() -> Int {
+            let color = nextDynamicColor
+            nextDynamicColor += 1
+            return color
+        }
 
         func firstFreeDynamicLane() -> Int {
             if let index = lanes.indices.first(where: { $0 >= dynamicStart && lanes[$0] == nil }) {
@@ -263,11 +190,20 @@ enum CommitGraphLayout {
 
         func allocate(for oid: String, sourceOID: String) -> Int {
             if let preferred = preferredLane(for: oid), lanes[preferred] == nil {
-                assign(oid, sourceOID: sourceOID, to: preferred, color: preferredColor(for: oid) ?? Color.dynamic)
+                let color = preferredColor(for: oid) ?? allocateDynamicColor()
+                assign(oid, sourceOID: sourceOID, to: preferred, color: color)
                 return preferred
             }
             let lane = firstFreeDynamicLane()
-            assign(oid, sourceOID: sourceOID, to: lane, color: preferredColor(for: oid) ?? Color.dynamic)
+            let color = allocateDynamicColor()
+            assign(oid, sourceOID: sourceOID, to: lane, color: color)
+            return lane
+        }
+
+        func allocateDynamicLane(for oid: String, sourceOID: String) -> Int {
+            let lane = firstFreeDynamicLane()
+            let color = allocateDynamicColor()
+            assign(oid, sourceOID: sourceOID, to: lane, color: color)
             return lane
         }
 
@@ -283,7 +219,7 @@ enum CommitGraphLayout {
                         commit.oid,
                         sourceOID: commit.oid,
                         to: commitLane,
-                        color: preferredColor(for: commit.oid) ?? Color.dynamic
+                        color: preferredColor(for: commit.oid) ?? Color.main
                     )
                 }
             } else if let waitingLane = waiting.first {
@@ -292,7 +228,9 @@ enum CommitGraphLayout {
                 commitLane = allocate(for: commit.oid, sourceOID: commit.oid)
             }
 
-            let commitColor = preferredColor(for: commit.oid) ?? lanes[commitLane]?.color ?? Color.dynamic
+            let commitColor = (commitLane < dynamicStart ? preferredColor(for: commit.oid) : nil)
+                ?? lanes[commitLane]?.color
+                ?? allocateDynamicColor()
             var incoming: [Link] = []
             for lane in before.indices {
                 guard let state = before[lane] else { continue }
@@ -311,8 +249,13 @@ enum CommitGraphLayout {
             }
 
             if let firstParent = commit.parents.first {
-                // 第一 parent 延续当前路径；只有在进入固定路径时才更新颜色。
-                let continuationColor = preferredColor(for: firstParent) ?? commitColor
+                // 第一 parent 延续当前路径；只有在进入固定主/当前分支时才变色。
+                let continuationColor: Int
+                if let pref = preferredColor(for: firstParent), preferredLane(for: firstParent) == commitLane {
+                    continuationColor = pref
+                } else {
+                    continuationColor = commitColor
+                }
                 assign(firstParent, sourceOID: commit.oid, to: commitLane, color: continuationColor)
             } else {
                 lanes[commitLane] = nil
@@ -324,7 +267,7 @@ enum CommitGraphLayout {
                     extraParentLanes.append(existing)
                     continue
                 }
-                extraParentLanes.append(allocate(for: parent, sourceOID: commit.oid))
+                extraParentLanes.append(allocateDynamicLane(for: parent, sourceOID: commit.oid))
             }
 
             var outgoing: [Link] = []
@@ -336,6 +279,14 @@ enum CommitGraphLayout {
                         sourceOID: state.sourceOID, targetOID: state.waitingFor
                     ))
                 } else if extraParentLanes.contains(lane) {
+                    // 如果这个车道在当前行之前就是直穿车道（在等待更早的祖先），
+                    // 它原本直行的连线必须继续向下延伸，否则直穿线在 midY 会被生生截断！
+                    if before.indices.contains(lane), let beforeState = before[lane], beforeState.waitingFor != commit.oid {
+                        outgoing.append(Link(
+                            from: lane, to: lane, color: beforeState.color,
+                            sourceOID: beforeState.sourceOID, targetOID: beforeState.waitingFor
+                        ))
+                    }
                     outgoing.append(Link(
                         from: commitLane, to: lane, color: state.color,
                         sourceOID: state.sourceOID, targetOID: state.waitingFor
@@ -373,12 +324,25 @@ enum CommitGraphLayout {
     }
 
     private static func tipOID(named branch: String?, in commits: [CommitSummary]) -> String? {
-        guard let branch, !branch.isEmpty else { return nil }
-        return commits.first { commit in
-            commit.refs.contains { ref in
-                ref.name == branch || ref.name.hasSuffix("/\(branch)")
+        let candidates = [branch].compactMap { $0 }.filter { !$0.isEmpty } + ["main", "master", "develop"]
+        var seen = Set<String>()
+        for name in candidates where seen.insert(name).inserted {
+            // 1. 直接通过 ref 匹配分支 tip
+            if let direct = commits.first(where: { commit in
+                commit.refs.contains { ref in
+                    ref.name == name || ref.name.hasSuffix("/\(name)")
+                }
+            })?.oid {
+                return direct
             }
-        }?.oid
+            // 2. 如果 tip 不在当前拉取的窗口内，从包含 "into 'name'" 的合并提交回溯主干
+            if let merge = commits.first(where: { commit in
+                commit.subject.contains("into '\(name)'") || commit.subject.contains("into \(name)")
+            })?.oid {
+                return merge
+            }
+        }
+        return nil
     }
 
     private static func ancestors(

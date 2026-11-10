@@ -546,6 +546,9 @@ struct GitClient: Sendable {
             if await succeeds(["show-ref", "--verify", "--quiet", "refs/heads/\(candidate)"], in: directory) {
                 return candidate
             }
+            if await succeeds(["show-ref", "--verify", "--quiet", "refs/remotes/origin/\(candidate)"], in: directory) {
+                return candidate
+            }
         }
         return nil
     }

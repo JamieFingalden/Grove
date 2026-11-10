@@ -199,17 +199,6 @@ struct HistoryView: View {
                 }
             }
 
-            if model.graphFocus != nil {
-                HStack(spacing: 6) {
-                    Label("正在聚焦相关提交路径", systemImage: "arrow.triangle.branch")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("取消聚焦") { model.clearGraphFocus() }
-                        .buttonStyle(.borderless)
-                        .font(.system(size: 10))
-                }
-            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -421,23 +410,27 @@ private struct CommitRow: View {
     var onSelect: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .center, spacing: 8) {
             if let graphRow {
                 CommitGraphCell(row: graphRow, laneCount: laneCount)
             } else {
                 Image(systemName: commit.isMerge ? "arrow.triangle.merge" : "circle.fill")
-                    .font(.system(size: commit.isMerge ? 11 : 6))
+                    .font(.system(size: commit.isMerge ? 10 : 5))
                     .foregroundStyle(commit.isMerge ? Color.purple : Color.secondary)
                     .frame(width: 14, height: 14)
+                    .padding(.leading, 4)
             }
 
             VStack(alignment: .leading, spacing: 2) {
-                if !commit.refs.isEmpty { RefBadges(refs: commit.refs, onFocus: onSelect) }
-
-                Text(commit.subject)
-                    .font(.system(size: 12))
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 5) {
+                    if !commit.refs.isEmpty {
+                        RefBadges(refs: commit.refs, onFocus: onSelect)
+                    }
+                    Text(commit.subject)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
 
                 HStack(spacing: 6) {
                     Text(commit.shortOID)
@@ -449,8 +442,9 @@ private struct CommitRow: View {
                 .font(.system(size: 9.5))
                 .foregroundStyle(.tertiary)
             }
-            .padding(.vertical, 3)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(.horizontal, 6)
         .frame(height: CommitGraphCell.rowHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
@@ -467,10 +461,24 @@ private struct CommitGraphCell: View {
     let laneCount: Int
     @State private var isHovering = false
 
-    static let rowHeight: CGFloat = 64
+    static let rowHeight: CGFloat = 36
 
     private let laneWidth: CGFloat = 14
     private let dotRadius: CGFloat = 3.5
+
+    nonisolated private static func color(_ index: Int) -> Color {
+        if index < 0 { return .secondary }
+        return switch index % 8 {
+        case 0: .blue
+        case 1: .teal
+        case 2: .purple
+        case 3: .orange
+        case 4: .green
+        case 5: .pink
+        case 6: .indigo
+        default: .mint
+        }
+    }
 
     var body: some View {
         let isHovered = isHovering
@@ -478,66 +486,70 @@ private struct CommitGraphCell: View {
             let midY = size.height / 2
             func x(_ lane: Int) -> CGFloat { CGFloat(lane) * laneWidth + laneWidth / 2 }
 
-            func stroke(_ link: CommitGraphLayout.Link, fromY: CGFloat, toY: CGFloat) {
+            func makePath(_ link: CommitGraphLayout.Link, fromY: CGFloat, toY: CGFloat) -> Path {
                 var path = Path()
                 path.move(to: CGPoint(x: x(link.from), y: fromY))
                 if link.from == link.to {
                     path.addLine(to: CGPoint(x: x(link.to), y: toY))
                 } else {
+                    let deltaY = toY - fromY
                     path.addCurve(
                         to: CGPoint(x: x(link.to), y: toY),
-                        control1: CGPoint(x: x(link.from), y: fromY + (toY - fromY) * 0.6),
-                        control2: CGPoint(x: x(link.to), y: fromY + (toY - fromY) * 0.4)
+                        control1: CGPoint(x: x(link.from), y: fromY + deltaY * 0.55),
+                        control2: CGPoint(x: x(link.to), y: fromY + deltaY * 0.45)
                     )
                 }
+                return path
+            }
+
+            let bgHalo = Color(nsColor: .textBackgroundColor)
+
+            // 1. 底层背衬遮罩（Halo）：斜线经过时打断直穿线，避免交叉处糊成一团
+            for link in row.incoming where link.from != link.to {
+                context.stroke(makePath(link, fromY: 0, toY: midY), with: .color(bgHalo), lineWidth: 3.5)
+            }
+            for link in row.outgoing where link.from != link.to {
+                context.stroke(makePath(link, fromY: midY, toY: size.height), with: .color(bgHalo), lineWidth: 3.5)
+            }
+
+            // 2. 绘制实际连线
+            func strokeLink(_ link: CommitGraphLayout.Link, fromY: CGFloat, toY: CGFloat) {
+                let path = makePath(link, fromY: fromY, toY: toY)
                 let isEmphasized = link.isFocused || isHovered
-                let opacity: Double = row.isFocusMode && !isEmphasized ? 0.2 : 1
-                context.stroke(
-                    path,
-                    with: .color(Self.color(link.color, emphasized: isEmphasized).opacity(opacity)),
-                    lineWidth: isEmphasized ? 2 : 1.4
-                )
+                let isDimmed = row.isDimmed && !link.isFocused
+                let baseColor = Self.color(link.color)
+                let strokeColor = baseColor.opacity(isDimmed ? 0.22 : 1.0)
+                let strokeWidth: CGFloat = isEmphasized ? 2.2 : 1.5
+                context.stroke(path, with: .color(strokeColor), lineWidth: strokeWidth)
             }
 
-            row.incoming.forEach { stroke($0, fromY: 0, toY: midY) }
-            row.outgoing.forEach { stroke($0, fromY: midY, toY: size.height) }
+            row.incoming.forEach { strokeLink($0, fromY: 0, toY: midY) }
+            row.outgoing.forEach { strokeLink($0, fromY: midY, toY: size.height) }
 
-            if !row.isCollapsed {
-                let center = CGPoint(x: x(row.commitLane), y: midY)
-                let radius = row.isMerge ? dotRadius + 1 : dotRadius
-                let dot = Path(ellipseIn: CGRect(
-                    x: center.x - radius, y: center.y - radius,
-                    width: radius * 2, height: radius * 2
-                ))
-                context.stroke(dot, with: .color(Color(nsColor: .textBackgroundColor)), lineWidth: 3)
-                let opacity: Double = row.isFocusMode && !row.isFocused && !isHovered ? 0.2 : 1
+            // 3. 提交圆点
+            let center = CGPoint(x: x(row.commitLane), y: midY)
+            let radius = row.isMerge ? dotRadius + 1 : dotRadius
+            let dot = Path(ellipseIn: CGRect(
+                x: center.x - radius, y: center.y - radius,
+                width: radius * 2, height: radius * 2
+            ))
+            context.stroke(dot, with: .color(bgHalo), lineWidth: 3)
+
+            let isNodeDimmed = row.isDimmed && !row.isFocused
+            let nodeColor = Self.color(row.color).opacity(isNodeDimmed ? 0.25 : 1.0)
+            context.fill(dot, with: .color(nodeColor))
+
+            if row.isMerge {
+                let inner = radius - 1.6
                 context.fill(
-                    dot,
-                    with: .color(Self.color(row.color, emphasized: row.isFocused || isHovered).opacity(opacity))
-                )
-                if row.isMerge {
-                    let inner = radius - 1.6
-                    context.fill(
-                        Path(ellipseIn: CGRect(x: center.x - inner, y: center.y - inner,
-                                               width: inner * 2, height: inner * 2)),
-                        with: .color(Color(nsColor: .textBackgroundColor))
-                    )
-                }
-            }
-            if row.overflowCount > 0 {
-                let badge = context.resolve(
-                    Text("+\(row.overflowCount) branches")
-                        .font(.system(size: 8.5, weight: .medium))
-                        .foregroundColor(.secondary)
-                )
-                context.draw(
-                    badge,
-                    at: CGPoint(x: CGFloat(max(laneCount, 1)) * laneWidth + 29, y: midY)
+                    Path(ellipseIn: CGRect(x: center.x - inner, y: center.y - inner,
+                                           width: inner * 2, height: inner * 2)),
+                    with: .color(bgHalo)
                 )
             }
         }
         .frame(
-            width: CGFloat(max(laneCount, 1)) * laneWidth + (row.showsOverflowArea ? 58 : 0),
+            width: CGFloat(max(laneCount, 1)) * laneWidth,
             height: Self.rowHeight
         )
         .overlay { hitStrips }
@@ -545,10 +557,6 @@ private struct CommitGraphCell: View {
     }
 
     /// 悬停提示按 lane 拆开：光标指着哪个标记，就只讲那个标记的含义。
-    /// 整格共用一段图例的话，悬停哪儿都是同一段话，等于没有提示。
-    /// 热区必须靠布局切（HStack 固定宽度切片），不能用 .position 摆 ——
-    /// position 的视图会占满整个提案空间，几个提示的响应区就全变成整格，
-    /// 一悬停所有 tooltip 同时弹出来。
     private var hitStrips: some View {
         HStack(spacing: 0) {
             ForEach(0..<max(laneCount, 1), id: \.self) { lane in
@@ -556,26 +564,17 @@ private struct CommitGraphCell: View {
                     .frame(width: laneWidth, height: Self.rowHeight)
                     .help(laneHelp(lane))
             }
-            if row.showsOverflowArea {
-                if row.overflowCount > 0 {
-                    Color.clear
-                        .frame(width: 58, height: Self.rowHeight)
-                        .help("+\(row.overflowCount) branches：图列宽度不够，还有 \(row.overflowCount) 条分支线没画出来")
-                } else {
-                    Color.clear.frame(width: 58, height: Self.rowHeight)
-                }
-            }
         }
     }
 
     private func laneHelp(_ lane: Int) -> String {
-        // 圆点只画在本行提交自己的 lane 上；悬停到它时讲的是“这个提交在哪条线上”。
-        if !row.isCollapsed, lane == row.commitLane {
+        // 圆点只画在本行提交自己的 lane 上；悬停到它时讲的是”这个提交在哪条线上”。
+        if lane == row.commitLane {
             let merge = row.isMerge ? "；空心环表示合并提交" : ""
             let base = switch row.color {
-            case 0: "蓝色圆点：主分支（默认分支）上的提交"
-            case 1: "青色圆点：当前检出分支上的提交"
-            default: "灰色圆点：其他分支上的提交"
+            case 0: "主分支（默认分支）上的提交"
+            case 1: "当前检出分支上的提交"
+            default: "分支上的提交"
             }
             return base + merge
         }
@@ -584,17 +583,9 @@ private struct CommitGraphCell: View {
             .first { $0.from == lane || $0.to == lane }?
             .color
         return switch linkColor {
-        case 0: "蓝色连线：主分支（默认分支）"
-        case 1: "青色连线：当前检出分支"
-        default: "灰色连线：其他分支；悬停或选中时变紫加粗"
-        }
-    }
-
-    nonisolated private static func color(_ index: Int, emphasized: Bool) -> Color {
-        return switch index {
-        case 0: Color.blue
-        case 1: Color.teal
-        default: emphasized ? Color.purple : Color.secondary.opacity(0.65)
+        case 0: "主分支（默认分支）"
+        case 1: "当前检出分支"
+        default: "分支连线"
         }
     }
 }
@@ -707,7 +698,7 @@ private struct RefBadges: View {
 
     var body: some View {
         HStack(spacing: 3) {
-            ForEach(refs.prefix(4)) { ref in
+            ForEach(refs.prefix(2)) { ref in
                 Button(action: onFocus) {
                     HStack(spacing: 2) {
                         Image(systemName: icon(ref.kind))
@@ -725,13 +716,14 @@ private struct RefBadges: View {
                 .buttonStyle(.plain)
                 .help(helpText(for: ref))
             }
-            if refs.count > 4 {
-                Text("+\(refs.count - 4)")
-                    .font(.system(size: 9))
+            if refs.count > 2 {
+                Text("+\(refs.count - 2)")
+                    .font(.system(size: 8.5))
                     .foregroundStyle(.tertiary)
-                    .help("还有 \(refs.count - 4) 个引用指向此提交，空间不够没有全部显示")
+                    .help("还有 \(refs.count - 2) 个引用指向此提交")
             }
         }
+        .fixedSize()
     }
 
     private func icon(_ kind: CommitRef.Kind) -> String {
@@ -780,16 +772,17 @@ private struct HistoryLegend: View {
                 Text("左侧提交图")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
-                dotRow(Color.blue, "主分支（默认分支，如 main）上的提交")
-                dotRow(Color.teal, "当前检出分支上的提交")
-                dotRow(Color.secondary.opacity(0.65), "其他分支上的提交；悬停或选中时变紫加粗")
+                dotRow(Color.blue, "主分支（默认分支，如 main）")
+                dotRow(Color.teal, "当前检出分支")
+                dotRow(Color.purple, "功能与修复分支（多色轮换标识）")
                 HStack(spacing: 8) {
                     Circle().strokeBorder(Color.blue, lineWidth: 2).frame(width: 9, height: 9)
                     Text("合并提交（有两个及以上父提交）")
                 }
                 .font(.system(size: 11))
-                Text("“+N branches”：图列宽度不够，还有 N 条分支线没画出来")
-                    .font(.system(size: 11))
+                Text("点击任意提交可高亮其直系祖先与后代血缘，其余分支自动弱化")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
             }
 
             VStack(alignment: .leading, spacing: 6) {
