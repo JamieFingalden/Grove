@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
@@ -356,10 +357,14 @@ private extension View {
 struct EmptyRepositoryView: View {
     @Environment(AppModel.self) private var model
     var connectServer: () -> Void = {}
+    @State private var isDropTargeted = false
 
     var body: some View {
-        GroveEmptyState(title: "Grove", systemImage: "tree",
-                        description: "用工作树并行开发，顺手处理 PR") {
+        GroveEmptyState(
+            title: isDropTargeted ? "松开以打开仓库" : "Grove",
+            systemImage: isDropTargeted ? "arrow.down.doc.fill" : "tree",
+            description: isDropTargeted ? "将 Git 仓库目录放到此处打开" : "用工作树并行开发，顺手处理 PR"
+        ) {
             VStack(spacing: GroveStyle.Space.md) {
                 HStack(spacing: GroveStyle.Space.sm) {
                     Button {
@@ -372,6 +377,10 @@ struct EmptyRepositoryView: View {
                         Label("连接远程服务器…", systemImage: "server.rack")
                     }
                 }
+                Text("或将仓库文件夹拖拽至此")
+                    .font(GroveStyle.caption)
+                    .foregroundStyle(.tertiary)
+
                 if let message = model.availability(of: .github).message {
                     Label(message, systemImage: "info.circle")
                         .font(GroveStyle.metadata)
@@ -380,6 +389,38 @@ struct EmptyRepositoryView: View {
                 }
             }
         }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 2, dash: [6]))
+                    .padding(16)
+            }
+        }
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers)
+        }
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        Task { @MainActor in
+            for provider in providers {
+                if let item = try? await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier),
+                   let data = item as? Data,
+                   let url = URL(dataRepresentation: data, relativeTo: nil) {
+                    var isDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                        await model.openRepository(at: url)
+                    }
+                } else if let item = try? await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier),
+                          let url = item as? URL {
+                    var isDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                        await model.openRepository(at: url)
+                    }
+                }
+            }
+        }
+        return true
     }
 }
 

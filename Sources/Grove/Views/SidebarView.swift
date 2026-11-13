@@ -8,18 +8,11 @@ struct SidebarView: View {
         @Bindable var model = model
 
         List {
-            Text("OVERVIEW").font(GroveStyle.caption).foregroundStyle(.tertiary)
-                .padding(.leading, 8).listRowBackground(Color.clear)
+            sidebarSectionHeader("概览")
             overviewRow("Daily", symbol: "book.closed", page: .daily)
             overviewRow("Workspace", symbol: "tray", page: .workspace)
 
-            Text("仓库")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .tracking(0.3)
-                .frame(height: 20, alignment: .bottomLeading)
-                .padding(.leading, 8)
-                .listRowBackground(Color.clear)
+            sidebarSectionHeader("代码仓库")
             // 以项目为单位：同一项目的本地副本和远程副本合并成一个条目，
             // 工作树行上用位置标记区分（本机 / 服务器名）。
             ForEach(model.projects) { project in
@@ -29,13 +22,7 @@ struct SidebarView: View {
             // 底部的服务器管理区：项目在上面按 origin 合并了，
             // 服务器的增删改和连接状态留在这里。
             // 保持扁平列表，避免 NSOutlineView 的 Section 折叠断言。
-            Text("远程环境")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .tracking(0.3)
-                .padding(.top, GroveStyle.Space.md)
-                .padding(.leading, 8)
-                .listRowBackground(Color.clear)
+            sidebarSectionHeader("远程主机", topPadding: GroveStyle.Space.md)
             if model.remoteServers.isEmpty {
                 Button {
                     sheet = .addRemoteServer
@@ -64,6 +51,17 @@ struct SidebarView: View {
         .font(GroveStyle.body)
         .environment(\.defaultMinListRowHeight, 22)
         .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 6))
+    }
+
+    private func sidebarSectionHeader(_ title: String, topPadding: CGFloat = 0) -> some View {
+        Text(title)
+            .font(GroveStyle.sidebarSectionHeader)
+            .foregroundStyle(.tertiary)
+            .tracking(0.3)
+            .frame(height: 20, alignment: .bottomLeading)
+            .padding(.top, topPadding)
+            .padding(.leading, 8)
+            .listRowBackground(Color.clear)
     }
 
     private func overviewRow(_ title: String, symbol: String, page: AppNavigationState.Page) -> some View {
@@ -311,7 +309,72 @@ private struct WorktreeRow: View {
     }
 
     private var pullRequest: PullRequest? {
-        repository.sidebarPullRequest(forBranch: worktree.branch) ?? detail?.linkedPullRequest
+        guard let pr = repository.sidebarPullRequest(forBranch: worktree.branch) ?? detail?.linkedPullRequest else {
+            return nil
+        }
+        if pr.isActive { return pr }
+        if hasNewCommitsSinceMerge(pr: pr) { return nil }
+        return pr
+    }
+
+    /// 已合并或已关闭的 PR：若当前工作树已产生新提交，不应再显示旧的合并状态。
+    private func hasNewCommitsSinceMerge(pr: PullRequest) -> Bool {
+        // 1. 如果有 PR 的目标提交（headRefOid），比对当前工作树 HEAD 是否已发生移动
+        let currentHead = worktree.head ?? repository.branches.first(where: { $0.name == worktree.branch })?.oid
+        if let currentHead, let prHead = pr.headRefOid, !prHead.isEmpty {
+            let normalizedCurrent = currentHead.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let normalizedPR = prHead.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !normalizedCurrent.hasPrefix(normalizedPR) && !normalizedPR.hasPrefix(normalizedCurrent) {
+                return true
+            }
+        }
+
+        // 2. 检查是否有领先上游或已产生新提交的迹象
+        return hasNewCommitsOnBranch()
+    }
+
+    /// 侧栏工作树行展示的 CI 状态。
+    /// 只有存在异常或运行中的状态才展示（成功态留在 CI 页）；
+    /// 若之前的失败流水线对应的提交已被后续新提交覆盖，该失败图标应当隐去。
+    private var sidebarCIStatus: (status: CIStatus, label: String)? {
+        guard let branch = worktree.branch else { return nil }
+        if let pipeline = repository.latestPipelineByRef[branch] {
+            guard pipeline.status != .success else { return nil }
+            if pipeline.status.isFinal && hasNewCommitsSincePipeline(pipeline) {
+                return nil
+            }
+            return (pipeline.status, pipeline.status.label)
+        } else if let ci = repository.pipelineStatusByRef[branch], ci != .success {
+            if ci.isFinal && hasNewCommitsOnBranch() {
+                return nil
+            }
+            return (ci, ci.label)
+        }
+        return nil
+    }
+
+    private func hasNewCommitsSincePipeline(_ pipeline: CIPipeline) -> Bool {
+        // 1. 比对当前工作树 HEAD 与流水线所执行的 commit SHA
+        let currentHead = worktree.head ?? repository.branches.first(where: { $0.name == worktree.branch })?.oid
+        if let currentHead, !pipeline.sha.isEmpty {
+            let normalizedCurrent = currentHead.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let normalizedPipeline = pipeline.sha.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !normalizedCurrent.hasPrefix(normalizedPipeline) && !normalizedPipeline.hasPrefix(normalizedCurrent) {
+                return true
+            }
+        }
+        // 2. 检查本地是否有新提交（领先上游）
+        return hasNewCommitsOnBranch()
+    }
+
+    private func hasNewCommitsOnBranch() -> Bool {
+        if let status = detail?.status, status.ahead > 0 {
+            return true
+        }
+        if let branchInfo = repository.branches.first(where: { $0.name == worktree.branch }), branchInfo.ahead > 0 {
+            return true
+        }
+        return false
     }
 
     var body: some View {
@@ -328,7 +391,7 @@ private struct WorktreeRow: View {
             // 以前目录名+分支名两行叠着，目录名还常与分支名重复，行行都像双倍行距的墙。
             Text(displayLabel)
                 .lineLimit(1)
-                .truncationMode(.tail)
+                .truncationMode(.middle)
                 .foregroundStyle(.primary)
                 .help(tooltip)
 
@@ -360,6 +423,7 @@ private struct WorktreeRow: View {
             Spacer(minLength: 2)
 
             trailingBadges
+                .fixedSize()
         }
         .frame(height: SidebarMetrics.rowHeight, alignment: .center)
         // plain Button 默认只命中文字和图标；撑满并声明命中形状，
@@ -389,13 +453,12 @@ private struct WorktreeRow: View {
     @ViewBuilder
     private var trailingBadges: some View {
         HStack(spacing: 4) {
-            // 侧栏只提示需要关注的流水线状态；成功状态留在 CI 页。
-            if let branch = worktree.branch,
-               let ci = repository.pipelineStatusByRef[branch], ci != .success {
-                Image(systemName: ci.systemImage)
+            // 侧栏只提示需要关注的流水线状态；若该失败已被后续新提交覆盖，则不展示。
+            if let ciInfo = sidebarCIStatus {
+                Image(systemName: ciInfo.status.systemImage)
                     .font(.system(size: 9))
-                    .foregroundStyle(ci.tint)
-                    .help("CI：\(ci.label)（\(branch)）")
+                    .foregroundStyle(ciInfo.status.tint)
+                    .help("CI：\(ciInfo.label)（\(worktree.branch ?? "")）")
             }
 
             if let status = detail?.status {
@@ -407,11 +470,26 @@ private struct WorktreeRow: View {
                         .help("\(status.changes.count) 个文件有改动")
                 }
 
-                if status.ahead > 0 {
+                if status.ahead > 0 && status.behind > 0 {
+                    HStack(spacing: 3) {
+                        Image(systemName: "arrow.up")
+                        Text("\(status.ahead)")
+                        Image(systemName: "arrow.down")
+                            .foregroundStyle(.purple)
+                        Text("\(status.behind)")
+                            .foregroundStyle(.purple)
+                    }
+                    .fixedSize()
+                    .font(GroveStyle.micro)
+                    .monospacedDigit()
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1.5)
+                    .background(Color.primary.opacity(0.06), in: Capsule())
+                    .help("领先 \(status.ahead) 个提交，落后 \(status.behind) 个提交")
+                } else if status.ahead > 0 {
                     Badge(text: "\(status.ahead)", systemImage: "arrow.up", tint: .secondary)
                         .help("领先上游 \(status.ahead) 个提交")
-                }
-                if status.behind > 0 {
+                } else if status.behind > 0 {
                     Badge(text: "\(status.behind)", systemImage: "arrow.down", tint: .purple)
                         .help("落后上游 \(status.behind) 个提交")
                 }
@@ -730,9 +808,11 @@ struct Badge: View {
             Text(text)
                 .font(GroveStyle.micro)
                 .monospacedDigit()
+                .lineLimit(1)
         }
+        .fixedSize()
         .foregroundStyle(tint)
-        .padding(.horizontal, 5)
+        .padding(.horizontal, 6)
         .frame(minHeight: 16)
         .background(tint.opacity(0.08), in: Capsule())
         .overlay {
