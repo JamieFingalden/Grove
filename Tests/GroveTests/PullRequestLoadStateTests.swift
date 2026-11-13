@@ -3,6 +3,22 @@ import XCTest
 
 @MainActor
 final class PullRequestLoadStateTests: XCTestCase {
+    /// 用本地裸仓库模拟服务器，检查真实分支状态而不访问网络。
+    private func publishedGit(in directory: URL, branch: String = "feature") async throws -> GitClient {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:])
+        let remote = directory.appendingPathComponent("origin.git")
+        try await git.run(["init", "-q", "-b", "main"], in: directory)
+        try await git.run(["config", "user.name", "测试"], in: directory)
+        try await git.run(["config", "user.email", "test@example.invalid"], in: directory)
+        try await git.run(["commit", "--allow-empty", "-qm", "初始提交"], in: directory)
+        try await git.run(["switch", "-qc", branch], in: directory)
+        try await git.run(["init", "--bare", "-q", remote.path], in: directory)
+        try await git.run(["remote", "add", "origin", remote.path], in: directory)
+        try await git.push(in: directory, remote: "origin", branch: branch, setUpstream: true)
+        return git
+    }
+
     func testHistoryListPublishesBeforeSlowOpenCountAndSurvivesItsFailure() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -194,7 +210,7 @@ final class PullRequestLoadStateTests: XCTestCase {
         exit 1
         """.write(to: executable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
-        let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:])
+        let git = try await publishedGit(in: directory)
         let repository = RepositoryModel(root: directory, git: git, app: nil,
             forge: GitHubClient(executable: executable, environment: [:]))
         repository.origin = GitRemote.parse("https://github.com/team/Grove.git")
@@ -205,6 +221,7 @@ final class PullRequestLoadStateTests: XCTestCase {
                                 isDetached: false, lockReason: nil, prunableReason: nil)
         let model = WorktreeModel(worktree: worktree, repository: repository, git: git, app: nil)
         repository.resolveForgeMetadata()
+        await model.refreshReviewSource()
         XCTAssertEqual(repository.slug, "team/Grove")
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path), "解析本地信息不能发网络请求")
         guard case .create = model.pullRequestAction else { return XCTFail("列表未加载时也应能打开评审表单") }
@@ -236,9 +253,119 @@ final class PullRequestLoadStateTests: XCTestCase {
         XCTAssertNotNil(unconfigured.pullRequestUnavailableReason, "缺少平台客户端仍应禁止创建")
     }
 
-    func testReviewActionUsesOpenRequestAlreadyLoadedByRepository() {
-        let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), environment: [:])
-        let repository = RepositoryModel(root: URL(fileURLWithPath: "/tmp/Grove"), git: git, app: nil,
+    func testReviewActionDoesNotDependOnGlobalForgeProbe() async throws {
+        let app = AppModel()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let git = try await publishedGit(in: directory, branch: "fix/fgj")
+        let repository = RepositoryModel(root: directory, git: git, app: app,
+            forge: GitLabClient(executable: URL(fileURLWithPath: "/bin/false"), environment: [:]))
+        repository.origin = GitRemote.parse("http://192.168.251.253:8929/team/Grove.git")
+        repository.hasRemote = true
+        repository.hasOrigin = true
+        repository.slug = "team/Grove"
+        repository.defaultBranch = "master"
+        let model = WorktreeModel(worktree: Worktree(path: repository.root, head: nil, branch: "fix/fgj",
+            isBare: false, isDetached: false, lockReason: nil, prunableReason: nil),
+            repository: repository, git: git, app: app)
+        model.status.upstream = "origin/fix/fgj"
+        model.status.ahead = 0
+        await model.refreshReviewSource()
+
+        // 仓库客户端已就绪时，全局探测尚未就绪也不能阻止已推送分支进入表单。
+        XCTAssertFalse(app.availability(of: .gitlab).isReady)
+        XCTAssertNil(repository.pullRequestUnavailableReason)
+        guard case .create = model.pullRequestAction else { return XCTFail("全局探测不能禁用仓库的评审入口") }
+
+        model.worktree.branch = "master"
+        guard case .unavailable = model.pullRequestAction else { return XCTFail("默认分支仍不能发起评审") }
+        repository.hasOrigin = false
+        XCTAssertEqual(repository.pullRequestUnavailableReason, "这个仓库没有配置 origin。")
+    }
+
+    func testDeletedRemoteBranchIsRecheckedBeforeCreatingAndNeverRepushed() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let git = try await publishedGit(in: directory)
+        let marker = directory.appendingPathComponent("created")
+        let executable = directory.appendingPathComponent("gh")
+        try """
+        #!/bin/sh
+        if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+          : > "\(marker.path)"
+          printf 'https://github.com/team/Grove/pull/1'
+        else
+          printf '[]'
+        fi
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let repository = RepositoryModel(root: directory, git: git, app: nil,
+            forge: GitHubClient(executable: executable, environment: [:]))
+        repository.origin = GitRemote.parse("https://github.com/team/Grove.git")
+        repository.hasRemote = true
+        repository.hasOrigin = true
+        repository.defaultBranch = "main"
+        repository.resolveForgeMetadata()
+        let model = WorktreeModel(worktree: Worktree(path: directory, head: nil, branch: "feature",
+            isBare: false, isDetached: false, lockReason: nil, prunableReason: nil), repository: repository, git: git, app: nil)
+        await model.refreshReviewSource()
+        guard case .create = model.pullRequestAction else { return XCTFail("已发布分支应能发起评审") }
+
+        // 模拟表单打开后在服务器删除分支，保留本地上游与跟踪引用，且不执行 fetch。
+        let remote = directory.appendingPathComponent("origin.git")
+        try await git.run(["update-ref", "-d", "refs/heads/feature"], in: remote)
+        let staleReference = await git.succeeds(["show-ref", "--verify", "refs/remotes/origin/feature"], in: directory)
+        XCTAssertTrue(staleReference)
+        for upstream in [nil, "origin/feature"] as [String?] {
+            model.status.upstream = upstream
+            model.status.ahead = 1
+            let url = await model.createPullRequest(title: "测试评审", body: "", base: "main", isDraft: false)
+            XCTAssertNil(url)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path), "分支已删时不能调用创建接口")
+            let remoteOID = try await git.remoteBranchOID("feature", in: directory)
+            XCTAssertNil(remoteOID, "评审不能隐式推送并复活已删除的分支")
+            guard case .unavailable(let reason) = model.pullRequestAction else { return XCTFail("分支已删时入口应不可用") }
+            XCTAssertTrue(reason.contains("origin 上不存在分支"))
+        }
+
+        // 明确重新推送后才能恢复入口，并能实际调用创建接口。
+        try await git.push(in: directory, remote: "origin", branch: "feature", setUpstream: true)
+        await model.refreshReviewSource()
+        guard case .create = model.pullRequestAction else { return XCTFail("明确重新推送后应恢复评审") }
+        let url = await model.createPullRequest(title: "测试评审", body: "", base: "main", isDraft: false)
+        XCTAssertEqual(url, "https://github.com/team/Grove/pull/1")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    func testUnpublishedCommitsAndConnectionFailureCannotCreateReview() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let git = try await publishedGit(in: directory)
+        let repository = RepositoryModel(root: directory, git: git, app: nil,
+            forge: GitHubClient(executable: URL(fileURLWithPath: "/bin/false"), environment: [:]))
+        repository.origin = GitRemote.parse("https://github.com/team/Grove.git")
+        repository.hasRemote = true
+        repository.hasOrigin = true
+        repository.defaultBranch = "main"
+        repository.resolveForgeMetadata()
+        let model = WorktreeModel(worktree: Worktree(path: directory, head: nil, branch: "feature",
+            isBare: false, isDetached: false, lockReason: nil, prunableReason: nil), repository: repository, git: git, app: nil)
+        try await git.run(["commit", "--allow-empty", "-qm", "尚未发布"], in: directory)
+        await model.refreshReviewSource()
+        guard case .unavailable(let unpublished) = model.pullRequestAction else { return XCTFail("本地新提交未推送时不能发起评审") }
+        XCTAssertTrue(unpublished.contains("提交不一致"))
+
+        try await git.run(["remote", "set-url", "origin", directory.appendingPathComponent("missing.git").path], in: directory)
+        await model.refreshReviewSource()
+        guard case .unavailable(let failure) = model.pullRequestAction else { return XCTFail("查询失败不能假定分支存在") }
+        XCTAssertTrue(failure.contains("无法确认"), "网络或访问错误不能冒充远端分支已删除")
+    }
+
+    func testReviewActionUsesOpenRequestAlreadyLoadedByRepository() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let git = try await publishedGit(in: directory)
+        let repository = RepositoryModel(root: directory, git: git, app: nil,
             forge: GitHubClient(executable: URL(fileURLWithPath: "/bin/false"), environment: [:]))
         repository.origin = GitRemote.parse("https://github.com/team/Grove.git")
         repository.hasRemote = true
@@ -254,6 +381,7 @@ final class PullRequestLoadStateTests: XCTestCase {
         guard case .view(let linked) = model.pullRequestAction else { return XCTFail("已有开放评审时应直接查看，不能再次创建") }
         XCTAssertEqual(linked.number, 8)
         repository.pullRequests[0].state = "CLOSED"
+        await model.refreshReviewSource()
         guard case .create = model.pullRequestAction else { return XCTFail("已关闭的缓存请求不能阻止再次创建") }
     }
 

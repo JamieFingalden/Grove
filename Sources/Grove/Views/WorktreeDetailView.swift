@@ -420,11 +420,11 @@ private struct WorktreeHeader: View {
             .buttonStyle(.bordered)
             .help(pullRequest.title)
 
-        case .create(let term):
+        case .create:
             Button {
                 sheet = .createPullRequest(model)
             } label: {
-                Label("提\(term)", symbol: .pullRequest(status: .open), size: .small)
+                Label("提交评审", symbol: .pullRequest(status: .open), size: .small)
             }
             .buttonStyle(.bordered)
             .disabled(model.activity != nil)

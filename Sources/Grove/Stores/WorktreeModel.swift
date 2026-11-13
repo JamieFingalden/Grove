@@ -45,6 +45,13 @@ final class WorktreeModel: Identifiable {
     @ObservationIgnored private var linkedRequestID = UUID()
     @ObservationIgnored private var authorsRequestID = UUID()
     var linkedPullRequest: PullRequest?
+    private struct ReviewSource {
+        var branch: String
+        var origin: GitRemote
+        var issue: String?
+    }
+    private var reviewSource: ReviewSource?
+    @ObservationIgnored private var reviewSourceRequestID = UUID()
 
     var isLoading = false
     var activity: String?
@@ -224,18 +231,19 @@ final class WorktreeModel: Identifiable {
         }
     }
 
-    func refresh() async {
+    func refresh(loadForgeMetadata: Bool = true) async {
         guard !Task.isCancelled else { return }
         let requestID = UUID()
         authorsRequestID = requestID
         // 本地变更、历史和远端关联互不依赖，分别完成后立即发布。
         async let history: Void = reloadHistory()
-        async let linked: Void = refreshLinkedPullRequest()
+        async let linked: Void = loadForgeMetadata ? refreshLinkedPullRequest() : ()
+        async let review: Void = loadForgeMetadata ? refreshReviewSource() : ()
         async let authors = git.authors(in: path)
         await refreshChanges()
         let loadedAuthors = await authors
         if !Task.isCancelled, authorsRequestID == requestID { knownAuthors = loadedAuthors }
-        _ = await (history, linked)
+        _ = await (history, linked, review)
     }
 
     /// 暂存、丢弃和解决冲突只改变工作区与索引，不需要重新拉取历史或 PR。
@@ -1442,6 +1450,35 @@ final class WorktreeModel: Identifiable {
 
     // MARK: - PR
 
+    /// 评审只能使用 origin 上已发布的当前分支；入口刷新和真正创建前共用这项检查。
+    func refreshReviewSource() async {
+        let requestID = UUID()
+        reviewSourceRequestID = requestID
+        reviewSource = nil
+        guard let repository, repository.pullRequestUnavailableReason == nil,
+              let origin = repository.origin, let branch = worktree.branch,
+              !worktree.isDetached, branch != repository.defaultBranch else { return }
+
+        let issue: String?
+        do {
+            let remoteOID = try await git.remoteBranchOID(branch, in: path)
+            if let remoteOID {
+                let localOID = try await git.run(["rev-parse", "--verify", "HEAD"], in: path)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                issue = localOID == remoteOID ? nil : "本地分支与 origin/\(branch) 的提交不一致，请先同步后再提交评审。"
+            } else {
+                issue = "origin 上不存在分支 \(branch)，它可能尚未推送或已被删除。请先明确推送分支，再提交评审。"
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            issue = "无法确认 origin/\(branch) 的状态，请检查连接后刷新重试。\n\(error.localizedDescription)"
+        }
+        guard !Task.isCancelled, reviewSourceRequestID == requestID,
+              repository.origin == origin, worktree.branch == branch else { return }
+        reviewSource = ReviewSource(branch: branch, origin: origin, issue: issue)
+    }
+
     /// 头部那个评审按钮此刻该是什么。
     ///
     /// 刻意不返回一个光秃秃的 Bool：条件不满足时**按钮不能直接消失**。
@@ -1467,6 +1504,10 @@ final class WorktreeModel: Identifiable {
                 + "用工具栏的「新建工作树」开一个功能分支。"
             )
         }
+        guard let source = reviewSource, source.branch == branch, source.origin == repository.origin else {
+            return .unavailable("尚未确认 origin/\(branch) 的状态，正在检查或需要刷新重试。")
+        }
+        if let issue = source.issue { return .unavailable(issue) }
         return .create(term: term)
     }
 
@@ -1476,23 +1517,21 @@ final class WorktreeModel: Identifiable {
         case unavailable(String)
     }
 
-    /// 提 PR 之前必须先把分支推上去。这个方法把「推送 + 创建」串成一步，
-    /// 因为分开做的话用户十次里有九次会忘记先推。
+    /// 创建前重新确认远端分支，不隐式推送，避免复活用户已经删除的分支。
     func createPullRequest(title: String, body: String, base: String, isDraft: Bool) async -> String? {
-        guard let forge = repository?.forge, let branch = worktree.branch else { return nil }
+        guard activity == nil, let repository, let forge = repository.forge,
+              let branch = worktree.branch else { return nil }
+        let expectedOrigin = repository.origin
 
-        activity = "正在推送分支…"
+        activity = "正在检查远端分支…"
         defer { activity = nil }
 
-        do {
-            if status.upstream == nil {
-                // 提 PR 必须推到 origin —— 托管商就是按 origin 认的。
-                try await git.push(in: path, remote: "origin", branch: branch, setUpstream: true)
-            } else if status.ahead > 0 {
-                try await git.push(in: path, remote: nil, branch: branch, setUpstream: false)
+        await refreshReviewSource()
+        guard !Task.isCancelled, repository.origin == expectedOrigin, worktree.branch == branch else { return nil }
+        guard case .create = pullRequestAction else {
+            if case .unavailable(let reason) = pullRequestAction {
+                app?.report(title: "无法提交评审", detail: reason, repository: repository, context: failureContext)
             }
-        } catch {
-            app?.report(title: "推送分支失败", error: error, repository: repository, context: failureContext)
             return nil
         }
 
@@ -1505,7 +1544,7 @@ final class WorktreeModel: Identifiable {
                 in: path
             )
             await refresh()
-            await repository?.refreshPullRequests()
+            await repository.refreshPullRequests()
             return url
         } catch {
             app?.report(title: "创建 PR 失败", error: error, repository: repository, context: failureContext)

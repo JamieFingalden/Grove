@@ -256,6 +256,22 @@ struct GitClient: Sendable {
         return status
     }
 
+    /// 批量过滤通知中的忽略文件；已跟踪文件即使匹配忽略规则也必须刷新。
+    func hasUnignoredPaths(_ paths: [String], in directory: URL) async -> Bool {
+        guard !paths.isEmpty else { return false }
+        if paths.contains(".") || paths.contains(".git") { return true }
+        let arguments = Self.globalArguments + configurationArguments + ["check-ignore", "--stdin", "-z"]
+        guard let result = try? await transport.runGit(
+            arguments, worktreePath: directory.path, timeout: ProcessRunner.localTimeout,
+            standardInput: Data((paths.joined(separator: "\0") + "\0").utf8)
+        ), result.exitCode == 0 || result.exitCode == 1 else {
+            // 无法确定时宁可刷新，不能让界面永久停在旧状态。
+            return true
+        }
+        let ignored = Set(result.standardOutput.split(separator: 0).map { String(decoding: $0, as: UTF8.self) })
+        return paths.contains { !ignored.contains($0) }
+    }
+
     func branches(in directory: URL) async throws -> [Branch] {
         async let output = run(
             ["for-each-ref", "--format=\(RefParser.branchFormat)", "refs/heads"],
@@ -532,6 +548,20 @@ struct GitClient: Sendable {
         guard let result, result.isSuccess else { return nil }
         let url = result.trimmedStdout
         return url.isEmpty ? nil : url
+    }
+
+    /// 直接查询服务器，不能用可能尚未修剪的本地远端跟踪引用判断分支是否存在。
+    func remoteBranchOID(_ branch: String, remote: String = "origin", in directory: URL) async throws -> String? {
+        let ref = "refs/heads/\(branch)"
+        let arguments = ["ls-remote", "--exit-code", "--heads", remote, ref]
+        let result = try await runRaw(arguments, in: directory, timeout: ProcessRunner.networkTimeout)
+        if result.exitCode == 2 { return nil }
+        try ensureSuccess(result, arguments: arguments)
+        return result.stdout.split(separator: "\n").compactMap { line -> String? in
+            let fields = line.split(separator: "\t")
+            guard fields.count == 2, fields[1] == ref else { return nil }
+            return String(fields[0])
+        }.first
     }
 
     /// 远端的默认分支（`origin/HEAD` 指向谁）。新建分支时拿它当默认起点。

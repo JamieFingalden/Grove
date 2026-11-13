@@ -328,7 +328,7 @@ struct CreatePullRequestSheet: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else if model.status.ahead > 0 {
-                    Label("本地领先远端 \(model.status.ahead) 个提交，创建时会先推送。",
+                    Label("本地领先远端 \(model.status.ahead) 个提交，请先推送后再创建评审。",
                           systemImage: "info.circle")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)

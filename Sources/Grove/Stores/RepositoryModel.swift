@@ -127,6 +127,8 @@ final class RepositoryModel: Identifiable {
     /// 视图在 body 里查一次就会触发一次「观察到的属性被修改」，
     /// SwiftUI 会认为需要重绘，然后再查一次 —— 死循环。
     @ObservationIgnored private var worktreeModels: [URL: WorktreeModel] = [:]
+    @ObservationIgnored private var fileWatcher: RepositoryFileWatcher?
+    @ObservationIgnored private var watchedGitDirectories: [URL: [URL]] = [:]
 
     init(
         root: URL,
@@ -230,6 +232,9 @@ final class RepositoryModel: Identifiable {
             }
         }
 
+        await updateFileWatching()
+        guard !Task.isCancelled, repositoryRefreshID == requestID else { return }
+
         // 托管商仍只按 origin 解析；网络加载与本地状态并行，避免远端慢拖住本地页面。
         resolveForgeMetadata()
         async let forgeRefresh: Void = loadForgeMetadata ? refreshForgeMetadata() : ()
@@ -243,7 +248,7 @@ final class RepositoryModel: Identifiable {
             var iterator = worktreeModels.values.sorted { $0 === selected && $1 !== selected }.makeIterator()
             func add(_ model: WorktreeModel) {
                 group.addTask {
-                    if model === selected { await model.refresh() }
+                    if model === selected { await model.refresh(loadForgeMetadata: loadForgeMetadata) }
                     else { await model.refreshStatus() }
                 }
             }
@@ -254,6 +259,55 @@ final class RepositoryModel: Identifiable {
             }
         }
         await forgeRefresh
+    }
+
+    /// 只给本地已打开的工作树注册通知，远程路径不能交给本机文件系统监听。
+    private func updateFileWatching() async {
+        guard !isRemote else { return }
+        let paths = Set(worktrees.filter { !$0.isBare && !$0.isPrunable }.map(\.path))
+        watchedGitDirectories = watchedGitDirectories.filter { paths.contains($0.key) }
+        for path in paths where watchedGitDirectories[path] == nil {
+            guard let output = try? await git.run(
+                ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], in: path
+            ) else { continue }
+            watchedGitDirectories[path] = output.split(separator: "\n").map { URL(fileURLWithPath: String($0)) }
+        }
+        guard !Task.isCancelled else { return }
+        if fileWatcher == nil {
+            fileWatcher = RepositoryFileWatcher { [weak self] batch in
+                await self?.refreshFileChanges(batch)
+            }
+        }
+        fileWatcher?.watch(worktrees: Array(paths), gitDirectories: watchedGitDirectories.values.flatMap { $0 })
+    }
+
+    private func refreshFileChanges(_ batch: RepositoryFileWatcher.Batch) async {
+        guard !Task.isCancelled else { return }
+        if batch.reloadRepository {
+            // 提交、切分支和工作树增删需要更新仓库元数据，但不触发托管平台请求。
+            await refresh(loadForgeMetadata: false)
+            return
+        }
+        let selected = app?.selectedWorktreeModel
+        let roots = worktreeModels.values.map { (model: $0, root: $0.path.groveResolved.path) }
+            .sorted { $0.root.count > $1.root.count }
+        var affected: [URL: [String]] = [:]
+        for path in batch.paths {
+            guard let entry = roots.first(where: { path == $0.root || path.hasPrefix($0.root + "/") }) else { continue }
+            affected[entry.model.path, default: []].append(
+                path == entry.root ? "." : String(path.dropFirst(entry.root.count + 1))
+            )
+        }
+        // 同一仓库的自动刷新串行执行；后台工作树只查状态，不加载 diff、历史和 PR。
+        for (model, _) in roots {
+            guard !Task.isCancelled else { return }
+            let paths = affected[model.path] ?? []
+            if !batch.refreshAll {
+                guard await git.hasUnignoredPaths(paths, in: model.path) else { continue }
+            }
+            if model === selected { await model.refreshChanges() }
+            else { await model.refreshStatus() }
+        }
     }
 
     /// 本地即可确定托管商和项目路径，不把网络查询作为评审入口的前置条件。
@@ -926,7 +980,8 @@ final class RepositoryModel: Identifiable {
         guard hasOrigin else { return "这个仓库没有配置 origin。" }
         guard origin != nil else { return "无法识别 origin 的地址。" }
         guard forge != nil else { return app?.forgeSetup(for: origin)?.summary ?? "代码托管平台还未就绪，请检查 GitHub / GitLab CLI。" }
-        if let forge, let message = app?.availability(of: forge.kind).message { return message }
+        // 启动时的联网认证探测可能超时或已过期，不能据此永久禁用仓库评审。
+        // 已识别平台和项目时允许进入，认证与权限由实际请求检查并报告。
         if slug == nil, let forge { return "\(forge.kind.termLong)：无法识别这个仓库。" }
         return nil
     }
