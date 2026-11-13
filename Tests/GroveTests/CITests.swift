@@ -215,6 +215,68 @@ final class CITests: XCTestCase {
         XCTAssertEqual(statusRunningBehind, .running, "远端运行中的流水线在落后远端时应正常展示")
     }
 
+    func testWorktreeBadgeLogicKeepsCIFailureWhenBranchTracksDifferentUpstream() {
+        // 远端 feature 分支流水线失败
+        let failedPipeline = CIPipeline(id: 99, status: .failed, ref: "feature", sha: "remote_feature_sha")
+
+        // 1. 本地 feature 分支跟踪 origin/main，且领先 main 3 个提交（aheadCount: 3, behindCount: 0）
+        // 本地 HEAD 与流水线 SHA 不同。
+        // 核心回归用例（AI Review 提出）：这些计数是相对于 main 的，不描述本地与远端 feature 的关系！
+        // 远端 feature 的 CI 失败绝不能被隐去！
+        let statusDifferentUpstream = WorktreeBadgeLogic.shouldShowCIStatus(
+            pipeline: failedPipeline,
+            fallbackStatus: nil,
+            currentHead: "local_feature_head",
+            aheadCount: 3,
+            behindCount: 0,
+            upstream: "origin/main",
+            branch: "feature"
+        )
+        XCTAssertEqual(statusDifferentUpstream, .failed, "跟踪其他上游（如 main）的工作树绝不能隐去远端 feature 的 CI 失败！")
+
+        // 2. hasNewCommitsSincePipeline 直接判断：跟踪不同上游时绝不应判定为「在流水线之后有新提交」
+        let hasNew = WorktreeBadgeLogic.hasNewCommitsSincePipeline(
+            failedPipeline,
+            currentHead: "local_feature_head",
+            aheadCount: 3,
+            behindCount: 0,
+            upstream: "origin/main",
+            branch: "feature"
+        )
+        XCTAssertFalse(hasNew, "跟踪其他上游时，ahead 并不代表领先流水线目标分支，不能判定为已有新提交！")
+
+        // 3. 当本地跟踪的就是 origin/feature 时，ahead > 0 且 behind == 0 才应判定为已有新提交并隐去
+        let statusSameUpstream = WorktreeBadgeLogic.shouldShowCIStatus(
+            pipeline: failedPipeline,
+            fallbackStatus: nil,
+            currentHead: "local_feature_head",
+            aheadCount: 1,
+            behindCount: 0,
+            upstream: "origin/feature",
+            branch: "feature"
+        )
+        XCTAssertNil(statusSameUpstream, "本地跟踪对应远端分支且产生新提交时，旧失败图标应消失")
+
+        // 4. 仅有 fallback 状态且跟踪不同上游时，同样不可隐去
+        let fallbackDifferentUpstream = WorktreeBadgeLogic.shouldShowCIStatus(
+            pipeline: nil,
+            fallbackStatus: .failed,
+            currentHead: "local_feature_head",
+            aheadCount: 2,
+            behindCount: 0,
+            upstream: "origin/main",
+            branch: "feature"
+        )
+        XCTAssertEqual(fallbackDifferentUpstream, .failed, "仅有 fallback 状态且跟踪不同上游时，不能隐去失败提示")
+
+        // 5. 验证 isTracking 辅助方法
+        XCTAssertTrue(WorktreeBadgeLogic.isTracking(upstream: "origin/feature", ref: "feature"))
+        XCTAssertTrue(WorktreeBadgeLogic.isTracking(upstream: "upstream/feature/login", ref: "feature/login"))
+        XCTAssertTrue(WorktreeBadgeLogic.isTracking(upstream: "feature", ref: "feature"))
+        XCTAssertFalse(WorktreeBadgeLogic.isTracking(upstream: "origin/main", ref: "feature"))
+        XCTAssertFalse(WorktreeBadgeLogic.isTracking(upstream: nil, ref: "feature"))
+    }
+
     func testWorktreeBadgeLogicShowsMergedPRWhenSHAMatchesEvenIfBranchIsAhead() {
         let mergedPR = PullRequest(
             number: 123,

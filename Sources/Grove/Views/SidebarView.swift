@@ -326,6 +326,10 @@ private struct WorktreeRow: View {
         return repository.branches.first(where: { $0.name == worktree.branch })?.behind ?? 0
     }
 
+    private var currentUpstream: String? {
+        detail?.status.upstream ?? repository.branches.first(where: { $0.name == worktree.branch })?.upstream
+    }
+
     private var pullRequest: PullRequest? {
         guard let pr = repository.sidebarPullRequest(forBranch: worktree.branch) ?? detail?.linkedPullRequest else {
             return nil
@@ -351,7 +355,9 @@ private struct WorktreeRow: View {
             fallbackStatus: fallback,
             currentHead: currentHeadCommit,
             aheadCount: currentAheadCount,
-            behindCount: currentBehindCount
+            behindCount: currentBehindCount,
+            upstream: currentUpstream,
+            branch: branch
         ) else {
             return nil
         }
@@ -858,6 +864,18 @@ extension PullRequest.CheckRollup {
 // MARK: - 工作树行徽章展示决策逻辑
 
 enum WorktreeBadgeLogic {
+    /// 判断 upstream 是否跟踪了目标分支 ref（例如 origin/feature 跟踪 feature）。
+    static func isTracking(upstream: String?, ref: String) -> Bool {
+        guard let upstream = upstream?.trimmingCharacters(in: .whitespacesAndNewlines), !upstream.isEmpty,
+              !ref.isEmpty else {
+            return false
+        }
+        let cleanRef = ref.hasPrefix("refs/heads/") ? String(ref.dropFirst("refs/heads/".count)) : ref
+        if upstream == cleanRef { return true }
+        let stripped = RefParser.stripRemotePrefix(upstream)
+        return stripped == cleanRef
+    }
+
     /// 判定是否应在侧栏展示已合并/已关闭的 PR 图标。
     /// 规则：
     /// 1. 活跃中的 PR（.open / .draft）始终展示；
@@ -909,16 +927,18 @@ enum WorktreeBadgeLogic {
     /// 1. 成功态（.success）不展示在侧边栏（保留在 CI 详情页）；
     /// 2. 运行中或等待中的状态（!isFinal）始终展示；
     /// 3. 已终态的异常状态（.failed, .canceled 等）：
+    ///    - 若工作树跟踪的是其他上游（例如 feature 跟踪 main），ahead/behind 并不描述与远端 feature 的关系，不能据此隐藏失败；
     ///    - 若本地分支落后远端（behind > 0），远端流水线正是针对远端最新提交执行的，绝不能隐去失败提示；
     ///    - 若流水线记录了 sha，且与当前工作树 HEAD 匹配（SHA 相同），说明失败正对应当前提交，必须展示（即使 ahead > 0）；
-    ///    - 若 sha 与当前 HEAD 不匹配，且本地有新提交（ahead > 0，且 behind == 0），说明失败发生在旧提交上，已被本地后续新提交覆盖，隐去；
-    ///    - 若本地无新提交（ahead == 0），则不应误判为有新提交覆盖，保留失败展示。
+    ///    - 只有当本地跟踪对应远端分支、未落后远端且本地切实产生新提交（ahead > 0 且 HEAD SHA 不同）时，才隐去旧失败。
     static func shouldShowCIStatus(
         pipeline: CIPipeline?,
         fallbackStatus: CIStatus?,
         currentHead: String?,
         aheadCount: Int,
-        behindCount: Int = 0
+        behindCount: Int = 0,
+        upstream: String? = nil,
+        branch: String? = nil
     ) -> CIStatus? {
         if let pipeline {
             guard pipeline.status != .success else { return nil }
@@ -926,13 +946,21 @@ enum WorktreeBadgeLogic {
                 pipeline,
                 currentHead: currentHead,
                 aheadCount: aheadCount,
-                behindCount: behindCount
+                behindCount: behindCount,
+                upstream: upstream,
+                branch: branch
             ) {
                 return nil
             }
             return pipeline.status
         } else if let fallback = fallbackStatus, fallback != .success {
             if fallback.isFinal {
+                let targetRef = branch ?? ""
+                if let upstream = upstream?.trimmingCharacters(in: .whitespacesAndNewlines), !upstream.isEmpty, !targetRef.isEmpty {
+                    if !isTracking(upstream: upstream, ref: targetRef) {
+                        return fallback
+                    }
+                }
                 if behindCount > 0 {
                     return fallback
                 }
@@ -949,30 +977,41 @@ enum WorktreeBadgeLogic {
         _ pipeline: CIPipeline,
         currentHead: String?,
         aheadCount: Int,
-        behindCount: Int = 0
+        behindCount: Int = 0,
+        upstream: String? = nil,
+        branch: String? = nil
     ) -> Bool {
-        // 1. 如果本地分支落后远端（behind > 0），远端流水线正是针对远端最新提交执行的；
-        // 本地绝不可能「在流水线之后产生新提交」，因此失败状态绝不能被隐去。
-        if behindCount > 0 {
-            return false
-        }
-
-        // 2. 如果流水线带有 sha，直接与当前工作树 HEAD 进行精确比对
+        // 1. 如果流水线带有 sha，直接与当前工作树 HEAD 进行精确比对
         if let currentHead, !pipeline.sha.isEmpty {
             let normalizedCurrent = currentHead.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let normalizedPipeline = pipeline.sha.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if normalizedCurrent.hasPrefix(normalizedPipeline) || normalizedPipeline.hasPrefix(normalizedCurrent) {
                 // SHA 相同：正好是当前提交，绝不能隐去（即使 ahead > 0）
                 return false
-            } else {
-                // SHA 不同：HEAD 与流水线 commit 不一致。
-                // 只有在本地切实有新提交（ahead > 0）向前推进时，才判定为「已被本地新提交覆盖」，隐去旧失败；
-                // 若 ahead == 0，说明本地并无新提交，不应判定为已有新提交。
-                return aheadCount > 0
             }
         }
 
-        // 3. 缺少 sha 时，以本地是否有领先上游的新提交来判断
+        let targetRef = !pipeline.ref.isEmpty ? pipeline.ref : (branch ?? "")
+
+        // 2. 检查本地分支是否跟踪了不同的上游（例如 feature 跟踪 main）：
+        // 若本地跟踪的是其他分支（如 main），则 aheadCount/behindCount 描述的是相对于 main 的关系，
+        // 并不描述本地与远端 targetRef 的关系，不能据此判定本地已覆盖远端流水线失败。
+        if let upstream = upstream?.trimmingCharacters(in: .whitespacesAndNewlines), !upstream.isEmpty, !targetRef.isEmpty {
+            if !isTracking(upstream: upstream, ref: targetRef) {
+                // 跟踪的是其他分支，远端该分支的流水线失败绝不能被隐去
+                return false
+            }
+        }
+
+        // 3. 如果本地分支落后远端（behind > 0），远端流水线正是针对远端最新提交执行的；
+        // 本地绝不可能「在流水线之后产生新提交」，因此失败状态绝不能被隐去。
+        if behindCount > 0 {
+            return false
+        }
+
+        // 4. SHA 不同且本地切实向前产生新提交（ahead > 0，且 behind == 0）：
+        // 判定为「已被本地新提交覆盖」，隐去旧失败；
+        // 若 ahead == 0，说明本地并无新提交，不应判定为已有新提交。
         return aheadCount > 0
     }
 }
