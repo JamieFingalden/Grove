@@ -319,6 +319,13 @@ private struct WorktreeRow: View {
         return repository.branches.first(where: { $0.name == worktree.branch })?.ahead ?? 0
     }
 
+    private var currentBehindCount: Int {
+        if let status = detail?.status {
+            return status.behind
+        }
+        return repository.branches.first(where: { $0.name == worktree.branch })?.behind ?? 0
+    }
+
     private var pullRequest: PullRequest? {
         guard let pr = repository.sidebarPullRequest(forBranch: worktree.branch) ?? detail?.linkedPullRequest else {
             return nil
@@ -326,7 +333,8 @@ private struct WorktreeRow: View {
         guard WorktreeBadgeLogic.shouldShowPullRequestBadge(
             pr: pr,
             currentHead: currentHeadCommit,
-            aheadCount: currentAheadCount
+            aheadCount: currentAheadCount,
+            behindCount: currentBehindCount
         ) else {
             return nil
         }
@@ -342,7 +350,8 @@ private struct WorktreeRow: View {
             pipeline: pipeline,
             fallbackStatus: fallback,
             currentHead: currentHeadCommit,
-            aheadCount: currentAheadCount
+            aheadCount: currentAheadCount,
+            behindCount: currentBehindCount
         ) else {
             return nil
         }
@@ -853,24 +862,32 @@ enum WorktreeBadgeLogic {
     /// 规则：
     /// 1. 活跃中的 PR（.open / .draft）始终展示；
     /// 2. 已结束的 PR（.merged / .closed）：
+    ///    - 若落后远端（behind > 0），说明本地尚未包含远端合并后的新提交，展示合并图标；
     ///    - 若 PR 记录了 headRefOid，且与当前工作树 HEAD 匹配（相同提交），说明当前仍处于该合并点，展示图标（即使 ahead > 0）；
-    ///    - 若 headRefOid 与当前 HEAD 不匹配，说明合并后工作树已有新提交向前移动，不展示；
+    ///    - 若 headRefOid 与当前 HEAD 不匹配，且本地有新提交向前移动（ahead > 0），不展示；
     ///    - 仅在 headRefOid 缺失时，才退回根据 aheadCount > 0 判定。
     static func shouldShowPullRequestBadge(
         pr: PullRequest,
         currentHead: String?,
-        aheadCount: Int
+        aheadCount: Int,
+        behindCount: Int = 0
     ) -> Bool {
         if pr.isActive { return true }
-        return !hasNewCommitsSinceMerge(pr: pr, currentHead: currentHead, aheadCount: aheadCount)
+        return !hasNewCommitsSinceMerge(pr: pr, currentHead: currentHead, aheadCount: aheadCount, behindCount: behindCount)
     }
 
     static func hasNewCommitsSinceMerge(
         pr: PullRequest,
         currentHead: String?,
-        aheadCount: Int
+        aheadCount: Int,
+        behindCount: Int = 0
     ) -> Bool {
-        // 1. 如果有明确的 headRefOid，直接与当前提交进行精确比对
+        // 1. 若落后远端，本地不可能有领先合并点的新提交
+        if behindCount > 0 {
+            return false
+        }
+
+        // 2. 如果有明确的 headRefOid，直接与当前提交进行精确比对
         if let currentHead, let prHead = pr.headRefOid, !prHead.isEmpty {
             let normalizedCurrent = currentHead.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let normalizedPR = prHead.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -878,12 +895,12 @@ enum WorktreeBadgeLogic {
                 // 当前提交正是被合并的提交，没有新提交
                 return false
             } else {
-                // HEAD 已经移动，存在新提交
-                return true
+                // HEAD 已经移动，且本地有新提交向前推进
+                return aheadCount > 0
             }
         }
 
-        // 2. 只有在缺少 headRefOid 时，才以领先上游判断
+        // 3. 只有在缺少 headRefOid 时，才以领先上游判断
         return aheadCount > 0
     }
 
@@ -892,24 +909,36 @@ enum WorktreeBadgeLogic {
     /// 1. 成功态（.success）不展示在侧边栏（保留在 CI 详情页）；
     /// 2. 运行中或等待中的状态（!isFinal）始终展示；
     /// 3. 已终态的异常状态（.failed, .canceled 等）：
+    ///    - 若本地分支落后远端（behind > 0），远端流水线正是针对远端最新提交执行的，绝不能隐去失败提示；
     ///    - 若流水线记录了 sha，且与当前工作树 HEAD 匹配（SHA 相同），说明失败正对应当前提交，必须展示（即使 ahead > 0）；
-    ///    - 若 sha 与当前 HEAD 不匹配，说明失败发生在旧提交上，当前已有新提交，隐去；
-    ///    - 仅在 sha 缺失时，才退回根据 aheadCount > 0 判定。
+    ///    - 若 sha 与当前 HEAD 不匹配，且本地有新提交（ahead > 0，且 behind == 0），说明失败发生在旧提交上，已被本地后续新提交覆盖，隐去；
+    ///    - 若本地无新提交（ahead == 0），则不应误判为有新提交覆盖，保留失败展示。
     static func shouldShowCIStatus(
         pipeline: CIPipeline?,
         fallbackStatus: CIStatus?,
         currentHead: String?,
-        aheadCount: Int
+        aheadCount: Int,
+        behindCount: Int = 0
     ) -> CIStatus? {
         if let pipeline {
             guard pipeline.status != .success else { return nil }
-            if pipeline.status.isFinal && hasNewCommitsSincePipeline(pipeline, currentHead: currentHead, aheadCount: aheadCount) {
+            if pipeline.status.isFinal && hasNewCommitsSincePipeline(
+                pipeline,
+                currentHead: currentHead,
+                aheadCount: aheadCount,
+                behindCount: behindCount
+            ) {
                 return nil
             }
             return pipeline.status
         } else if let fallback = fallbackStatus, fallback != .success {
-            if fallback.isFinal && aheadCount > 0 {
-                return nil
+            if fallback.isFinal {
+                if behindCount > 0 {
+                    return fallback
+                }
+                if aheadCount > 0 {
+                    return nil
+                }
             }
             return fallback
         }
@@ -919,22 +948,31 @@ enum WorktreeBadgeLogic {
     static func hasNewCommitsSincePipeline(
         _ pipeline: CIPipeline,
         currentHead: String?,
-        aheadCount: Int
+        aheadCount: Int,
+        behindCount: Int = 0
     ) -> Bool {
-        // 1. 如果流水线带有 sha，直接与当前工作树 HEAD 进行精确比对
+        // 1. 如果本地分支落后远端（behind > 0），远端流水线正是针对远端最新提交执行的；
+        // 本地绝不可能「在流水线之后产生新提交」，因此失败状态绝不能被隐去。
+        if behindCount > 0 {
+            return false
+        }
+
+        // 2. 如果流水线带有 sha，直接与当前工作树 HEAD 进行精确比对
         if let currentHead, !pipeline.sha.isEmpty {
             let normalizedCurrent = currentHead.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let normalizedPipeline = pipeline.sha.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if normalizedCurrent.hasPrefix(normalizedPipeline) || normalizedPipeline.hasPrefix(normalizedCurrent) {
-                // SHA 相同：正好是当前提交，绝不能隐去
+                // SHA 相同：正好是当前提交，绝不能隐去（即使 ahead > 0）
                 return false
             } else {
-                // SHA 不同：HEAD 已移动，属于过去旧提交的失败
-                return true
+                // SHA 不同：HEAD 与流水线 commit 不一致。
+                // 只有在本地切实有新提交（ahead > 0）向前推进时，才判定为「已被本地新提交覆盖」，隐去旧失败；
+                // 若 ahead == 0，说明本地并无新提交，不应判定为已有新提交。
+                return aheadCount > 0
             }
         }
 
-        // 2. 只有在缺少 sha 时，才以领先上游判断
+        // 3. 缺少 sha 时，以本地是否有领先上游的新提交来判断
         return aheadCount > 0
     }
 }

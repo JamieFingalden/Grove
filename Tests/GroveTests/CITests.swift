@@ -157,6 +157,64 @@ final class CITests: XCTestCase {
         XCTAssertEqual(statusFallbackZero, .failed)
     }
 
+    func testWorktreeBadgeLogicShowsCIFailureWhenLocalIsBehindRemote() {
+        // 远端最新流水线在 remote_head 上执行并失败
+        let failedPipeline = CIPipeline(id: 42, status: .failed, ref: "feature/login", sha: "remote_head_c3d4")
+
+        // 1. 本地分支落后远端（behind > 0，ahead == 0）：
+        // 本地工作树 HEAD 是较旧的提交 local_old_a1b2，不匹配流水线 SHA。
+        // 回归核心用例：此时绝不能因为 SHA 不匹配而隐藏远端最新流水线的失败提示！
+        let statusWhenBehind = WorktreeBadgeLogic.shouldShowCIStatus(
+            pipeline: failedPipeline,
+            fallbackStatus: nil,
+            currentHead: "local_old_a1b2",
+            aheadCount: 0,
+            behindCount: 2
+        )
+        XCTAssertEqual(statusWhenBehind, .failed, "本地分支落后远端时，侧栏必须展示远端最新流水线的失败提示！")
+
+        // 2. 本地分支分叉（diverged：behind > 0 且 ahead > 0）：
+        // 远端最新提交流水线失败，本地虽有未推送提交，但尚未合入远端失败提交，仍需警示远端失败
+        let statusWhenDiverged = WorktreeBadgeLogic.shouldShowCIStatus(
+            pipeline: failedPipeline,
+            fallbackStatus: nil,
+            currentHead: "diverged_head_e5f6",
+            aheadCount: 1,
+            behindCount: 1
+        )
+        XCTAssertEqual(statusWhenDiverged, .failed, "本地与远端分叉且落后时，远端最新流水线失败提示仍应展示！")
+
+        // 3. hasNewCommitsSincePipeline 直接判断：落后远端时绝不应判定为「在流水线之后有新提交」
+        let hasNewCommits = WorktreeBadgeLogic.hasNewCommitsSincePipeline(
+            failedPipeline,
+            currentHead: "local_old_a1b2",
+            aheadCount: 0,
+            behindCount: 3
+        )
+        XCTAssertFalse(hasNewCommits, "落后远端时，本地不可能存在流水线之后的新提交")
+
+        // 4. 缺少 pipeline 对象仅有 fallbackStatus 时，落后远端（behind > 0）也应展示失败
+        let statusFallbackBehind = WorktreeBadgeLogic.shouldShowCIStatus(
+            pipeline: nil,
+            fallbackStatus: .failed,
+            currentHead: "any",
+            aheadCount: 0,
+            behindCount: 1
+        )
+        XCTAssertEqual(statusFallbackBehind, .failed, "仅有 fallback 状态且落后远端时，侧栏应展示失败提示")
+
+        // 5. 远端最新流水线为运行态（.running），落后远端时也必须展示
+        let runningPipeline = CIPipeline(id: 43, status: .running, ref: "feature/login", sha: "remote_head_c3d4")
+        let statusRunningBehind = WorktreeBadgeLogic.shouldShowCIStatus(
+            pipeline: runningPipeline,
+            fallbackStatus: nil,
+            currentHead: "local_old_a1b2",
+            aheadCount: 0,
+            behindCount: 1
+        )
+        XCTAssertEqual(statusRunningBehind, .running, "远端运行中的流水线在落后远端时应正常展示")
+    }
+
     func testWorktreeBadgeLogicShowsMergedPRWhenSHAMatchesEvenIfBranchIsAhead() {
         let mergedPR = PullRequest(
             number: 123,
