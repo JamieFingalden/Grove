@@ -308,73 +308,45 @@ private struct WorktreeRow: View {
         repository.worktreeModel(for: worktree.path)
     }
 
+    private var currentHeadCommit: String? {
+        worktree.head ?? repository.branches.first(where: { $0.name == worktree.branch })?.oid
+    }
+
+    private var currentAheadCount: Int {
+        if let status = detail?.status {
+            return status.ahead
+        }
+        return repository.branches.first(where: { $0.name == worktree.branch })?.ahead ?? 0
+    }
+
     private var pullRequest: PullRequest? {
         guard let pr = repository.sidebarPullRequest(forBranch: worktree.branch) ?? detail?.linkedPullRequest else {
             return nil
         }
-        if pr.isActive { return pr }
-        if hasNewCommitsSinceMerge(pr: pr) { return nil }
+        guard WorktreeBadgeLogic.shouldShowPullRequestBadge(
+            pr: pr,
+            currentHead: currentHeadCommit,
+            aheadCount: currentAheadCount
+        ) else {
+            return nil
+        }
         return pr
     }
 
-    /// 已合并或已关闭的 PR：若当前工作树已产生新提交，不应再显示旧的合并状态。
-    private func hasNewCommitsSinceMerge(pr: PullRequest) -> Bool {
-        // 1. 如果有 PR 的目标提交（headRefOid），比对当前工作树 HEAD 是否已发生移动
-        let currentHead = worktree.head ?? repository.branches.first(where: { $0.name == worktree.branch })?.oid
-        if let currentHead, let prHead = pr.headRefOid, !prHead.isEmpty {
-            let normalizedCurrent = currentHead.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let normalizedPR = prHead.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if !normalizedCurrent.hasPrefix(normalizedPR) && !normalizedPR.hasPrefix(normalizedCurrent) {
-                return true
-            }
-        }
-
-        // 2. 检查是否有领先上游或已产生新提交的迹象
-        return hasNewCommitsOnBranch()
-    }
-
     /// 侧栏工作树行展示的 CI 状态。
-    /// 只有存在异常或运行中的状态才展示（成功态留在 CI 页）；
-    /// 若之前的失败流水线对应的提交已被后续新提交覆盖，该失败图标应当隐去。
     private var sidebarCIStatus: (status: CIStatus, label: String)? {
         guard let branch = worktree.branch else { return nil }
-        if let pipeline = repository.latestPipelineByRef[branch] {
-            guard pipeline.status != .success else { return nil }
-            if pipeline.status.isFinal && hasNewCommitsSincePipeline(pipeline) {
-                return nil
-            }
-            return (pipeline.status, pipeline.status.label)
-        } else if let ci = repository.pipelineStatusByRef[branch], ci != .success {
-            if ci.isFinal && hasNewCommitsOnBranch() {
-                return nil
-            }
-            return (ci, ci.label)
+        let pipeline = repository.latestPipelineByRef[branch]
+        let fallback = repository.pipelineStatusByRef[branch]
+        guard let status = WorktreeBadgeLogic.shouldShowCIStatus(
+            pipeline: pipeline,
+            fallbackStatus: fallback,
+            currentHead: currentHeadCommit,
+            aheadCount: currentAheadCount
+        ) else {
+            return nil
         }
-        return nil
-    }
-
-    private func hasNewCommitsSincePipeline(_ pipeline: CIPipeline) -> Bool {
-        // 1. 比对当前工作树 HEAD 与流水线所执行的 commit SHA
-        let currentHead = worktree.head ?? repository.branches.first(where: { $0.name == worktree.branch })?.oid
-        if let currentHead, !pipeline.sha.isEmpty {
-            let normalizedCurrent = currentHead.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let normalizedPipeline = pipeline.sha.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if !normalizedCurrent.hasPrefix(normalizedPipeline) && !normalizedPipeline.hasPrefix(normalizedCurrent) {
-                return true
-            }
-        }
-        // 2. 检查本地是否有新提交（领先上游）
-        return hasNewCommitsOnBranch()
-    }
-
-    private func hasNewCommitsOnBranch() -> Bool {
-        if let status = detail?.status, status.ahead > 0 {
-            return true
-        }
-        if let branchInfo = repository.branches.first(where: { $0.name == worktree.branch }), branchInfo.ahead > 0 {
-            return true
-        }
-        return false
+        return (status, status.label)
     }
 
     var body: some View {
@@ -871,5 +843,98 @@ extension PullRequest.CheckRollup {
     var isFailing: Bool {
         if case .failing = self { return true }
         return false
+    }
+}
+
+// MARK: - 工作树行徽章展示决策逻辑
+
+enum WorktreeBadgeLogic {
+    /// 判定是否应在侧栏展示已合并/已关闭的 PR 图标。
+    /// 规则：
+    /// 1. 活跃中的 PR（.open / .draft）始终展示；
+    /// 2. 已结束的 PR（.merged / .closed）：
+    ///    - 若 PR 记录了 headRefOid，且与当前工作树 HEAD 匹配（相同提交），说明当前仍处于该合并点，展示图标（即使 ahead > 0）；
+    ///    - 若 headRefOid 与当前 HEAD 不匹配，说明合并后工作树已有新提交向前移动，不展示；
+    ///    - 仅在 headRefOid 缺失时，才退回根据 aheadCount > 0 判定。
+    static func shouldShowPullRequestBadge(
+        pr: PullRequest,
+        currentHead: String?,
+        aheadCount: Int
+    ) -> Bool {
+        if pr.isActive { return true }
+        return !hasNewCommitsSinceMerge(pr: pr, currentHead: currentHead, aheadCount: aheadCount)
+    }
+
+    static func hasNewCommitsSinceMerge(
+        pr: PullRequest,
+        currentHead: String?,
+        aheadCount: Int
+    ) -> Bool {
+        // 1. 如果有明确的 headRefOid，直接与当前提交进行精确比对
+        if let currentHead, let prHead = pr.headRefOid, !prHead.isEmpty {
+            let normalizedCurrent = currentHead.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let normalizedPR = prHead.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if normalizedCurrent.hasPrefix(normalizedPR) || normalizedPR.hasPrefix(normalizedCurrent) {
+                // 当前提交正是被合并的提交，没有新提交
+                return false
+            } else {
+                // HEAD 已经移动，存在新提交
+                return true
+            }
+        }
+
+        // 2. 只有在缺少 headRefOid 时，才以领先上游判断
+        return aheadCount > 0
+    }
+
+    /// 判定是否应在侧栏展示 CI 状态图标。
+    /// 规则：
+    /// 1. 成功态（.success）不展示在侧边栏（保留在 CI 详情页）；
+    /// 2. 运行中或等待中的状态（!isFinal）始终展示；
+    /// 3. 已终态的异常状态（.failed, .canceled 等）：
+    ///    - 若流水线记录了 sha，且与当前工作树 HEAD 匹配（SHA 相同），说明失败正对应当前提交，必须展示（即使 ahead > 0）；
+    ///    - 若 sha 与当前 HEAD 不匹配，说明失败发生在旧提交上，当前已有新提交，隐去；
+    ///    - 仅在 sha 缺失时，才退回根据 aheadCount > 0 判定。
+    static func shouldShowCIStatus(
+        pipeline: CIPipeline?,
+        fallbackStatus: CIStatus?,
+        currentHead: String?,
+        aheadCount: Int
+    ) -> CIStatus? {
+        if let pipeline {
+            guard pipeline.status != .success else { return nil }
+            if pipeline.status.isFinal && hasNewCommitsSincePipeline(pipeline, currentHead: currentHead, aheadCount: aheadCount) {
+                return nil
+            }
+            return pipeline.status
+        } else if let fallback = fallbackStatus, fallback != .success {
+            if fallback.isFinal && aheadCount > 0 {
+                return nil
+            }
+            return fallback
+        }
+        return nil
+    }
+
+    static func hasNewCommitsSincePipeline(
+        _ pipeline: CIPipeline,
+        currentHead: String?,
+        aheadCount: Int
+    ) -> Bool {
+        // 1. 如果流水线带有 sha，直接与当前工作树 HEAD 进行精确比对
+        if let currentHead, !pipeline.sha.isEmpty {
+            let normalizedCurrent = currentHead.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let normalizedPipeline = pipeline.sha.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if normalizedCurrent.hasPrefix(normalizedPipeline) || normalizedPipeline.hasPrefix(normalizedCurrent) {
+                // SHA 相同：正好是当前提交，绝不能隐去
+                return false
+            } else {
+                // SHA 不同：HEAD 已移动，属于过去旧提交的失败
+                return true
+            }
+        }
+
+        // 2. 只有在缺少 sha 时，才以领先上游判断
+        return aheadCount > 0
     }
 }

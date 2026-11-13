@@ -86,6 +86,123 @@ final class CITests: XCTestCase {
         XCTAssertNil(CIPipelineIndex.completedStatus([done], ref: "other", sha: "new"))
     }
 
+    func testLatestPipelineByRef() {
+        let p1 = CIPipeline(id: 1, status: .failed, ref: "fix/fgj", sha: "sha1")
+        let p2 = CIPipeline(id: 2, status: .success, ref: "fix/fgj", sha: "sha2")
+        let p3 = CIPipeline(id: 3, status: .running, ref: "feature/x", sha: "sha3")
+        let latest = CIPipelineIndex.latestPipelineByRef([p1, p2, p3])
+        XCTAssertEqual(latest["fix/fgj"]?.id, 1)
+        XCTAssertEqual(latest["fix/fgj"]?.sha, "sha1")
+        XCTAssertEqual(latest["feature/x"]?.id, 3)
+    }
+
+    // MARK: - 侧栏工作树行徽章决策逻辑测试
+
+    func testWorktreeBadgeLogicShowsCIFailureWhenSHAMatchesEvenIfBranchIsAhead() {
+        let pipeline = CIPipeline(id: 10, status: .failed, ref: "fix/fgj", sha: "a1b2c3d4e5f6")
+
+        // 1. SHA 相同，且分支领先上游（例如本地分支领先于 upstream，但提交就是该流水线对应的 commit）
+        // 核心用例：此时失败必须显示，绝不能被隐藏！
+        let statusMatchingAhead = WorktreeBadgeLogic.shouldShowCIStatus(
+            pipeline: pipeline,
+            fallbackStatus: nil,
+            currentHead: "a1b2c3d4e5f6",
+            aheadCount: 3
+        )
+        XCTAssertEqual(statusMatchingAhead, .failed, "SHA 相同且分支领先上游时，失败流水线必须展示，不能被误判为已有新提交！")
+
+        // 2. SHA 相同且 ahead 为 0
+        let statusMatchingClean = WorktreeBadgeLogic.shouldShowCIStatus(
+            pipeline: pipeline,
+            fallbackStatus: nil,
+            currentHead: "a1b2c3d4e5f6",
+            aheadCount: 0
+        )
+        XCTAssertEqual(statusMatchingClean, .failed, "SHA 相同且 ahead 为 0 时应展示失败状态")
+
+        // 3. SHA 不同（在失败提交之后有了新提交，HEAD 发生移动）
+        let statusNewCommit = WorktreeBadgeLogic.shouldShowCIStatus(
+            pipeline: pipeline,
+            fallbackStatus: nil,
+            currentHead: "f6e5d4c3b2a1",
+            aheadCount: 1
+        )
+        XCTAssertNil(statusNewCommit, "当前工作树 HEAD 与流水线 SHA 不同时，旧提交的失败图标必须消失！")
+
+        // 4. 流水线是 running 态，不受 ahead 影响
+        let runningPipeline = CIPipeline(id: 11, status: .running, ref: "fix/fgj", sha: "a1b2c3d4e5f6")
+        let statusRunning = WorktreeBadgeLogic.shouldShowCIStatus(
+            pipeline: runningPipeline,
+            fallbackStatus: nil,
+            currentHead: "otherSHA",
+            aheadCount: 1
+        )
+        XCTAssertEqual(statusRunning, .running, "运行中的状态无论如何都应展示")
+
+        // 5. 缺少 pipeline 对象，仅有 fallback 状态：ahead > 0 应当隐藏，ahead == 0 应当显示
+        let statusFallbackAhead = WorktreeBadgeLogic.shouldShowCIStatus(
+            pipeline: nil,
+            fallbackStatus: .failed,
+            currentHead: "any",
+            aheadCount: 2
+        )
+        XCTAssertNil(statusFallbackAhead)
+
+        let statusFallbackZero = WorktreeBadgeLogic.shouldShowCIStatus(
+            pipeline: nil,
+            fallbackStatus: .failed,
+            currentHead: "any",
+            aheadCount: 0
+        )
+        XCTAssertEqual(statusFallbackZero, .failed)
+    }
+
+    func testWorktreeBadgeLogicShowsMergedPRWhenSHAMatchesEvenIfBranchIsAhead() {
+        let mergedPR = PullRequest(
+            number: 123,
+            title: "Fix bug",
+            state: "MERGED",
+            isDraft: false,
+            headRefName: "fix/fgj",
+            baseRefName: "main",
+            url: "https://example.com/pr/123",
+            updatedAt: Date(),
+            additions: 10,
+            deletions: 2,
+            changedFiles: 1,
+            isCrossRepository: false,
+            labels: [],
+            headRefOid: "commit_merged_sha"
+        )
+
+        // 1. headRefOid 与当前工作树 HEAD 相同，即使本地分支领先上游（ahead > 0）
+        // 核心用例：当前提交就是被合并时的提交，必须展示合并图标！
+        let showWhenMatchingAhead = WorktreeBadgeLogic.shouldShowPullRequestBadge(
+            pr: mergedPR,
+            currentHead: "commit_merged_sha",
+            aheadCount: 4
+        )
+        XCTAssertTrue(showWhenMatchingAhead, "PR headRefOid 与工作树 HEAD 相同但领先上游时，合并图标必须正常展示！")
+
+        // 2. 在合并提交之后有了新提交（HEAD 已不同）
+        let showWhenNewCommit = WorktreeBadgeLogic.shouldShowPullRequestBadge(
+            pr: mergedPR,
+            currentHead: "brand_new_commit_sha",
+            aheadCount: 1
+        )
+        XCTAssertFalse(showWhenNewCommit, "合并后有了新的提交（HEAD 已移动），合并图标必须消失！")
+
+        // 3. 活跃状态的 PR（例如 open），始终展示
+        var openPR = mergedPR
+        openPR.state = "OPEN"
+        let showOpen = WorktreeBadgeLogic.shouldShowPullRequestBadge(
+            pr: openPR,
+            currentHead: "brand_new_commit_sha",
+            aheadCount: 1
+        )
+        XCTAssertTrue(showOpen, "活跃 PR 无论 HEAD 是否改变均应展示")
+    }
+
     // MARK: - 状态规范化
 
     func testGitLabStatusVocabulary() {
