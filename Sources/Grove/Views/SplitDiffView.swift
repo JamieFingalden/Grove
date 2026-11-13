@@ -38,18 +38,33 @@ struct DiffReadingControls: View {
 
             HStack(spacing: 2) {
                 Button {
-                    fontSize = max(DiffReading.minFontSize, fontSize - 0.5)
+                    fontSize = max(DiffReading.minFontSize, fontSize - 1.0)
                 } label: {
                     Image(systemName: "textformat.size.smaller")
                         .font(.system(size: 11))
                         .frame(width: 20, height: 20)
                 }
+                .help("缩小代码字号（当前 \(Int(fontSize))pt）")
+
                 Button {
-                    fontSize = min(DiffReading.maxFontSize, fontSize + 0.5)
+                    fontSize = min(DiffReading.maxFontSize, fontSize + 1.0)
                 } label: {
                     Image(systemName: "textformat.size.larger")
                         .font(.system(size: 11))
                         .frame(width: 20, height: 20)
+                }
+                .help("放大代码字号（当前 \(Int(fontSize))pt）")
+
+                if fontSize != DiffReading.defaultFontSize {
+                    Button {
+                        fontSize = DiffReading.defaultFontSize
+                    } label: {
+                        Text("重置")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 3)
+                    }
+                    .help("恢复默认代码字号（\(Int(DiffReading.defaultFontSize))pt）")
                 }
             }
             .buttonStyle(.borderless)
@@ -59,7 +74,6 @@ struct DiffReadingControls: View {
                 RoundedRectangle(cornerRadius: 6)
                     .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
             }
-            .help("调整代码字号（\(Int(fontSize))pt）")
         }
     }
 }

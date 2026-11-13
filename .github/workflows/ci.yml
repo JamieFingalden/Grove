@@ -57,7 +57,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          latest=$(gh release list --limit 1 --exclude-drafts --exclude-prereleases --json tagName --jq '.[0].tagName // ""' | sed 's/^v//')
+          latest=$(gh release list --limit 1 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName // ""' | sed 's/^v//')
           cask=$(sed -n 's/^  version "\(.*\)"$/\1/p' Casks/grove.rb)
           if [ -n "$latest" ] && [ "$cask" != "$latest" ]; then
             echo "::error::Casks/grove.rb 版本 $cask 与最新已发布版本 $latest 不一致。请按 docs/release/homebrew.md 第 5 步，用发布附件中的 grove.rb 回写 Casks/grove.rb 后重新推送。"

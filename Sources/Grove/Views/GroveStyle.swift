@@ -15,6 +15,7 @@ enum GroveStyle {
 
     static let title = Font.system(size: 16, weight: .semibold)
     static let sectionTitle = Font.system(size: 13, weight: .semibold)
+    static let sidebarSectionHeader = Font.system(size: 11, weight: .semibold)
     static let body = Font.system(size: 13)
     static let metadata = Font.system(size: 12)
     static let caption = Font.system(size: 11)

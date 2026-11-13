@@ -14,7 +14,8 @@ enum StatusParser {
         // 反推无法区分「解码替换出来的」和「名字里本来就有的」。
         var fields: [String] = []
         var undecodableFields: Set<Int> = []
-        for (offset, raw) in data.split(separator: 0, omittingEmptySubsequences: false).map(Data.init).enumerated() {
+        let rawSegments: [Data] = data.split(separator: UInt8(0), omittingEmptySubsequences: false)
+        for (offset, raw) in rawSegments.enumerated() {
             guard !raw.isEmpty else { continue }   // 末尾 NUL 切出的空段
             if let text = String(data: raw, encoding: .utf8) {
                 fields.append(text)

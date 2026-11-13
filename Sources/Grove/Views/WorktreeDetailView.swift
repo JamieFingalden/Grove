@@ -27,30 +27,9 @@ struct WorktreeDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            WorktreeHeader(model: model, sheet: $sheet)
+            WorktreeHeader(model: model, tab: $tab, sheet: $sheet)
 
-            Rectangle()
-                .fill(Color(nsColor: .separatorColor).opacity(0.45))
-                .frame(height: 1)
-
-            Picker("视图", selection: $tab) {
-                ForEach(Tab.allCases) { tab in
-                    Label(tab.label, systemImage: tab.systemImage).tag(tab)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.small)
-            .fixedSize()
-            // 跟标题、内容一样左对齐。放在 VStack 里不管的话会居中，
-            // 页面上其他东西全都靠左，只有它飘在中间，看着像没写完。
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, GroveStyle.Space.lg)
-            .padding(.vertical, 6)
-
-            Rectangle()
-                .fill(Color(nsColor: .separatorColor).opacity(0.45))
-                .frame(height: 1)
+            Divider()
 
             ZStack {
                 ChangesView(model: model).retainedPage(tab == .changes)
@@ -102,6 +81,7 @@ struct WorktreeDetailView: View {
 private struct WorktreeHeader: View {
     @Environment(AppModel.self) private var appModel
     @Bindable var model: WorktreeModel
+    @Binding var tab: WorktreeDetailView.Tab
     @Binding var sheet: RootView.ActiveSheet?
 
     var body: some View {
@@ -120,7 +100,7 @@ private struct WorktreeHeader: View {
             if let operation = model.steppableOperation { operationBanner(operation) }
 
             if let pullRequest = model.linkedPullRequest {
-                PullRequestSummaryCard(pullRequest: pullRequest)
+                PullRequestSummaryCard(repository: model.repository, pullRequest: pullRequest)
             }
 
             if let activity = model.activity {
@@ -129,10 +109,21 @@ private struct WorktreeHeader: View {
                     Text(activity).font(.caption).foregroundStyle(.secondary)
                 }
             }
+
+            Picker("视图", selection: $tab) {
+                ForEach(WorktreeDetailView.Tab.allCases) { tab in
+                    Label(tab.label, systemImage: tab.systemImage).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+            .fixedSize()
+            .padding(.top, 2)
         }
         .padding(.horizontal, GroveStyle.Space.lg)
         .padding(.top, GroveStyle.Space.md)
-        .padding(.bottom, GroveStyle.Space.md)
+        .padding(.bottom, 10)
         .background(.bar)
     }
 
@@ -413,12 +404,12 @@ private struct WorktreeHeader: View {
         switch model.pullRequestAction {
         case .view(let pullRequest):
             Button {
-                SystemActions.openInBrowser(pullRequest.url)
+                navigateToPullRequest(pullRequest)
             } label: {
-                Label("查看 \(pullRequest.displayNumber)", symbol: .external, size: .small)
+                Label("评审 \(pullRequest.displayNumber)", symbol: .pullRequest(status: pullRequest.status), size: .small)
             }
             .buttonStyle(.bordered)
-            .help(pullRequest.title)
+            .help("\(pullRequest.title)（点击在 Grove 站内评审）")
 
         case .create:
             Button {
@@ -437,6 +428,16 @@ private struct WorktreeHeader: View {
             .buttonStyle(.bordered)
             .disabled(true)
             .help(reason)
+        }
+    }
+
+    private func navigateToPullRequest(_ pullRequest: PullRequest) {
+        if let repository = model.repository {
+            appModel.navigation.route = .init(repository: repository.id, pullRequest: pullRequest)
+            appModel.navigation.page = .repositories
+            appModel.selection = .repositoryHome(repository: repository.id)
+        } else {
+            SystemActions.openInBrowser(pullRequest.url)
         }
     }
 
@@ -540,60 +541,96 @@ private struct WorktreeHeader: View {
 // MARK: - PR 摘要卡片
 
 struct PullRequestSummaryCard: View {
+    @Environment(AppModel.self) private var appModel
+    var repository: RepositoryModel?
     let pullRequest: PullRequest
 
     var body: some View {
         HStack(spacing: 10) {
-            GroveSymbolView(.pullRequest(status: pullRequest.status), size: .medium, role: .custom(statusTint))
-                .frame(width: 18)
+            Button {
+                openInAppReview()
+            } label: {
+                HStack(spacing: 10) {
+                    GroveSymbolView(.pullRequest(status: pullRequest.status), size: .medium, role: .custom(statusTint))
+                        .frame(width: 18)
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text("#\(pullRequest.number)")
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(statusTint)
-                    Text(pullRequest.title)
-                        .font(.system(size: 12.5, weight: .medium))
-                        .lineLimit(1)
-                }
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text("#\(pullRequest.number)")
+                                .font(.system(size: 11, weight: .bold, design: .rounded))
+                                .monospacedDigit()
+                                .foregroundStyle(statusTint)
+                            Text(pullRequest.title)
+                                .font(.system(size: 12.5, weight: .medium))
+                                .lineLimit(1)
+                                .foregroundStyle(.primary)
+                        }
 
-                HStack(spacing: 8) {
-                    Text("\(pullRequest.headRefName) → \(pullRequest.baseRefName)")
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                        HStack(spacing: 8) {
+                            Text("\(pullRequest.headRefName) → \(pullRequest.baseRefName)")
+                                .lineLimit(1)
+                                .truncationMode(.middle)
 
-                    if let review = pullRequest.review.label,
-                       let icon = pullRequest.review.systemImage {
-                        Label(review, systemImage: icon)
-                            .foregroundStyle(reviewTint)
+                            if let review = pullRequest.review.label,
+                               let icon = pullRequest.review.systemImage {
+                                Label(review, systemImage: icon)
+                                    .foregroundStyle(reviewTint)
+                            }
+                            if let checks = pullRequest.checks.label,
+                               let icon = pullRequest.checks.systemImage {
+                                Label(checks, systemImage: icon)
+                                    .foregroundStyle(checksTint)
+                            }
+                        }
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
                     }
-                    if let checks = pullRequest.checks.label,
-                       let icon = pullRequest.checks.systemImage {
-                        Label(checks, systemImage: icon)
-                            .foregroundStyle(checksTint)
+
+                    Spacer(minLength: 8)
+
+                    HStack(spacing: 4) {
+                        Text("站内评审")
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
                     }
+                    .font(GroveStyle.caption)
+                    .foregroundStyle(statusTint)
                 }
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
 
-            Spacer(minLength: 8)
+            Rectangle()
+                .fill(statusTint.opacity(0.2))
+                .frame(width: 1, height: 16)
 
             Button {
                 SystemActions.openInBrowser(pullRequest.url)
             } label: {
                 Image(systemName: "arrow.up.forward.square")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
             }
             .buttonStyle(.borderless)
-            .help("在浏览器打开")
+            .help("在浏览器中打开")
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 9))
+        .padding(.vertical, 8)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
         .overlay {
-            RoundedRectangle(cornerRadius: 9)
-                .stroke(statusTint.opacity(0.25), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(statusTint.opacity(0.25), lineWidth: 0.8)
+        }
+    }
+
+    private func openInAppReview() {
+        if let repository {
+            appModel.navigation.route = .init(repository: repository.id, pullRequest: pullRequest)
+            appModel.navigation.page = .repositories
+            appModel.selection = .repositoryHome(repository: repository.id)
+        } else {
+            SystemActions.openInBrowser(pullRequest.url)
         }
     }
 

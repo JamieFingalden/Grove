@@ -146,6 +146,16 @@ enum CIPipelineIndex {
         }
         return result
     }
+
+    static func latestPipelineByRef(_ pipelines: [CIPipeline]) -> [String: CIPipeline] {
+        var result: [String: CIPipeline] = [:]
+        for pipeline in pipelines where !pipeline.ref.isEmpty {
+            if result[pipeline.ref] == nil {
+                result[pipeline.ref] = pipeline
+            }
+        }
+        return result
+    }
 }
 
 /// 展示用的格式化。集中在这里，列表、详情、日志共用一份。

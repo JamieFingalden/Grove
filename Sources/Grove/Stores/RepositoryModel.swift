@@ -348,6 +348,7 @@ final class RepositoryModel: Identifiable {
         for model in worktreeModels.values { model.linkedPullRequest = nil }
         listState = .open
         pipelineStatusByRef = [:]
+        latestPipelineByRef = [:]
         pipelineWatchTask?.cancel()
     }
 
@@ -542,10 +543,12 @@ final class RepositoryModel: Identifiable {
     /// 分支 → 它最新一条流水线的状态。侧边栏工作树行的小点用。
     /// 来源有三处：启动探测、抓取/刷新、CI 分栏的轮询 —— 都是拿到新列表就覆盖。
     private(set) var pipelineStatusByRef: [String: CIStatus] = [:]
+    private(set) var latestPipelineByRef: [String: CIPipeline] = [:]
 
     func updatePipelineStatuses(from pipelines: [CIPipeline], fromOrigin expectedOrigin: GitRemote?) {
         guard origin == expectedOrigin else { return }
         pipelineStatusByRef = CIPipelineIndex.latestStatusByRef(pipelines)
+        latestPipelineByRef = CIPipelineIndex.latestPipelineByRef(pipelines)
     }
 
     /// 拉一份流水线列表刷新分支状态点。失败静默：这只是装饰性信息。
